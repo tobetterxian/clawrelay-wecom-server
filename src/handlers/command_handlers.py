@@ -6,8 +6,8 @@
 """
 
 import logging
-from typing import Dict, Optional
-from src.utils.weixin_utils import MessageBuilder, TemplateCardBuilder, StreamManager
+from typing import Dict
+from src.utils.weixin_utils import MessageBuilder, TemplateCardBuilder
 from src.utils.database import get_user_name_by_wework_user_id
 
 logger = logging.getLogger(__name__)
@@ -16,12 +16,7 @@ logger = logging.getLogger(__name__)
 class CommandHandler:
     """命令处理器基类"""
 
-    def __init__(self):
-        # 每个命令处理器创建自己的StreamManager实例
-        # 状态会在TextMessageHandler中合并到全局StreamManager
-        self.stream_mgr = StreamManager()
-
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         """
         处理命令
 
@@ -31,8 +26,7 @@ class CommandHandler:
             user_id: 用户ID
 
         Returns:
-            (消息JSON字符串, StreamManager实例或None) 元组
-            如果创建了流式消息,返回StreamManager实例以便合并状态
+            (消息JSON字符串, None) 元组
         """
         raise NotImplementedError
 
@@ -40,7 +34,7 @@ class CommandHandler:
 class HelpCommandHandler(CommandHandler):
     """帮助命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         help_text = """🤖 **ClawRelay Bot - Demo Commands**
 
 📝 **Basic:**
@@ -67,7 +61,7 @@ class HelpCommandHandler(CommandHandler):
 class HelloCommandHandler(CommandHandler):
     """Hello命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         user_name = get_user_name_by_wework_user_id(user_id)
         if user_name:
             reply_content = f"欢迎你：{user_name}"
@@ -79,125 +73,15 @@ class HelloCommandHandler(CommandHandler):
 class TextCommandHandler(CommandHandler):
     """文本命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         reply_content = "这是一个简单的文本回复示例。\n\n支持**Markdown**格式\n- 列表项1\n- 列表项2"
         return MessageBuilder.text(stream_id, reply_content, finish=True), None
-
-
-class StreamCommandHandler(CommandHandler):
-    """流式消息命令处理器"""
-
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
-        paragraphs = [
-            "🚀 **流式输出演示开始**\n\n",
-            "流式输出让消息逐步显示,提升用户体验。\n\n",
-            "✨ **特点1**: 实时反馈\n",
-            "✨ **特点2**: 降低等待焦虑\n",
-            "✨ **特点3**: 适合长文本场景\n\n",
-            "✅ 流式输出演示完成！"
-        ]
-        first_content = self.stream_mgr.create_stream(stream_id, paragraphs)
-        return MessageBuilder.stream_with_card(stream_id, first_content, finish=False), self.stream_mgr
-
-
-class StreamThinkCommandHandler(CommandHandler):
-    """流式+思考命令处理器"""
-
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
-        paragraphs = [
-            "<think>\n正在分析您的问题...\n\n查询相关资料中...\n</think>\n\n",
-            "根据您的问题，我建议：\n\n",
-            "1️⃣ **首先**检查网络连接状态\n",
-            "2️⃣ **然后**重启相关服务\n",
-            "3️⃣ **最后**验证配置是否正确\n\n",
-            "✅ 问题分析完成！"
-        ]
-        first_content = self.stream_mgr.create_stream(
-            stream_id, paragraphs, with_think=True
-        )
-        return MessageBuilder.stream_with_card(stream_id, first_content, finish=False), self.stream_mgr
-
-
-class StreamImageCommandHandler(CommandHandler):
-    """流式+图片命令处理器"""
-
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
-        paragraphs = [
-            "📸 **图片生成中**\n\n",
-            "正在处理您的请求...\n\n",
-            "图片已准备就绪,请查收："
-        ]
-        first_content = self.stream_mgr.create_stream(
-            stream_id, paragraphs, with_image=True
-        )
-        return MessageBuilder.stream_with_card(stream_id, first_content, finish=False), self.stream_mgr
-
-
-class StreamCardCommandHandler(CommandHandler):
-    """流式+卡片命令处理器"""
-
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
-        paragraphs = [
-            "🎴 **流式消息+模板卡片演示**\n\n",
-            "✨ 流式输出让消息逐步显示\n",
-            "📋 模板卡片提供丰富的展示效果\n\n",
-            "✅ 演示完成！请查看下方卡片获取更多信息。"
-        ]
-        first_content = self.stream_mgr.create_stream(
-            stream_id, paragraphs, with_template_card=True
-        )
-
-        # 构造模板卡片
-        template_card = {
-            "card_type": "news_notice",
-            "source": {
-                "icon_url": "",
-                "desc": "企业微信智能机器人",
-                "desc_color": 1
-            },
-            "main_title": {
-                "title": "📱 流式消息+模板卡片",
-                "desc": "结合流式输出与模板卡片的完整示例"
-            },
-            "card_image": {
-                "url": "",
-                "aspect_ratio": 1.3
-            },
-            "image_text_area": {
-                "type": 1,
-                "url": "https://work.weixin.qq.com",
-                "title": "🎯 流式消息演示",
-                "desc": "流式输出提升用户体验,模板卡片提供丰富展示",
-                "image_url": ""
-            },
-            "vertical_content_list": [
-                {"title": "💬 流式输出", "desc": "逐步显示内容,降低用户等待焦虑"},
-                {"title": "🎴 模板卡片", "desc": "提供图文、按钮、投票等丰富交互"}
-            ],
-            "horizontal_content_list": [
-                {"keyname": "适用场景", "value": "AI对话"},
-                {"keyname": "用户体验", "value": "⭐⭐⭐⭐⭐"}
-            ],
-            "jump_list": [
-                {"type": 1, "url": "https://work.weixin.qq.com", "title": "📖 查看更多"},
-                {"type": 3, "title": "💬 智能问答", "question": "help"}
-            ],
-            "card_action": {"type": 1, "url": "https://work.weixin.qq.com"},
-            "task_id": f"stream_card_{stream_id}"
-        }
-
-        # 标记卡片已发送
-        self.stream_mgr.stream_states[stream_id]['template_card_sent'] = True
-
-        return MessageBuilder.stream_with_card(
-            stream_id, first_content, finish=False, template_card=template_card
-        ), self.stream_mgr
 
 
 class TextCardCommandHandler(CommandHandler):
     """文本卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.text_notice(
             task_id=f"text_notice_{stream_id}",
             title="📢 系统通知",
@@ -237,7 +121,7 @@ class TextCardCommandHandler(CommandHandler):
 class NewsCardCommandHandler(CommandHandler):
     """图文卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.news_notice(
             task_id=f"news_notice_{stream_id}",
             title="🖼️ 图文展示",
@@ -280,7 +164,7 @@ class NewsCardCommandHandler(CommandHandler):
 class ButtonCardCommandHandler(CommandHandler):
     """按钮卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.button_interaction(
             task_id=f"button_interaction_{stream_id}",
             title="🔘 请选择操作",
@@ -326,7 +210,7 @@ class ButtonCardCommandHandler(CommandHandler):
 class VoteCardCommandHandler(CommandHandler):
     """投票卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.vote_interaction(
             task_id=f"vote_interaction_{stream_id}",
             title="📊 团建活动投票",
@@ -348,7 +232,7 @@ class VoteCardCommandHandler(CommandHandler):
 class FormCardCommandHandler(CommandHandler):
     """表单卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.multiple_interaction(
             task_id=f"multiple_interaction_{stream_id}",
             title="📝 信息收集表",
@@ -385,7 +269,7 @@ class FormCardCommandHandler(CommandHandler):
 class WelcomeCardCommandHandler(CommandHandler):
     """欢迎卡片命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         user_name = get_user_name_by_wework_user_id(user_id) or "朋友"
         template_card = TemplateCardBuilder.text_notice(
             task_id=f"welcome_{stream_id}",
@@ -408,7 +292,7 @@ class WelcomeCardCommandHandler(CommandHandler):
 class DataDisplayCommandHandler(CommandHandler):
     """数据展示命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         template_card = TemplateCardBuilder.text_notice(
             task_id=f"data_display_{stream_id}",
             title="📈 今日数据概览",
@@ -431,7 +315,7 @@ class DataDisplayCommandHandler(CommandHandler):
 class DefaultCommandHandler(CommandHandler):
     """默认命令处理器"""
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         reply_content = f"Hello World! 我收到了你的消息: {cmd}\n\n💡 发送 **help** 查看所有测试命令"
         return MessageBuilder.text(stream_id, reply_content, finish=True), None
 
@@ -448,10 +332,6 @@ class CommandRouter:
             "？": HelpCommandHandler(),
             "hello": HelloCommandHandler(),
             "文本": TextCommandHandler(),
-            "流式": StreamCommandHandler(),
-            "流式+思考": StreamThinkCommandHandler(),
-            "流式+图片": StreamImageCommandHandler(),
-            "流式+卡片": StreamCardCommandHandler(),
             "文本卡片": TextCardCommandHandler(),
             "图文卡片": NewsCardCommandHandler(),
             "按钮卡片": ButtonCardCommandHandler(),
@@ -475,7 +355,7 @@ class CommandRouter:
         else:
             logger.warning(f"命令处理器 {handler.__class__.__name__} 缺少 command 属性，跳过注册")
 
-    def route(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def route(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         """
         路由命令到对应的处理器
 

@@ -9,9 +9,7 @@ To create your own commands:
 4. Add the module path to your bot's custom_command_modules in the database
 """
 
-from typing import Optional
 from src.handlers.command_handlers import CommandHandler
-from src.utils.weixin_utils import StreamManager
 
 
 class EchoCommandHandler(CommandHandler):
@@ -19,7 +17,7 @@ class EchoCommandHandler(CommandHandler):
     command = "echo"
     description = "Echo back your message"
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         text = cmd.replace("/echo", "", 1).strip()
         if not text:
             return "Usage: /echo <your message>", None
@@ -31,7 +29,7 @@ class PingCommandHandler(CommandHandler):
     command = "ping"
     description = "Check if the bot is alive"
 
-    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, Optional[StreamManager]]:
+    def handle(self, cmd: str, stream_id: str, user_id: str) -> tuple[str, None]:
         return "Pong!", None
 
 
