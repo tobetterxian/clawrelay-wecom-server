@@ -21,6 +21,9 @@ requests==2.31.0
 httpx==0.28.1
 aiohttp==3.9.1
 
+# WebSocket客户端
+websockets==14.2
+
 # === Optional Dependencies ===
 
 # Redis (for session caching)
