@@ -127,11 +127,11 @@ class ClaudeRelayOrchestrator:
             thinking_buf = ""
             effective_system_prompt = self._build_effective_system_prompt(is_new_session)
 
-            # 构建 session URL 链接（每次消息都展示）
+            # 仅新会话首条消息预置聊天记录链接
             session_url = f"{self.adapter.relay_url}/session/{relay_session_id}"
-            session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})"
+            session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})" if is_new_session else ""
 
-            # 立即推送初始状态（thinking + session link），不等 AI 返回
+            # 立即推送初始 thinking 状态（不闭合 think 标签，显示"正在思考"）
             if on_stream_delta:
                 await on_stream_delta(
                     self._build_display_content(thinking_lines, thinking_buf, session_link, ""),
@@ -190,14 +190,17 @@ class ClaudeRelayOrchestrator:
 
             # 完成时添加完成标记
             thinking_lines.append("✨ 回复完成")
-            final_display = self._build_display_content(thinking_lines, thinking_buf, session_link, accumulated_text)
+            final_display = self._build_display_content(
+                thinking_lines, thinking_buf, session_link, accumulated_text, finished=True,
+            )
 
             # 通知完成
             if on_stream_delta:
                 await on_stream_delta(final_display, True)
 
-            # 日志中记录含 session link 的完整文本
-            accumulated_text = f"{session_link}\n\n{accumulated_text}"
+            # 日志中始终记录含 session link 的完整文本
+            log_session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})"
+            accumulated_text = f"{log_session_link}\n\n{accumulated_text}"
 
             latency_ms = int((time.time() - start_time) * 1000)
             log_context['session_key'] = effective_key
@@ -307,11 +310,11 @@ class ClaudeRelayOrchestrator:
             thinking_buf = ""
             effective_system_prompt = self._build_effective_system_prompt(is_new_session)
 
-            # 构建 session URL 链接
+            # 仅新会话首条消息预置聊天记录链接
             session_url = f"{self.adapter.relay_url}/session/{relay_session_id}"
-            session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})"
+            session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})" if is_new_session else ""
 
-            # 立即推送初始状态
+            # 立即推送初始 thinking 状态（不闭合 think 标签）
             if on_stream_delta:
                 await on_stream_delta(
                     self._build_display_content(thinking_lines, thinking_buf, session_link, ""),
@@ -360,12 +363,15 @@ class ClaudeRelayOrchestrator:
             )
 
             thinking_lines.append("✨ 回复完成")
-            final_display = self._build_display_content(thinking_lines, thinking_buf, session_link, accumulated_text)
+            final_display = self._build_display_content(
+                thinking_lines, thinking_buf, session_link, accumulated_text, finished=True,
+            )
 
             if on_stream_delta:
                 await on_stream_delta(final_display, True)
 
-            accumulated_text = f"{session_link}\n\n{accumulated_text}"
+            log_session_link = f"📎 查看实时聊天记录：[链接>>]({session_url})"
+            accumulated_text = f"{log_session_link}\n\n{accumulated_text}"
 
             latency_ms = int((time.time() - start_time) * 1000)
             log_context['session_key'] = effective_key
@@ -446,8 +452,13 @@ class ClaudeRelayOrchestrator:
         thinking_buf: str,
         session_link: str,
         text: str,
+        finished: bool = False,
     ) -> str:
-        """构建组合展示内容: <think>block</think> + session_link + text"""
+        """构建组合展示内容: <think>block</think> + session_link + text
+
+        thinking 阶段（text 为空且未完成）保持 <think> 不闭合，
+        让企业微信显示"正在思考"而非"已完成思考"。
+        """
         parts = []
         if thinking_lines or thinking_buf:
             lines = list(thinking_lines)
@@ -455,8 +466,13 @@ class ClaudeRelayOrchestrator:
                 preview = thinking_buf[-200:]
                 prefix = "..." if len(thinking_buf) > 200 else ""
                 lines.append(f"💭 {prefix}{preview}")
-            parts.append("<think>\n" + "\n".join(lines) + "\n</think>")
-        parts.append(session_link)
+            think_content = "<think>\n" + "\n".join(lines)
+            # 有回复文本或已完成时闭合 think 块，否则保持开放
+            if text or finished:
+                think_content += "\n</think>"
+            parts.append(think_content)
+        if session_link:
+            parts.append(session_link)
         if text:
             parts.append(text)
         return "\n\n".join(parts)

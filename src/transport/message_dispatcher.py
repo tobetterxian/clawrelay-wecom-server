@@ -310,7 +310,9 @@ class MessageDispatcher:
 
     async def _handle_mixed(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理图文混排消息"""
-        items = body.get("mixed", {}).get("msg_item", [])
+        mixed_data = body.get("mixed", {})
+        # 企业微信回调字段名为 msg_item（兼容 items）
+        items = mixed_data.get("msg_item") or mixed_data.get("items") or []
         if not items:
             return
 
@@ -324,13 +326,19 @@ class MessageDispatcher:
             elif item_type == "image":
                 image_url = item.get("image", {}).get("url", "")
                 aeskey = item.get("image", {}).get("aeskey", "")
-                if image_url:
+                if image_url and aeskey:
                     try:
-                        data_uri = await ImageUtils.download_and_decrypt_to_base64(image_url, aeskey)
+                        data_uri = await ImageUtils.download_and_decrypt_to_base64(
+                            image_url, aeskey, key_format="auto",
+                        )
                         content_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
                     except Exception as e:
                         logger.warning("[Dispatcher:%s] 混排图片解密失败: %s", self.bot_key, e)
-                        content_blocks.append({"type": "text", "text": "[图片处理失败]"})
+                        content_blocks.append({"type": "text", "text": "[图片加载失败]"})
+                elif image_url:
+                    content_blocks.append({"type": "text", "text": "[图片]"})
+                else:
+                    content_blocks.append({"type": "text", "text": "[图片]"})
 
         if not content_blocks:
             return

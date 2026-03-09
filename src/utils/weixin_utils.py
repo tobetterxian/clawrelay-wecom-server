@@ -518,13 +518,14 @@ class FileUtils:
     MAX_FILE_SIZE = int(os.getenv('WEIXIN_MAX_FILE_SIZE', str(20 * 1024 * 1024)))
 
     @staticmethod
-    async def download_and_decrypt(url: str, aes_key: str, timeout: int = 30) -> tuple:
+    async def download_and_decrypt(url: str, aes_key: str, timeout: int = 30, key_format: str = "auto") -> tuple:
         """下载企业微信加密文件并解密为原始字节
 
         Args:
             url: 企业微信文件下载 URL（加密的，5分钟内有效）
-            aes_key: 消息中的 aeskey（Base64编码，用于 AES-256-CBC 解密）
+            aes_key: 消息中的 aeskey（用于 AES-256-CBC 解密）
             timeout: 下载超时时间（秒）
+            key_format: 密钥格式（"base64"/"hex"/"auto"）
 
         Returns:
             (file_bytes, detected_filename): 解密后的字节数据和从响应头检测的文件名
@@ -532,7 +533,6 @@ class FileUtils:
         Raises:
             Exception: 下载失败、解密失败或文件超限时抛出
         """
-        import base64
         from Crypto.Cipher import AES
         import aiohttp
         import re
@@ -564,7 +564,7 @@ class FileUtils:
         )
 
         # 2. AES-256-CBC 解密
-        key = base64.b64decode(aes_key + "=")
+        key = ImageUtils._resolve_aes_key(aes_key, key_format)
         iv = key[:16]
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(encrypted_data)
@@ -675,17 +675,48 @@ class ImageUtils:
     """图片处理工具类"""
 
     @staticmethod
+    def _resolve_aes_key(key_str: str, key_format: str = "base64") -> bytes:
+        """将密钥字符串转换为 32 字节 AES 密钥
+
+        Args:
+            key_str: 密钥字符串
+            key_format: 密钥格式
+                - "base64": Webhook 模式的 EncodingAESKey（43字符 Base64）
+                - "hex": WebSocket 模式的独立 aeskey（64字符 hex）
+                - "auto": 自动检测格式（优先尝试 hex，失败则 base64）
+
+        Returns:
+            32 字节的 AES 密钥
+        """
+        import base64
+
+        if key_format == "auto":
+            try:
+                key = bytes.fromhex(key_str)
+                if len(key) == 32:
+                    return key
+            except ValueError:
+                pass
+            return base64.b64decode(key_str + "=")
+        elif key_format == "hex":
+            return bytes.fromhex(key_str)
+        else:
+            return base64.b64decode(key_str + "=")
+
+    @staticmethod
     async def download_and_decrypt_to_base64(
         url: str,
         aes_key: str,
         timeout: int = 10,
+        key_format: str = "auto",
     ) -> str:
         """下载企业微信加密图片并解密为 base64 data URI
 
         Args:
             url: 企业微信图片下载 URL
-            aes_key: 消息中的 aeskey（Base64编码，用于 AES-256-CBC 解密）
+            aes_key: 消息中的 aeskey（用于 AES-256-CBC 解密）
             timeout: 下载超时时间（秒）
+            key_format: 密钥格式（"base64"/"hex"/"auto"）
 
         Returns:
             data URI 字符串，如 "data:image/jpeg;base64,/9j/4AAQ..."
@@ -708,7 +739,7 @@ class ImageUtils:
         logger.info(f"[ImageUtils] 下载加密图片完成: size={len(encrypted_data)} bytes")
 
         # 2. AES-256-CBC 解密
-        key = base64.b64decode(aes_key + "=")
+        key = ImageUtils._resolve_aes_key(aes_key, key_format)
         iv = key[:16]
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(encrypted_data)
