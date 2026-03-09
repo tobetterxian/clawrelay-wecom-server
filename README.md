@@ -1,162 +1,125 @@
 # ClawRelay WeCom Server
 
-企业微信 AI 机器人中转服务端 — 连接 [clawrelay-api](https://github.com/anthropics/clawrelay-api)，让 Claude Code 驱动你的企业微信机器人。
+让企业微信机器人接入 AI —— 三步启动，开箱即用。
 
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
----
-
-## 它做什么？
-
-用户在企业微信里发消息 → 本服务通过 WebSocket 长连接接收 → SSE 流式调用 clawrelay-api → Claude Code CLI 处理请求 → 实时推送回复到企业微信。
-
 ```
-┌──────────┐    WSS     ┌─────────────────────────┐   SSE    ┌───────────────┐
-│ 企业微信  │ ◄───────► │  ClawRelay WeCom Server  │ ──────► │ clawrelay-api │
-│          │  长连接     │  (Python asyncio)        │ ◄────── │ (Go :50009)   │
-└──────────┘             │                           │  流式响应 └───────┬───────┘
-                         │  • WebSocket 长连接       │                   │
-                         │  • 多机器人管理            │                   ▼
-                         │  • 流式思考展示            │          ┌───────────────┐
-                         │  • 会话 & 日志管理         │          │ Claude Code   │
-                         └─────────────────────────┘          │ CLI           │
-                                                               └───────────────┘
+企业微信用户发消息 → 本服务 WebSocket 接收 → clawrelay-api → Claude Code 处理 → 流式回复推送
 ```
 
-## 功能特性
-
-| 特性 | 说明 |
-|------|------|
-| **WebSocket 长连接** | 无需公网 IP、回调 URL，通过 WSS 连接企业微信 |
-| **零数据库依赖** | YAML 配置文件 + 内存会话 + JSONL 日志，开箱即用 |
-| **多机器人管理** | 一个服务托管多个机器人，YAML 配置即加即用 |
-| **流式推送** | 500ms 节流推送，实时展示 AI 回复 |
-| **会话管理** | 自动过期（2h），支持 `reset` / `new` 重置会话 |
-| **多模态** | 文本 / 图片 / 语音 / 文件 / 图文混排 |
-| **自定义命令** | 模块化扩展，动态加载 |
-| **用户白名单** | 按机器人维度的访问控制 |
-| **聊天日志** | JSONL 格式记录到 `logs/chat.jsonl` |
-
-## 前置条件
-
-- Python 3.12+
-- [clawrelay-api](https://github.com/anthropics/clawrelay-api) 运行在 50009 端口
-- 企业微信管理员账号（创建智能机器人，获取 bot_id 和 secret）
+**无需公网 IP**，无需回调 URL，无需数据库。通过 WebSocket 长连接直连企业微信，YAML 配置即用。
 
 ---
 
-## 快速开始
+## 30 秒了解
 
-### 方式一：Docker Compose（推荐）
+你需要准备：
 
-```bash
-git clone https://github.com/wxkingstar/clawrelay-wecom-server.git
-cd clawrelay-wecom-server
+1. **企业微信智能机器人**的 `bot_id` 和 `secret`（从企业微信管理后台 → 应用管理 → 智能机器人 获取）
+2. **[clawrelay-api](https://github.com/anthropics/clawrelay-api)** 运行在本机（默认端口 50009）
 
-# 编辑配置文件，填入机器人凭据
-cp config/bots.yaml config/bots.yaml  # 已包含示例，直接编辑即可
-vim config/bots.yaml
-
-# 一键启动
-docker compose up -d
-```
-
-> 应用通过 `host.docker.internal` 连接宿主机上的 clawrelay-api。
+然后：
 
 ```bash
-# 查看日志
-docker compose logs -f app
-
-# 停止
-docker compose down
-```
-
-### 方式二：手动部署
-
-```bash
-# 1. 克隆并安装依赖
 git clone https://github.com/wxkingstar/clawrelay-wecom-server.git
 cd clawrelay-wecom-server
 pip install -r requirements.txt
-
-# 2. 配置机器人
-vim config/bots.yaml  # 填入 bot_id、secret、relay_url
-
-# 3. 启动
 python main.py
+```
+
+首次启动会自动进入**配置向导**，按提示填入 `bot_id` 和 `secret` 即可：
+
+```
+============================================================
+  ClawRelay WeCom Server — 首次配置向导
+============================================================
+
+  bot_id（企业微信机器人 ID）: __________
+  secret（企业微信机器人密钥）: __________
+  relay_url（clawrelay-api 地址）[http://localhost:50009]: __________
+
+  配置已保存到 config/bots.yaml
+```
+
+配置完成，服务自动启动 WebSocket 连接。去企业微信给机器人发条消息试试吧。
+
+---
+
+## Docker 部署
+
+```bash
+git clone https://github.com/wxkingstar/clawrelay-wecom-server.git
+cd clawrelay-wecom-server
+
+# 编辑配置（Docker 中不支持交互式向导，需提前填写）
+vim config/bots.yaml
+
+docker compose up -d
+```
+
+> Docker 模式下 `relay_url` 需使用 `http://host.docker.internal:50009`（而非 `localhost`）连接宿主机的 clawrelay-api。
+
+```bash
+docker compose logs -f app   # 查看日志
+docker compose down           # 停止
 ```
 
 ---
 
-## 机器人配置
+## 功能一览
 
-编辑 `config/bots.yaml`：
+| 特性 | 说明 |
+|------|------|
+| **WebSocket 长连接** | 无需公网 IP、回调 URL，WSS 直连企业微信 |
+| **零外部依赖** | 无数据库，YAML 配置 + 内存会话 + JSONL 日志 |
+| **首次配置向导** | 启动即引导，无需手动编辑配置文件 |
+| **多机器人** | 一个服务托管多个机器人，YAML 中加一段配置即可 |
+| **流式回复** | 500ms 节流推送，实时展示 AI 回复 |
+| **多模态** | 文本 / 图片 / 语音 / 文件 / 图文混排 |
+| **会话管理** | 2h 自动过期，发送 `reset` 或 `new` 手动重置 |
+| **自定义命令** | 模块化扩展，动态加载 |
+| **用户白名单** | 按机器人维度的访问控制 |
+
+---
+
+## 配置说明
+
+配置文件：`config/bots.yaml`
 
 ```yaml
 bots:
   my_bot:
-    # [必填] 企业微信机器人凭据
+    # === 必填 ===
     bot_id: "YOUR_BOT_ID"
     secret: "YOUR_BOT_SECRET"
+    relay_url: "http://localhost:50009"    # Docker 中改为 http://host.docker.internal:50009
 
-    # [必填] clawrelay-api 地址
-    relay_url: "http://localhost:50009"
-
-    # [可选]
-    name: "My Bot"                    # 机器人名称（用于过滤群聊 @提及）
-    description: "My AI assistant"    # 描述
-    working_dir: "/path/to/project"   # Claude 工作目录
-    model: "claude-sonnet-4-6"        # 模型名称
+    # === 可选 ===
+    name: "My Bot"                         # 机器人名称（群聊中过滤 @提及）
+    description: "My AI assistant"
+    working_dir: "/path/to/project"        # Claude 工作目录
+    model: "claude-sonnet-4-6"             # 模型名称
     system_prompt: "You are a helpful assistant."
 
-    # [可选] 用户白名单（不设置 = 不限制）
-    allowed_users:
+    allowed_users:                          # 用户白名单（不设 = 不限制）
       - "user_id_1"
-      - "user_id_2"
 
-    # [可选] 注入 Claude 子进程的环境变量
-    env_vars:
+    env_vars:                               # 注入 Claude 子进程的环境变量
       MY_API_KEY: "xxx"
 
-    # [可选] 自定义命令模块
-    custom_commands:
+    custom_commands:                        # 自定义命令模块
       - "src.handlers.custom.demo_commands"
 ```
 
-### 配置字段说明
-
-| 字段 | 必填 | 说明 |
-|------|:----:|------|
-| `bot_id` | ✅ | 企业微信 bot_id |
-| `secret` | ✅ | 企业微信机器人 secret |
-| `relay_url` | ✅ | clawrelay-api 地址 |
-| `name` | | 机器人名称（群聊中过滤 @提及） |
-| `working_dir` | | Claude 工作目录 |
-| `model` | | 模型名称 |
-| `system_prompt` | | 系统提示词 |
-| `allowed_users` | | 用户白名单（列表，不设 = 不限制） |
-| `env_vars` | | 环境变量注入（key-value 映射） |
-| `custom_commands` | | 自定义命令模块路径列表 |
-
----
-
-## 环境变量
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `BOT_CONFIG_PATH` | 机器人配置文件路径 | `config/bots.yaml` |
-| `CHAT_LOG_DIR` | 聊天日志目录 | `logs` |
-| `WEIXIN_AGENT_TIMEOUT_SECONDS` | 任务超时时间（秒） | `30` |
-| `WEIXIN_MAX_FILE_SIZE` | 文件上传大小限制（字节） | `20971520` (20MB) |
+添加多个机器人只需在 `bots:` 下增加新的配置块，重启生效。
 
 ---
 
 ## 自定义命令
 
-通过模块化机制扩展机器人命令：
-
-**1.** 在 `src/handlers/custom/` 下创建 Python 文件：
+在 `src/handlers/custom/` 下创建 Python 文件：
 
 ```python
 from src.handlers.command_handlers import CommandHandler
@@ -172,113 +135,104 @@ def register_commands(command_router):
     command_router.register(PingCommandHandler())
 ```
 
-**2.** 在 `config/bots.yaml` 中配置模块路径：
-
-```yaml
-bots:
-  my_bot:
-    custom_commands:
-      - "src.handlers.custom.my_commands"
-```
-
-**3.** 重启服务生效。
-
-参考示例：[`src/handlers/custom/demo_commands.py`](src/handlers/custom/demo_commands.py)
+在 `config/bots.yaml` 中添加模块路径后重启即可。参考示例：[`src/handlers/custom/demo_commands.py`](src/handlers/custom/demo_commands.py)
 
 ---
 
-## 消息处理流程
+## 环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `BOT_CONFIG_PATH` | 配置文件路径 | `config/bots.yaml` |
+| `CHAT_LOG_DIR` | 聊天日志目录 | `logs` |
+| `WEIXIN_AGENT_TIMEOUT_SECONDS` | 任务超时（秒） | `30` |
+| `WEIXIN_MAX_FILE_SIZE` | 文件大小限制（字节） | `20971520` (20MB) |
+
+---
+
+## 架构
+
+```
+┌──────────┐    WSS     ┌─────────────────────────┐   SSE    ┌───────────────┐
+│ 企业微信  │ <───────> │  ClawRelay WeCom Server  │ ──────> │ clawrelay-api │
+│          │  长连接     │  (Python asyncio)        │ <────── │ (Go :50009)   │
+└──────────┘             └─────────────────────────┘  流式响应 └───────┬───────┘
+                                                                       │
+                                                                       v
+                                                              ┌───────────────┐
+                                                              │  Claude Code  │
+                                                              └───────────────┘
+```
+
+- **WebSocket 长连接**：通过 `wss://openws.work.weixin.qq.com` 连接企业微信，30s 心跳保活，断线自动重连
+- **会话管理**：每个用户-机器人对独立会话，内存存储，2h 过期
+- **多机器人隔离**：每个机器人独立的 WebSocket 连接、命令路由器和会话管理
+
+<details>
+<summary>项目结构</summary>
+
+```
+clawrelay-wecom-server/
+├── main.py                              # 入口（asyncio，per-bot WebSocket）
+├── config/
+│   ├── bots.yaml                       # 机器人配置
+│   └── bot_config.py                   # 配置加载 & 首次向导
+├── src/
+│   ├── adapters/
+│   │   └── claude_relay_adapter.py     # clawrelay-api SSE 客户端
+│   ├── transport/
+│   │   ├── ws_client.py                # WebSocket 连接、心跳、重连
+│   │   └── message_dispatcher.py       # 消息路由、节流推送
+│   ├── core/
+│   │   ├── claude_relay_orchestrator.py # AI 调用编排
+│   │   ├── session_manager.py          # 会话管理（内存，2h 过期）
+│   │   ├── chat_logger.py             # 聊天日志（JSONL）
+│   │   └── task_registry.py           # 异步任务注册表
+│   ├── handlers/
+│   │   ├── command_handlers.py         # 内置命令（help, reset 等）
+│   │   └── custom/
+│   │       └── demo_commands.py        # 自定义命令示例
+│   └── utils/
+│       ├── weixin_utils.py             # 消息构建 & 文件解密
+│       ├── text_utils.py               # 文本处理
+│       └── logging_config.py           # 日志配置
+├── logs/                                # 聊天日志（chat.jsonl）
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+```
+
+</details>
+
+<details>
+<summary>消息处理流程</summary>
 
 ```
 用户发送消息
     │
-    ▼
-企业微信 WebSocket 推送 (aibot_msg_callback)
+    v
+企业微信 WebSocket 推送
     │
-    ▼
-消息路由 ─── text ────► 命令检查 ─── 匹配 ──► 执行命令（reset, help, 自定义...）
+    v
+消息路由 ─── text ────> 命令检查 ─── 匹配 ──> 执行命令（reset, help, 自定义...）
     │                        │
     │                     不匹配
-    │                        │
-    │                        ▼
+    │                        v
     │              ClaudeRelayOrchestrator
     │                        │
-    │                        ├── 获取/创建会话 (SessionManager)
-    │                        ├── 注入安全提示词 + 用户上下文
+    │                        ├── 获取/创建会话
     │                        ├── SSE 流式调用 clawrelay-api
-    │                        │       ├── TextDelta → 累积回复文本
-    │                        │       ├── ThinkingDelta → 记录思考过程
-    │                        │       └── ToolUseStart → 记录工具调用
-    │                        ├── 500ms 节流推送 (aibot_respond_msg)
-    │                        └── 记录聊天日志 (JSONL)
+    │                        ├── 500ms 节流推送回复
+    │                        └── 记录聊天日志
     │
-    ├── voice ──► 提取转文字 → 同 text 流程
-    ├── image ──► 解密图片 → 多模态分析
-    ├── file  ──► 解密文件 → 内容分析
-    ├── mixed ──► 图文分离 → 多模态分析
-    └── event ──► 欢迎语 / 模板卡片事件
+    ├── voice ──> 语音转文字 → 同 text
+    ├── image ──> 解密图片 → 多模态分析
+    ├── file  ──> 解密文件 → 内容分析
+    ├── mixed ──> 图文分离 → 多模态分析
+    └── event ──> 欢迎语 / 卡片事件
 ```
 
----
-
-## 项目结构
-
-```
-clawrelay-wecom-server/
-├── main.py                             # 应用入口（asyncio，per-bot WebSocket）
-├── Dockerfile
-├── docker-compose.yml                  # 一键启动
-├── requirements.txt
-├── .env.example                        # 环境变量模板
-├── LICENSE
-│
-├── config/
-│   ├── bots.yaml                      # 机器人配置（YAML）
-│   └── bot_config.py                  # 配置加载器
-│
-├── src/
-│   ├── adapters/
-│   │   └── claude_relay_adapter.py    # clawrelay-api SSE 客户端
-│   │
-│   ├── transport/
-│   │   ├── ws_client.py               # WebSocket 连接、心跳、重连
-│   │   └── message_dispatcher.py      # 消息路由、节流流式推送
-│   │
-│   ├── core/
-│   │   ├── claude_relay_orchestrator.py # AI 调用编排（核心）
-│   │   ├── session_manager.py           # 会话管理（内存、2h 过期）
-│   │   ├── chat_logger.py              # 聊天日志（JSONL 文件）
-│   │   └── task_registry.py            # 异步任务注册表
-│   │
-│   ├── handlers/
-│   │   ├── command_handlers.py        # 内置命令（help, reset 等）
-│   │   └── custom/
-│   │       └── demo_commands.py       # 自定义命令示例
-│   │
-│   └── utils/
-│       ├── weixin_utils.py            # 消息构建器 & 文件解密工具
-│       ├── text_utils.py              # 文本处理
-│       └── logging_config.py          # 日志配置
-│
-├── logs/                              # 聊天日志（chat.jsonl）
-└── tests/
-```
-
----
-
-## 关键设计
-
-### WebSocket 长连接
-
-通过 `wss://openws.work.weixin.qq.com` 建立长连接，无需公网 IP 和回调 URL。每个机器人一个独立连接，30s 心跳保活，断线指数退避自动重连。
-
-### 会话管理
-
-每个用户-机器人对维护独立会话。会话的 `relay_session_id` 存储在内存中，2 小时自动过期。进程重启后自动创建新会话（历史消息由 clawrelay-api 维护）。用户可发送 `reset` / `new` 手动重置。
-
-### 多机器人隔离
-
-每个机器人有独立的 WebSocket 连接、命令路由器、会话管理和配置。在 `config/bots.yaml` 中添加新 bot 配置，重启即生效。
+</details>
 
 ---
 

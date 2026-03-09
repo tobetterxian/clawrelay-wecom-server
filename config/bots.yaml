@@ -12,6 +12,8 @@ bots:
     secret: "YOUR_BOT_SECRET"
 
     # [Required] ClawRelay API endpoint
+    # Local: http://localhost:50009
+    # Docker: http://host.docker.internal:50009
     relay_url: "http://localhost:50009"
 
     # [Optional] Bot display name (used to filter @mentions in group chat)
