@@ -170,7 +170,7 @@ class BotConfigManager:
 
         # model
         model = self._prompt(
-            "  model（AI 模型）[vllm/claude-sonnet-4-6]: "
+            "  model（可选，AI 模型）[vllm/claude-sonnet-4-6]: "
         ).strip() or "vllm/claude-sonnet-4-6"
 
         # bot name

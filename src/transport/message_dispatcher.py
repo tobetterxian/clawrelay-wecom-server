@@ -19,6 +19,26 @@ from src.utils.weixin_utils import ImageUtils, FileUtils
 
 logger = logging.getLogger(__name__)
 
+_RELAY_CONNECTION_HINT = (
+    "AI 服务暂时无法连接，请联系管理员检查：\n"
+    "1. ClawRelay 服务是否正常运行\n"
+    "2. bots.yaml 中的 relay_url 配置是否正确\n"
+    "修改配置后需要重启服务才能生效。"
+)
+_RELAY_HTTP_ERROR_HINT = (
+    "AI 服务返回异常，请联系管理员检查 ClawRelay 服务状态。"
+)
+
+
+def _friendly_error(e: Exception) -> str:
+    """将内部异常转为用户友好的错误提示"""
+    msg = str(e)
+    if "[ClaudeRelay] Connection error" in msg:
+        return _RELAY_CONNECTION_HINT
+    if "[ClaudeRelay] HTTP" in msg:
+        return _RELAY_HTTP_ERROR_HINT
+    return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
+
 # 节流间隔(秒)
 STREAM_THROTTLE_INTERVAL = 0.5
 
@@ -195,7 +215,7 @@ class MessageDispatcher:
             )
         except Exception as e:
             logger.error("[Dispatcher:%s] 处理文本消息失败: %s", self.bot_key, e, exc_info=True)
-            await self._reply_stream(req_id, stream_id, f"抱歉，处理出错：{e}", finish=True)
+            await self._reply_stream(req_id, stream_id, _friendly_error(e), finish=True)
 
     async def _handle_image(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理图片消息"""
@@ -232,7 +252,7 @@ class MessageDispatcher:
             )
         except Exception as e:
             logger.error("[Dispatcher:%s] 处理图片消息失败: %s", self.bot_key, e, exc_info=True)
-            await self._reply_stream(req_id, stream_id, f"抱歉，处理出错：{e}", finish=True)
+            await self._reply_stream(req_id, stream_id, _friendly_error(e), finish=True)
 
     async def _handle_voice(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理语音消息（已转为文本）"""
@@ -286,7 +306,7 @@ class MessageDispatcher:
             )
         except Exception as e:
             logger.error("[Dispatcher:%s] 处理文件消息失败: %s", self.bot_key, e, exc_info=True)
-            await self._reply_stream(req_id, stream_id, f"抱歉，处理出错：{e}", finish=True)
+            await self._reply_stream(req_id, stream_id, _friendly_error(e), finish=True)
 
     async def _handle_mixed(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理图文混排消息"""
@@ -330,7 +350,7 @@ class MessageDispatcher:
             )
         except Exception as e:
             logger.error("[Dispatcher:%s] 处理混排消息失败: %s", self.bot_key, e, exc_info=True)
-            await self._reply_stream(req_id, stream_id, f"抱歉，处理出错：{e}", finish=True)
+            await self._reply_stream(req_id, stream_id, _friendly_error(e), finish=True)
 
     # ---- 事件回调 ----
 
