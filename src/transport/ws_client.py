@@ -173,7 +173,7 @@ class WsClient:
         return sock
 
     async def _subscribe(self):
-        """发送订阅请求"""
+        """发送订阅请求并直接读取响应（此时 _receive_loop 尚未启动）"""
         req_id = self._generate_req_id()
         payload = {
             "cmd": "aibot_subscribe",
@@ -184,17 +184,13 @@ class WsClient:
             },
         }
 
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = future
-
         raw = json.dumps(payload, ensure_ascii=False)
         await self._ws.send(raw)
         logger.info("[WsClient:%s] 已发送订阅请求: req_id=%s", self.bot_key, req_id)
 
-        try:
-            resp = await asyncio.wait_for(future, timeout=10.0)
-        finally:
-            self._pending_requests.pop(req_id, None)
+        # 直接从 WebSocket 读取响应，因为 _receive_loop 还没启动
+        resp_raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
+        resp = json.loads(resp_raw)
 
         errcode = resp.get("errcode", -1)
         if errcode != 0:
