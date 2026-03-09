@@ -168,6 +168,11 @@ class BotConfigManager:
             "  working_dir（Claude Code 工作目录，clawrelay-api 需要）[]: "
         ).strip()
 
+        # model
+        model = self._prompt(
+            "  model（AI 模型）[vllm/claude-sonnet-4-6]: "
+        ).strip() or "vllm/claude-sonnet-4-6"
+
         # bot name
         name = self._prompt(
             "  机器人名称（可选，用于群聊 @过滤）[AI Assistant]: "
@@ -186,6 +191,7 @@ class BotConfigManager:
         print(f"    relay_url: {relay_url}")
         if working_dir:
             print(f"    working_dir: {working_dir}")
+        print(f"    model:     {model}")
         print(f"    name:      {name}")
         print()
 
@@ -202,6 +208,7 @@ class BotConfigManager:
                     "secret": secret,
                     "relay_url": relay_url,
                     **({"working_dir": working_dir} if working_dir else {}),
+                    "model": model,
                     "name": name,
                     "description": description,
                 }
