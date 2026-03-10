@@ -17,3 +17,6 @@ aiohttp==3.9.1
 # WebSocket客户端
 websockets==14.2
 
+# SSL证书
+certifi>=2024.0
+

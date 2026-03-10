@@ -18,6 +18,8 @@ import os
 import socket
 import ssl
 import uuid
+
+import certifi
 from typing import Callable, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 
@@ -129,7 +131,7 @@ class WsClient:
                 sock = self._create_proxy_tunnel(proxy_url, target_host, target_port)
                 sock.setblocking(False)
                 extra_kwargs["sock"] = sock
-                extra_kwargs["ssl"] = ssl.create_default_context()
+                extra_kwargs["ssl"] = ssl.create_default_context(cafile=certifi.where())
                 extra_kwargs["server_hostname"] = target_host
             except Exception as e:
                 logger.warning("[WsClient:%s] 代理连接失败(%s)，回退直连", self.bot_key, e)

@@ -1,15 +1,19 @@
 # ClawRelay WeCom Server
 
-让企业微信机器人接入 AI —— 三步启动，开箱即用。
+Claude Code 企业微信中转服务 —— 三步启动，开箱即用。
+
+> A WeCom (Enterprise WeChat) bot relay for Claude Code. Open-source alternative to [Openclaw](https://github.com/nicepkg/openclaw).
 
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+将 [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) 接入企业微信的开源中转方案。支持流式回复、多模态消息、多机器人管理，**无需公网 IP**。
 
 ```
 企业微信用户发消息 → 本服务 WebSocket 接收 → clawrelay-api → Claude Code 处理 → 流式回复推送
 ```
 
-**无需公网 IP**，无需回调 URL，无需数据库。通过 WebSocket 长连接直连企业微信，YAML 配置即用。
+无需回调 URL，无需数据库。通过 WebSocket 长连接直连企业微信，YAML 配置即用。
 
 ---
 
@@ -234,6 +238,14 @@ clawrelay-wecom-server/
 ```
 
 </details>
+
+---
+
+## 相关项目
+
+| 项目 | 说明 |
+|------|------|
+| [clawrelay-api](https://github.com/roodkcab/clawrelay-api) | Go 编写的 Claude Code 中转 API（本项目的后端依赖） |
 
 ---
 
