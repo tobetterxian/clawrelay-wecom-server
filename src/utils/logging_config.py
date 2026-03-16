@@ -40,6 +40,17 @@ class BusinessLogFilter(logging.Filter):
         # === 启动信息 ===
         '企业微信机器人服务启动',
         '已注册的机器人:',
+        '[Dispatcher:',
+        '[OrchestratorFactory]',
+
+        # === AI 模型初始化 ===
+        '[Gemini]',
+        '[GeminiModelSelector]',
+        'Gemini 编排器初始化',
+        '[OpenAI]',
+        '[OpenAIModelSelector]',
+        'OpenAI 编排器初始化',
+        '[ClaudeRelay]',
 
         # === 错误信息 ===
         'ERROR',

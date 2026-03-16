@@ -12,7 +12,7 @@ import uuid
 
 from config.bot_config import BotConfig
 from src.transport.ws_client import WsClient
-from src.core.claude_relay_orchestrator import ClaudeRelayOrchestrator
+from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.session_manager import SessionManager
 from src.handlers.command_handlers import CommandRouter
 from src.utils.weixin_utils import ImageUtils, FileUtils
@@ -54,15 +54,8 @@ class MessageDispatcher:
         # 命令路由器
         self.command_router = CommandRouter()
 
-        # Claude Relay编排器
-        self.orchestrator = ClaudeRelayOrchestrator(
-            bot_key=bot_config.bot_key,
-            relay_url=bot_config.relay_url or "http://localhost:50009",
-            working_dir=bot_config.working_dir or "",
-            model=bot_config.model or "",
-            system_prompt=bot_config.system_prompt or "",
-            env_vars=bot_config.env_vars or None,
-        )
+        # 使用工厂创建编排器
+        self.orchestrator = OrchestratorFactory.create(bot_config)
 
         # 会话管理
         self.session_manager = SessionManager()

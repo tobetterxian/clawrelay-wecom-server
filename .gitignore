@@ -79,6 +79,8 @@ htmlcov/
 *.bak
 *.swp
 *~
+*.txt
+!requirements.txt
 
 # OS
 Thumbs.db
@@ -115,3 +117,10 @@ site/
 # 反向文件临时存储
 storage/files/
 node_modules/
+
+# Claude Code
+.claude/
+
+# 测试脚本（开发用）
+test_*.py
+check_*.py

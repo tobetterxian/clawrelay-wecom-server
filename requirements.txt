@@ -20,3 +20,8 @@ websockets==14.2
 # SSL证书
 certifi>=2024.0
 
+# AI 模型 SDK（可选，按需安装）
+# Gemini API (使用 REST API，无需额外 SDK)
+
+# OpenAI API
+openai>=1.0.0

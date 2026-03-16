@@ -5,11 +5,16 @@
 # Each bot connects to WeChat Work via WebSocket.
 
 bots:
-  # Bot key (unique identifier, used in logs and session management)
+  # ========================================
+  # Claude Code 机器人（通过 clawrelay-api）
+  # ========================================
   default:
     # [Required] Enterprise WeChat bot credentials
     bot_id: "YOUR_BOT_ID"
     secret: "YOUR_BOT_SECRET"
+
+    # [Required] Bot type: claude_code | gemini | openai
+    bot_type: "claude_code"
 
     # [Required] ClawRelay API endpoint
     # Local: http://localhost:50009
@@ -44,10 +49,50 @@ bots:
     # custom_commands:
     #   - "src.handlers.custom.my_commands"
 
-  # --- Add more bots below ---
-  # sales:
-  #   bot_id: "ANOTHER_BOT_ID"
-  #   secret: "ANOTHER_BOT_SECRET"
-  #   relay_url: "http://localhost:50009"
-  #   name: "Sales Bot"
-  #   description: "Sales team assistant"
+  # ========================================
+  # Gemini 机器人（直接调用 API）
+  # ========================================
+  # gemini_bot:
+  #   bot_id: "YOUR_GEMINI_BOT_ID"
+  #   secret: "YOUR_GEMINI_BOT_SECRET"
+  #   bot_type: "gemini"
+  #   name: "Gemini Assistant"
+  #   description: "Gemini chat bot"
+  #   # 模型名称（留空则自动选择最佳可用模型）
+  #   # 可选: gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash
+  #   model: ""  # 留空自动选择，或指定具体模型
+  #   system_prompt: "你是一个友好的AI助手。"
+  #   provider_config:
+  #     api_key: "YOUR_GEMINI_API_KEY"
+  #     enable_search: false  # 设置为 true 启用 Google Search 联网功能（需要 v1beta API）
+
+  # ========================================
+  # OpenAI 机器人（直接调用 API）
+  # ========================================
+  # openai_bot:
+  #   bot_id: "YOUR_OPENAI_BOT_ID"
+  #   secret: "YOUR_OPENAI_BOT_SECRET"
+  #   bot_type: "openai"
+  #   name: "GPT Assistant"
+  #   description: "OpenAI GPT chat bot"
+  #   model: ""  # 留空自动选择，或指定如 gpt-4o
+  #   system_prompt: "You are a helpful AI assistant."
+  #   provider_config:
+  #     api_key: "YOUR_OPENAI_API_KEY"
+  #     base_url: "https://api.openai.com/v1"  # 可选，用于自定义端点或第三方兼容服务
+
+  # ========================================
+  # Claude 机器人（通过第三方 API）
+  # ========================================
+  # claude_api_bot:
+  #   bot_id: "YOUR_CLAUDE_BOT_ID"
+  #   secret: "YOUR_CLAUDE_BOT_SECRET"
+  #   bot_type: "openai"  # 使用 openai 类型，因为很多服务兼容 OpenAI 格式
+  #   name: "Claude API"
+  #   description: "Claude via third-party API"
+  #   model: ""  # 留空自动选择最佳可用模型
+  #   system_prompt: "You are Claude, a helpful AI assistant."
+  #   provider_config:
+  #     api_key: "YOUR_API_KEY"
+  #     base_url: "https://new-api.yuyugod.top/v1"  # 第三方 API 端点
+

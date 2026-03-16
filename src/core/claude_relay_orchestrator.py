@@ -16,8 +16,9 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
+from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .session_manager import SessionManager
 from src.adapters.claude_relay_adapter import (
     ClaudeRelayAdapter,
@@ -41,11 +42,8 @@ SECURITY_SYSTEM_PROMPT = """\
 - **只能修改和查看当前工作目录的文件**（如果不确定当前工作目录，需要先查看明确当前工作目录）
 """
 
-# on_stream_delta 回调类型
-OnStreamDelta = Optional[Callable[[str, bool], Awaitable[None]]]
 
-
-class ClaudeRelayOrchestrator:
+class ClaudeRelayOrchestrator(BaseOrchestrator):
     """ClaudeRelay编排器
 
     通过clawrelay-api调用Claude Code CLI处理企业微信消息。

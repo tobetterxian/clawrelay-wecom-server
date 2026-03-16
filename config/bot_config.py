@@ -37,6 +37,8 @@ class BotConfig:
         allowed_users: Optional[List[str]] = None,
         custom_commands: Optional[List[str]] = None,
         env_vars: Optional[Dict[str, str]] = None,
+        bot_type: str = "claude_code",
+        provider_config: Optional[Dict[str, str]] = None,
     ):
         self.bot_key = bot_key
         self.bot_id = bot_id
@@ -50,6 +52,8 @@ class BotConfig:
         self.allowed_users = allowed_users or []
         self.custom_commands = custom_commands or []
         self.env_vars = env_vars or {}
+        self.bot_type = bot_type
+        self.provider_config = provider_config or {}
 
     def __repr__(self):
         return (
@@ -114,6 +118,8 @@ class BotConfigManager:
                 allowed_users=bot_data.get("allowed_users"),
                 custom_commands=bot_data.get("custom_commands"),
                 env_vars=bot_data.get("env_vars"),
+                bot_type=bot_data.get("bot_type", "claude_code"),
+                provider_config=bot_data.get("provider_config"),
             )
             self.bots[bot_key] = bot_config
             logger.info("加载机器人配置: %s", bot_config)
