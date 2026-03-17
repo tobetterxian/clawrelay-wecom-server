@@ -8,11 +8,14 @@ ClawRelay WeCom Server - WebSocket Long Connection Mode
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 from config.bot_config import BotConfigManager
 from src.transport.ws_client import WsClient
 from src.transport.message_dispatcher import MessageDispatcher
+from src.utils.single_instance import SingleInstanceLock, SingleInstanceError
 
 # Version
 VERSION = "v2.0.0"
@@ -22,13 +25,16 @@ load_dotenv(override=False)
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 from src.utils.logging_config import setup_business_logging
 setup_business_logging()
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+INSTANCE_LOCK_PATH = PROJECT_ROOT / "logs" / "clawrelay-wecom-server.lock"
 
 
 async def run_bot(bot_config) -> None:
@@ -100,6 +106,11 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        with SingleInstanceLock(INSTANCE_LOCK_PATH, "ClawRelay WeCom Server"):
+            logger.info("进程启动: pid=%s", os.getpid())
+            asyncio.run(main())
+    except SingleInstanceError as e:
+        logger.error("%s", e)
+        raise SystemExit(1)
     except KeyboardInterrupt:
         logger.info("收到退出信号，关闭服务")

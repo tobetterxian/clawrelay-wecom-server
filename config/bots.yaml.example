@@ -94,5 +94,5 @@ bots:
   #   system_prompt: "You are Claude, a helpful AI assistant."
   #   provider_config:
   #     api_key: "YOUR_API_KEY"
-  #     base_url: "https://new-api.yuyugod.top/v1"  # 第三方 API 端点
+  #     base_url: "https://your-api-endpoint.com/v1"  # 第三方 API 端点
 

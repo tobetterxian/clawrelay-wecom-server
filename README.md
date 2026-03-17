@@ -91,6 +91,8 @@ python main.py
 
 详细说明请查看 [Windows 服务配置指南](docs/WINDOWS_SERVICE.md)
 
+如果你想先排障或临时运行，不走服务方式，也可以参考 [Windows 手动运行指南](docs/WINDOWS_MANUAL_RUN.md)
+
 ---
 
 ## Docker 部署

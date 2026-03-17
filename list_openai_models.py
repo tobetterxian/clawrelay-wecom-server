@@ -163,7 +163,7 @@ def main():
   python list_openai_models.py --base-url https://api.openai.com/v1 --api-key sk-xxx
 
   # 测试第三方服务
-  python list_openai_models.py --base-url https://new-api.yuyugod.top/v1 --api-key your-key
+  python list_openai_models.py --base-url https://your-api-endpoint.com/v1 --api-key your-key
         """
     )
 

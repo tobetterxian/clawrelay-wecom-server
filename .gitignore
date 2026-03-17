@@ -6,6 +6,9 @@
 # Bot 配置（包含 bot_id/secret 等凭据）
 config/bots.yaml
 
+# API 服务配置（包含 API keys 等敏感信息）
+config/api-service.env
+
 # Python
 __pycache__/
 *.py[cod]

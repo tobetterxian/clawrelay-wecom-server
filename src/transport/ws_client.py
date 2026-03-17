@@ -208,9 +208,12 @@ class WsClient:
             try:
                 req_id = self._generate_req_id()
                 payload = {"cmd": "ping", "headers": {"req_id": req_id}}
+                logger.info("[WsClient:%s] 发送心跳: req_id=%s", self.bot_key, req_id)
                 resp = await self.send_and_wait(payload, timeout=HEARTBEAT_TIMEOUT)
                 if resp.get("errcode", -1) != 0:
                     logger.warning("[WsClient:%s] 心跳响应异常: %s", self.bot_key, resp)
+                else:
+                    logger.info("[WsClient:%s] 心跳响应正常", self.bot_key)
             except Exception as e:
                 logger.error("[WsClient:%s] 心跳失败: %s", self.bot_key, e)
                 raise  # 触发外层重连
@@ -240,8 +243,10 @@ class WsClient:
                     ))
             elif cmd == "aibot_event_callback":
                 event_type = msg.get("body", {}).get("event", {}).get("eventtype", "")
+                logger.info("[WsClient:%s] 收到事件回调: event_type=%s", self.bot_key, event_type)
                 if event_type == "disconnected_event":
                     logger.warning("[WsClient:%s] 收到连接断开事件，触发重连", self.bot_key)
+                    logger.warning("[WsClient:%s] 断开事件详情: %s", self.bot_key, json.dumps(msg, ensure_ascii=False))
                     raise ConnectionError("disconnected_event received")
                 if self._on_event_callback:
                     asyncio.create_task(self._safe_callback(
@@ -264,9 +269,12 @@ class WsClient:
         """指数退避重连"""
         if self._ws:
             try:
+                logger.info("[WsClient:%s] 正在关闭旧连接...", self.bot_key)
                 await self._ws.close()
-            except Exception:
-                pass
+                # 等待连接完全关闭
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.warning("[WsClient:%s] 关闭旧连接时出错: %s", self.bot_key, e)
             self._ws = None
 
         self._reconnect_count += 1
