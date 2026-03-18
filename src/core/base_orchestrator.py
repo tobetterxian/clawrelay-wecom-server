@@ -90,3 +90,22 @@ class BaseOrchestrator(ABC):
             log_context=log_context,
             on_stream_delta=on_stream_delta,
         )
+
+    async def clear_session(self, session_key: str) -> None:
+        """清空指定会话状态
+
+        默认无状态实现，子类可按需覆盖。
+        """
+        return None
+
+    def has_pending_interaction(self, session_key: str) -> bool:
+        """当前会话是否存在待处理的人机交互"""
+        return False
+
+    async def handle_interaction_text(self, session_key: str, text: str) -> Optional[str]:
+        """处理用户对待处理交互的文本回复"""
+        return None
+
+    async def handle_interaction_card(self, session_key: str, event: dict) -> Optional[str]:
+        """处理模板卡片交互回调"""
+        return None

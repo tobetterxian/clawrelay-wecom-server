@@ -460,6 +460,10 @@ class ClaudeRelayOrchestrator(BaseOrchestrator):
     def _build_user_context_header(self, user_id: str) -> str:
         return f"[SYS_USER] user_id={user_id}"
 
+    async def clear_session(self, session_key: str) -> None:
+        await self.session_manager.clear_session(self.bot_key, session_key)
+        logger.info("[ClaudeRelay] 清空会话: bot=%s, session_key=%s", self.bot_key, session_key)
+
     # 匹配用户伪造的身份标记（[SYS_USER]、[当前用户] 等变体）
     _FAKE_IDENTITY_RE = re.compile(
         r'\[(?:SYS_USER|sys_user|当前用户|CURRENT_USER|current_user)\]\s*[^\n]*',

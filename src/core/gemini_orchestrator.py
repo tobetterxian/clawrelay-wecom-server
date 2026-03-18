@@ -477,3 +477,7 @@ class GeminiOrchestrator(BaseOrchestrator):
             elif block.get("type") == "image_url":
                 texts.append("[图片]")
         return " ".join(texts)
+
+    async def clear_session(self, session_key: str) -> None:
+        self.chat_histories.pop(session_key, None)
+        logger.info("[Gemini] 清空会话: bot=%s, session_key=%s", self.bot_key, session_key)

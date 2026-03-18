@@ -28,8 +28,22 @@ _RELAY_CONNECTION_HINT = (
 _RELAY_HTTP_ERROR_HINT = (
     "AI 服务返回异常，请联系管理员检查 ClawRelay 服务状态。"
 )
-
-
+_CODEX_CLI_NOT_FOUND_HINT = (
+    "本地 Codex CLI 不可用，请联系管理员检查：\n"
+    "1. 是否已安装 codex CLI\n"
+    "2. codex 是否在服务进程的 PATH 中\n"
+    "3. 服务重启后是否生效。"
+)
+_CODEX_CLI_SANDBOX_HINT = (
+    "本地 Codex CLI 沙箱不可用，请联系管理员检查：\n"
+    "1. 当前系统是否支持 bwrap/user namespace\n"
+    "2. 若在可信环境运行，可在 bots.yaml 中为 codex_cli 机器人设置\n"
+    "   provider_config.dangerously_bypass_approvals_and_sandbox: true\n"
+    "3. 修改配置后需要重启服务。"
+)
+_CODEX_CLI_EXEC_HINT = (
+    "本地 Codex CLI 调用失败，请联系管理员检查 codex 登录状态、网络连通性和工作目录配置。"
+)
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
     msg = str(e)
@@ -37,6 +51,12 @@ def _friendly_error(e: Exception) -> str:
         return _RELAY_CONNECTION_HINT
     if "[ClaudeRelay] HTTP" in msg:
         return _RELAY_HTTP_ERROR_HINT
+    if "[CodexCLI] 未找到 codex 命令" in msg:
+        return _CODEX_CLI_NOT_FOUND_HINT
+    if "bwrap: Creating new namespace failed" in msg:
+        return _CODEX_CLI_SANDBOX_HINT
+    if "[CodexCLI] Process exited" in msg or "Codex app-server 进程异常退出" in msg:
+        return _CODEX_CLI_EXEC_HINT
     return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
 
 # 节流间隔(秒)
@@ -70,6 +90,75 @@ class MessageDispatcher:
         self._processed_msgids: dict[str, float] = {}
 
         logger.info("[Dispatcher:%s] 初始化完成", self.bot_key)
+
+    def _resolve_session_key(self, body: dict, user_id: str) -> str:
+        """从消息或事件体中提取会话 key"""
+        event = body.get("event", {}) or {}
+        chattype = body.get("chattype") or event.get("chattype") or "single"
+        chatid = (
+            body.get("chatid")
+            or event.get("chatid")
+            or body.get("chat", {}).get("chatid", "")
+        )
+        if chatid and chattype == "group":
+            return chatid
+        return chatid or user_id
+
+    def _make_orchestrator_call_kwargs(self, req_id: str) -> dict:
+        if self.config.bot_type != "codex_cli":
+            return {}
+
+        async def on_interaction_request(payload: dict):
+            template_card = (payload or {}).get("template_card")
+            if template_card:
+                logger.info(
+                    "[Dispatcher:%s] Codex 交互已触发，当前通道以文字授权为主，卡片仅作兼容保留: task_id=%s",
+                    self.bot_key,
+                    (payload or {}).get("task_id", ""),
+                )
+
+        return {"on_interaction_request": on_interaction_request}
+
+    @staticmethod
+    def _pending_interaction_notice() -> str:
+        return "当前 Codex 正等待你的确认或补充信息，请直接发送文字回复。"
+
+    @staticmethod
+    def _compose_stream_content(reply_state: dict, content: str) -> str:
+        prefix = ((reply_state or {}).get("prefix") or "").strip()
+        if prefix and content:
+            return f"{prefix}\n\n{content}"
+        return prefix or content
+
+    async def _handoff_running_reply(self, session_key: str, req_id: str, ack: str) -> bool:
+        from src.core.task_registry import get_task_registry
+
+        registry = get_task_registry()
+        task_key = f"{self.bot_key}:{session_key}"
+        task, _old_stream_id, extra = registry.get(task_key)
+        if not task or task.done():
+            return False
+
+        reply_state = extra.get("reply_state") if isinstance(extra, dict) else None
+        if not isinstance(reply_state, dict):
+            return False
+
+        new_stream_id = uuid.uuid4().hex[:12]
+        reply_state["req_id"] = req_id
+        reply_state["stream_id"] = new_stream_id
+        reply_state["prefix"] = ack or ""
+
+        if not registry.update_stream(
+            task_key,
+            new_stream_id,
+            req_id=req_id,
+            reply_state=reply_state,
+        ):
+            return False
+
+        if ack:
+            await self._reply_stream(req_id, new_stream_id, ack, finish=False)
+        return True
 
     def _load_custom_commands(self):
         """加载自定义命令模块"""
@@ -150,6 +239,7 @@ class MessageDispatcher:
         # 重置会话命令
         if normalized in ("reset", "new", "clear", "重置", "清空"):
             await self.session_manager.clear_session(self.bot_key, session_key)
+            await self.orchestrator.clear_session(session_key)
             await self._reply_text(req_id, "会话已重置，可以开始新的对话。", finish=True)
             return
 
@@ -169,6 +259,17 @@ class MessageDispatcher:
             else:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
             return
+
+        if self.orchestrator.has_pending_interaction(session_key):
+            interaction_result = await self.orchestrator.handle_interaction_text(session_key, content)
+            if interaction_result:
+                ack = interaction_result.get("ack", "")
+                submitted = bool(interaction_result.get("submitted"))
+                if submitted and await self._handoff_running_reply(session_key, req_id, ack):
+                    return
+                if ack:
+                    await self._reply_text(req_id, ack, finish=True)
+                    return
 
         # 检查内置/自定义命令
         handler = self.command_router.handlers.get(content) or self.command_router.handlers.get(normalized)
@@ -200,7 +301,8 @@ class MessageDispatcher:
             'chat_id': body.get('chatid', ''),
             'message_type': 'text',
         }
-        on_stream_delta = self._make_stream_delta_callback(req_id, stream_id)
+        reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
+        on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
             req_id, stream_id, session_key,
@@ -211,7 +313,9 @@ class MessageDispatcher:
                 session_key=session_key,
                 log_context=log_context,
                 on_stream_delta=on_stream_delta,
+                **self._make_orchestrator_call_kwargs(req_id),
             ),
+            reply_state=reply_state,
         )
 
     async def _handle_image(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
@@ -221,6 +325,10 @@ class MessageDispatcher:
         aeskey = image_info.get("aeskey", "")
 
         if not image_url:
+            return
+
+        if self.orchestrator.has_pending_interaction(session_key):
+            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
         try:
@@ -236,7 +344,8 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         log_context = {'chat_type': chattype, 'message_type': 'image'}
-        on_stream_delta = self._make_stream_delta_callback(req_id, stream_id)
+        reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
+        on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
             req_id, stream_id, session_key,
@@ -247,7 +356,9 @@ class MessageDispatcher:
                 session_key=session_key,
                 log_context=log_context,
                 on_stream_delta=on_stream_delta,
+                **self._make_orchestrator_call_kwargs(req_id),
             ),
+            reply_state=reply_state,
         )
 
     async def _handle_voice(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
@@ -272,6 +383,10 @@ class MessageDispatcher:
         if not file_url:
             return
 
+        if self.orchestrator.has_pending_interaction(session_key):
+            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            return
+
         try:
             file_bytes, header_filename = await FileUtils.download_and_decrypt(file_url, aeskey)
             if not file_name:
@@ -288,7 +403,8 @@ class MessageDispatcher:
         stream_id = uuid.uuid4().hex[:12]
         message = f"[用户发送了文件: {file_name}] 请分析这个文件的内容。"
         log_context = {'chat_type': chattype, 'message_type': 'file', 'file_info': [{'filename': file_name}]}
-        on_stream_delta = self._make_stream_delta_callback(req_id, stream_id)
+        reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
+        on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
             req_id, stream_id, session_key,
@@ -300,7 +416,9 @@ class MessageDispatcher:
                 session_key=session_key,
                 log_context=log_context,
                 on_stream_delta=on_stream_delta,
+                **self._make_orchestrator_call_kwargs(req_id),
             ),
+            reply_state=reply_state,
         )
 
     async def _handle_mixed(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
@@ -309,6 +427,10 @@ class MessageDispatcher:
         # 企业微信回调字段名为 msg_item（兼容 items）
         items = mixed_data.get("msg_item") or mixed_data.get("items") or []
         if not items:
+            return
+
+        if self.orchestrator.has_pending_interaction(session_key):
+            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
         content_blocks = []
@@ -340,7 +462,8 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         log_context = {'chat_type': chattype, 'message_type': 'mixed'}
-        on_stream_delta = self._make_stream_delta_callback(req_id, stream_id)
+        reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
+        on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
             req_id, stream_id, session_key,
@@ -351,7 +474,9 @@ class MessageDispatcher:
                 session_key=session_key,
                 log_context=log_context,
                 on_stream_delta=on_stream_delta,
+                **self._make_orchestrator_call_kwargs(req_id),
             ),
+            reply_state=reply_state,
         )
 
     # ---- 事件回调 ----
@@ -397,17 +522,48 @@ class MessageDispatcher:
 
     async def _handle_template_card_event(self, req_id: str, body: dict, user_id: str):
         """处理模板卡片点击事件"""
-        task_id = body.get("event", {}).get("task_id", "")
+        event = body.get("event", {}) or {}
+        task_id = event.get("task_id", "")
+        session_key = self._resolve_session_key(body, user_id)
 
         if task_id.startswith("choice@"):
             logger.info("[Dispatcher:%s] 处理AskUserQuestion卡片点击: task_id=%s", self.bot_key, task_id)
             # TODO: 集成choice_manager处理逻辑
-        else:
-            logger.info("[Dispatcher:%s] 未知卡片事件: task_id=%s", self.bot_key, task_id)
+            return
+
+        if task_id.startswith("codex@"):
+            has_pending = self.orchestrator.has_pending_interaction(session_key)
+            logger.info(
+                "[Dispatcher:%s] 处理 Codex 交互卡片: task_id=%s, session_key=%s, has_pending=%s, event=%s",
+                self.bot_key,
+                task_id,
+                session_key,
+                has_pending,
+                event,
+            )
+            interaction_result = await self.orchestrator.handle_interaction_card(session_key, event)
+            if interaction_result:
+                ack = interaction_result.get("ack", "")
+                submitted = bool(interaction_result.get("submitted"))
+                if submitted and await self._handoff_running_reply(session_key, req_id, ack):
+                    return
+                if ack:
+                    await self._reply_text(req_id, ack, finish=True)
+            else:
+                logger.warning(
+                    "[Dispatcher:%s] Codex 卡片点击未产生响应: task_id=%s, session_key=%s, event=%s",
+                    self.bot_key,
+                    task_id,
+                    session_key,
+                    event,
+                )
+            return
+
+        logger.info("[Dispatcher:%s] 未知卡片事件: task_id=%s", self.bot_key, task_id)
 
     # ---- 流式推送 ----
 
-    def _make_stream_delta_callback(self, req_id: str, stream_id: str):
+    def _make_stream_delta_callback(self, reply_state: dict):
         """创建带节流的on_stream_delta回调"""
         state = {
             'last_pushed_text': "",
@@ -421,7 +577,17 @@ class MessageDispatcher:
                 # 完成时立即推送最终内容
                 if state['throttle_task'] and not state['throttle_task'].done():
                     state['throttle_task'].cancel()
-                await self._reply_stream(req_id, stream_id, accumulated_text, finish=True)
+                target_req_id = (reply_state or {}).get("req_id", "")
+                target_stream_id = (reply_state or {}).get("stream_id", "")
+                if not target_req_id or not target_stream_id:
+                    logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过最终推送", self.bot_key)
+                    return
+                await self._reply_stream(
+                    target_req_id,
+                    target_stream_id,
+                    self._compose_stream_content(reply_state, accumulated_text),
+                    finish=True,
+                )
                 state['last_pushed_text'] = accumulated_text
                 return
 
@@ -431,7 +597,17 @@ class MessageDispatcher:
 
             if elapsed >= STREAM_THROTTLE_INTERVAL and accumulated_text != state['last_pushed_text']:
                 async with push_lock:
-                    await self._reply_stream(req_id, stream_id, accumulated_text, finish=False)
+                    target_req_id = (reply_state or {}).get("req_id", "")
+                    target_stream_id = (reply_state or {}).get("stream_id", "")
+                    if not target_req_id or not target_stream_id:
+                        logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过增量推送", self.bot_key)
+                        return
+                    await self._reply_stream(
+                        target_req_id,
+                        target_stream_id,
+                        self._compose_stream_content(reply_state, accumulated_text),
+                        finish=False,
+                    )
                     state['last_pushed_text'] = accumulated_text
                     state['last_push_time'] = time.monotonic()
             elif state['throttle_task'] is None or state['throttle_task'].done():
@@ -441,7 +617,17 @@ class MessageDispatcher:
                     await asyncio.sleep(STREAM_THROTTLE_INTERVAL - elapsed)
                     async with push_lock:
                         if captured_text != state['last_pushed_text']:
-                            await self._reply_stream(req_id, stream_id, captured_text, finish=False)
+                            target_req_id = (reply_state or {}).get("req_id", "")
+                            target_stream_id = (reply_state or {}).get("stream_id", "")
+                            if not target_req_id or not target_stream_id:
+                                logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过延迟推送", self.bot_key)
+                                return
+                            await self._reply_stream(
+                                target_req_id,
+                                target_stream_id,
+                                self._compose_stream_content(reply_state, captured_text),
+                                finish=False,
+                            )
                             state['last_pushed_text'] = captured_text
                             state['last_push_time'] = time.monotonic()
 
@@ -452,7 +638,7 @@ class MessageDispatcher:
     # ---- 任务管理 ----
 
     async def _run_with_task_registry(
-        self, req_id: str, stream_id: str, session_key: str, coro,
+        self, req_id: str, stream_id: str, session_key: str, coro, reply_state: dict | None = None,
     ):
         """将 orchestrator 协程包装为 task 并注册到全局任务表，支持 stop 命令取消。
 
@@ -462,7 +648,13 @@ class MessageDispatcher:
 
         inner_task = asyncio.create_task(coro)
         task_key = f"{self.bot_key}:{session_key}"
-        get_task_registry().register(task_key, inner_task, stream_id, req_id=req_id)
+        get_task_registry().register(
+            task_key,
+            inner_task,
+            stream_id,
+            req_id=req_id,
+            reply_state=reply_state or {"req_id": req_id, "stream_id": stream_id, "prefix": ""},
+        )
 
         try:
             await inner_task
@@ -479,6 +671,28 @@ class MessageDispatcher:
         """回复纯文本消息"""
         stream_id = uuid.uuid4().hex[:12]
         await self._reply_stream(req_id, stream_id, content, finish)
+
+    async def _reply_template_card(self, req_id: str, template_card: dict):
+        """回复模板卡片消息
+
+        企业微信 WebSocket 机器人对纯 template_card 兼容性不稳定，
+        这里统一改为 stream_with_template_card，提升实际展示成功率。
+        """
+        stream_id = uuid.uuid4().hex[:12]
+        payload = {
+            "cmd": "aibot_respond_msg",
+            "headers": {"req_id": req_id},
+            "body": {
+                "msgtype": "stream_with_template_card",
+                "stream": {
+                    "id": stream_id,
+                    "finish": True,
+                    "content": "Codex 需要你的确认，请点击下方卡片。",
+                },
+                "template_card": template_card,
+            },
+        }
+        await self.ws.send_reply(payload)
 
     async def _reply_stream(self, req_id: str, stream_id: str, content: str, finish: bool):
         """通过WebSocket发送流式消息回复"""

@@ -1,6 +1,6 @@
 # ClawRelay WeCom Server
 
-企业微信 AI 机器人中转服务 —— 支持 Claude Code、Gemini、OpenAI 等多种 AI 模型。
+企业微信 AI 机器人中转服务 —— 支持 Claude Code、本地 Codex CLI、Codex API、Gemini、OpenAI 等多种 AI 模型。
 
 > A WeCom (Enterprise WeChat) bot relay for multiple AI models. Open-source alternative to [Openclaw](https://github.com/nicepkg/openclaw).
 
@@ -11,6 +11,8 @@
 
 **支持的 AI 模型：**
 - **Claude Code** - 通过 [clawrelay-api](https://github.com/roodkcab/clawrelay-api) 连接，支持代码操作和工具调用
+- **OpenAI Codex API** - 通过 OpenAI Responses API 调用 Codex 模型，适合代码分析与实现
+- **本地 Codex CLI** - 直接调用本机 `codex app-server` 原生交互协议，更适合本地代码修改、命令执行与排障
 - **Google Gemini** - 直接调用 Gemini API，支持 Google Search 联网功能
 - **OpenAI GPT** - 直接调用 OpenAI API，支持自定义 base_url（兼容第三方 API）
 - **自动模型选择** - 留空 model 字段，自动选择最佳可用模型
@@ -31,7 +33,8 @@
 2. 根据需要选择：
    - **Claude Code**: 需要 [clawrelay-api](https://github.com/roodkcab/clawrelay-api) 运行在本机（默认端口 50009）
    - **Gemini**: 需要 Gemini API Key
-   - **OpenAI**: 需要 OpenAI API Key 或第三方兼容 API
+   - **OpenAI / Codex API**: 需要 OpenAI API Key 或第三方兼容 API
+   - **本地 Codex CLI**: 需要本机已安装并登录 `codex`，且服务进程能访问目标工作目录
 
 然后：
 
@@ -121,7 +124,7 @@ docker compose down           # 停止
 
 | 特性 | 说明 |
 |------|------|
-| **多 AI 模型** | 支持 Claude Code、Gemini、OpenAI，可同时运行多个不同模型的机器人 |
+| **多 AI 模型** | 支持 Claude Code、本地 Codex CLI、Codex API、Gemini、OpenAI，可同时运行多个不同模型的机器人 |
 | **自动模型选择** | Gemini 和 OpenAI 支持自动选择最佳可用模型 |
 | **Google Search** | Gemini 支持联网搜索功能 |
 | **第三方 API** | OpenAI 兼容格式，支持任何第三方 API 服务 |
@@ -242,6 +245,76 @@ python list_openai_models.py --base-url https://api.openai.com/v1 --api-key YOUR
 python list_openai_models.py
 ```
 
+### Codex API 机器人
+
+```yaml
+bots:
+  codex_bot:
+    # === 必填 ===
+    bot_id: "YOUR_CODEX_BOT_ID"
+    secret: "YOUR_CODEX_BOT_SECRET"
+    bot_type: "codex"                      # 机器人类型
+
+    # === 可选 ===
+    name: "Codex Assistant"
+    description: "OpenAI Codex coding bot"
+    model: ""                               # 留空默认使用 gpt-5.3-codex
+    system_prompt: "你是一个擅长代码分析和实现的 AI 助手。"
+
+    # === Provider 配置 ===
+    provider_config:
+      api_key: "YOUR_OPENAI_API_KEY"       # OpenAI API Key
+      base_url: "https://api.openai.com/v1"  # 可选，自定义 API 端点
+      reasoning_effort: "medium"            # 可选: low | medium | high
+```
+
+**说明：**
+- `codex` 类型使用 OpenAI Responses API，而不是 `clawrelay-api`
+- `model` 留空时默认使用 `gpt-5.3-codex`
+- 支持文本、图片、文件输入，以及 `reset` / `new` 会话重置命令
+- 如需普通对话模型，仍建议使用 `openai` 类型
+
+
+### Codex CLI 机器人
+
+```yaml
+bots:
+  codex_cli_bot:
+    # === 必填 ===
+    bot_id: "YOUR_CODEX_CLI_BOT_ID"
+    secret: "YOUR_CODEX_CLI_BOT_SECRET"
+    bot_type: "codex_cli"                  # 机器人类型
+    working_dir: "/path/to/project"        # 必填，本地项目目录
+
+    # === 可选 ===
+    name: "Codex CLI"
+    description: "Local Codex CLI coding bot"
+    model: ""                               # 留空默认使用 gpt-5.3-codex
+    system_prompt: "你是一个擅长本地代码修改与排障的 AI 助手。"
+
+    env_vars:                               # 可选，传给 codex 子进程
+      OPENAI_API_KEY: "YOUR_OPENAI_API_KEY"
+
+    provider_config:
+      codex_path: "/home/youruser/.nvm/versions/node/v20.20.1/bin/codex"
+      sandbox_mode: "workspace-write"      # 可选: read-only | workspace-write
+      skip_git_repo_check: false
+      approval_policy: "on-request"     # 可选: untrusted | on-request | on-failure | never
+      dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
+      # add_dirs:
+      #   - "/another/writable/path"
+      # profile: "default"
+```
+
+**说明：**
+- `codex_cli` 类型直接启动本机 `codex app-server --listen stdio://`，**不经过** `clawrelay-api`
+- 如果服务进程拿不到 `PATH` 中的 `codex`，可显式配置 `provider_config.codex_path`
+- 会按企业微信会话保存 `thread_id`，后续消息自动走 `thread/resume + turn/start`
+- 图片会作为本地图片附件传给 Codex；文件会落到工作目录下的 `.wecom_uploads/<bot_key>/...`
+- 若当前环境的 Codex 沙箱不可用（例如 `bwrap` / user namespace 异常），可在**可信环境**里启用 `dangerously_bypass_approvals_and_sandbox: true`
+- 审批、文件改动确认、补充提问会通过企业微信模板卡片/文字回复回传，体验更接近原生交互式 Codex
+- 这个类型更适合本地读写代码、执行命令、排障
+
 ### 多机器人配置示例
 
 可以在同一个服务中运行多个不同类型的机器人：
@@ -275,6 +348,30 @@ bots:
     provider_config:
       api_key: "YOUR_KEY"
       base_url: "https://api.example.com/v1"
+
+  # Codex API 机器人 - 用于代码分析
+  codex_assistant:
+    bot_id: "BOT_ID_4"
+    secret: "SECRET_4"
+    bot_type: "codex"
+    model: ""
+    provider_config:
+      api_key: "OPENAI_KEY"
+      base_url: "https://api.openai.com/v1"
+      reasoning_effort: "medium"
+
+  # 本地 Codex CLI 机器人 - 用于直接改代码和执行命令
+  codex_cli_assistant:
+    bot_id: "BOT_ID_5"
+    secret: "SECRET_5"
+    bot_type: "codex_cli"
+    working_dir: "/workspace"
+    env_vars:
+      OPENAI_API_KEY: "OPENAI_KEY"
+    provider_config:
+      sandbox_mode: "workspace-write"
+      approval_policy: "on-request"
+      dangerously_bypass_approvals_and_sandbox: false
 
     custom_commands:                        # 自定义命令模块
       - "src.handlers.custom.demo_commands"

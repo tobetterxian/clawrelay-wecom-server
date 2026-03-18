@@ -19,7 +19,7 @@ class TaskRegistry:
     def __init__(self):
         self._tasks: dict[str, asyncio.Task] = {}
         self._stream_ids: dict[str, str] = {}
-        self._extra: dict[str, dict] = {}  # 额外元数据（如 req_id）
+        self._extra: dict[str, dict] = {}  # 额外元数据（如 req_id、reply_state）
         self._lock = threading.Lock()
         logger.info("[TaskRegistry] 初始化完成")
 
@@ -43,7 +43,6 @@ class TaskRegistry:
 
         def _cleanup(t: asyncio.Task, _key=key):
             with self._lock:
-                # 对比引用，避免误删新注册的任务
                 if self._tasks.get(_key) is t:
                     del self._tasks[_key]
                     self._stream_ids.pop(_key, None)
@@ -52,6 +51,22 @@ class TaskRegistry:
 
         task.add_done_callback(_cleanup)
         logger.info("[TaskRegistry] 注册任务: key=%s, stream_id=%s", key, stream_id)
+
+    def get(self, key: str) -> tuple[Optional[asyncio.Task], Optional[str], dict]:
+        """获取任务、stream_id 与扩展上下文"""
+        with self._lock:
+            return self._tasks.get(key), self._stream_ids.get(key), self._extra.get(key, {})
+
+    def update_stream(self, key: str, stream_id: str, **extra) -> bool:
+        """更新运行中任务的回复通道信息"""
+        with self._lock:
+            task = self._tasks.get(key)
+            if not task or task.done():
+                return False
+            self._stream_ids[key] = stream_id
+            current = self._extra.setdefault(key, {})
+            current.update(extra)
+            return True
 
     def cancel(self, key: str) -> tuple[bool, Optional[str], dict]:
         """取消任务
@@ -78,7 +93,6 @@ class TaskRegistry:
             return task is not None and not task.done()
 
 
-# 全局单例
 _global_task_registry: Optional[TaskRegistry] = None
 _registry_lock = threading.Lock()
 

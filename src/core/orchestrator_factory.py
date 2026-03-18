@@ -10,6 +10,8 @@ from typing import Optional
 from config.bot_config import BotConfig
 from .base_orchestrator import BaseOrchestrator
 from .claude_relay_orchestrator import ClaudeRelayOrchestrator
+from .codex_orchestrator import CodexOrchestrator
+from .codex_cli_orchestrator import CodexCliOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +91,50 @@ class OrchestratorFactory:
                 base_url=base_url,
             )
 
+        elif bot_type == "codex":
+            provider_config = bot_config.provider_config or {}
+            api_key = provider_config.get("api_key")
+            if not api_key:
+                raise ValueError(
+                    f"Codex 机器人 {bot_config.bot_key} 缺少 provider_config.api_key"
+                )
+
+            return CodexOrchestrator(
+                bot_key=bot_config.bot_key,
+                api_key=api_key,
+                model=bot_config.model or "",
+                system_prompt=bot_config.system_prompt or "",
+                base_url=provider_config.get("base_url"),
+                reasoning_effort=provider_config.get("reasoning_effort", "medium"),
+            )
+
+        elif bot_type == "codex_cli":
+            provider_config = bot_config.provider_config or {}
+            working_dir = bot_config.working_dir or ""
+            if not working_dir:
+                raise ValueError(
+                    f"Codex CLI 机器人 {bot_config.bot_key} 缺少 working_dir 配置"
+                )
+
+            return CodexCliOrchestrator(
+                bot_key=bot_config.bot_key,
+                working_dir=working_dir,
+                model=bot_config.model or "",
+                system_prompt=bot_config.system_prompt or "",
+                env_vars=bot_config.env_vars or None,
+                sandbox_mode=provider_config.get("sandbox_mode", "workspace-write"),
+                skip_git_repo_check=provider_config.get("skip_git_repo_check", False),
+                dangerously_bypass_approvals_and_sandbox=provider_config.get(
+                    "dangerously_bypass_approvals_and_sandbox", False
+                ),
+                add_dirs=provider_config.get("add_dirs") or None,
+                profile=provider_config.get("profile", ""),
+                executable=provider_config.get("codex_path", "codex"),
+                approval_policy=provider_config.get("approval_policy", "on-request"),
+            )
+
         else:
             raise ValueError(
                 f"不支持的 bot_type: {bot_type}，支持的类型: "
-                f"claude_code, gemini, openai"
+                f"claude_code, gemini, openai, codex, codex_cli"
             )

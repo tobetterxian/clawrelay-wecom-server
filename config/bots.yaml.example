@@ -13,7 +13,7 @@ bots:
     bot_id: "YOUR_BOT_ID"
     secret: "YOUR_BOT_SECRET"
 
-    # [Required] Bot type: claude_code | gemini | openai
+    # [Required] Bot type: claude_code | gemini | openai | codex | codex_cli
     bot_type: "claude_code"
 
     # [Required] ClawRelay API endpoint
@@ -80,6 +80,46 @@ bots:
   #   provider_config:
   #     api_key: "YOUR_OPENAI_API_KEY"
   #     base_url: "https://api.openai.com/v1"  # 可选，用于自定义端点或第三方兼容服务
+
+  # ========================================
+  # Codex 机器人（通过 OpenAI Responses API）
+  # ========================================
+  # codex_bot:
+  #   bot_id: "YOUR_CODEX_BOT_ID"
+  #   secret: "YOUR_CODEX_BOT_SECRET"
+  #   bot_type: "codex"
+  #   name: "Codex Assistant"
+  #   description: "OpenAI Codex coding bot"
+  #   model: ""  # 留空默认使用 gpt-5.3-codex
+  #   system_prompt: "你是一个擅长代码分析和实现的 AI 助手。"
+  #   provider_config:
+  #     api_key: "YOUR_OPENAI_API_KEY"
+  #     base_url: "https://api.openai.com/v1"
+  #     reasoning_effort: "medium"  # 可选: low | medium | high
+
+  # ========================================
+  # Codex CLI 机器人（直接调用本地 codex CLI）
+  # ========================================
+  # codex_cli_bot:
+  #   bot_id: "YOUR_CODEX_CLI_BOT_ID"
+  #   secret: "YOUR_CODEX_CLI_BOT_SECRET"
+  #   bot_type: "codex_cli"
+  #   name: "Codex CLI"
+  #   description: "Local Codex CLI coding bot"
+  #   working_dir: "/path/to/project"  # 必填，本地项目目录
+  #   model: ""  # 留空默认使用 gpt-5.3-codex
+  #   system_prompt: "你是一个擅长本地代码修改与排障的 AI 助手。"
+  #   env_vars:
+  #     OPENAI_API_KEY: "YOUR_OPENAI_API_KEY"
+  #   provider_config:
+  #     codex_path: "/home/youruser/.nvm/versions/node/v20.20.1/bin/codex"
+  #     sandbox_mode: "workspace-write"   # 可选: read-only | workspace-write
+  #     skip_git_repo_check: false
+  #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never
+  #     dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
+  #     # add_dirs:
+  #     #   - "/another/writable/path"
+  #     # profile: "default"
 
   # ========================================
   # Claude 机器人（通过第三方 API）
