@@ -104,6 +104,23 @@ class MessageDispatcher:
             return chatid
         return chatid or user_id
 
+    @staticmethod
+    def _build_log_context(body: dict, chattype: str, message_type: str, **extra) -> dict:
+        context = {
+            "chat_type": chattype,
+            "chat_id": body.get("chatid", ""),
+            "message_type": message_type,
+        }
+        context.update(extra)
+        return context
+
+    def _resolve_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        return self.orchestrator.get_runtime_session_key(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context or {},
+        )
+
     def _make_orchestrator_call_kwargs(self, req_id: str) -> dict:
         if self.config.bot_type != "codex_cli":
             return {}
@@ -227,64 +244,66 @@ class MessageDispatcher:
         if not content:
             return
 
-        # 过滤@机器人名称前缀
         if self.bot_name and content.startswith(f"@{self.bot_name} "):
             content = content[len(f"@{self.bot_name} "):].strip()
         if self.bot_name and content.startswith(f"@{self.bot_name}"):
             content = content[len(f"@{self.bot_name}"):].strip()
 
-        # 检查命令
         normalized = content.strip().lower()
+        log_context = self._build_log_context(body, chattype, "text")
+        runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
 
-        # 重置会话命令
         if normalized in ("reset", "new", "clear", "重置", "清空"):
-            await self.session_manager.clear_session(self.bot_key, session_key)
-            await self.orchestrator.clear_session(session_key)
+            await self.session_manager.clear_session(self.bot_key, runtime_session_key)
+            await self.orchestrator.clear_session(runtime_session_key)
             await self._reply_text(req_id, "会话已重置，可以开始新的对话。", finish=True)
             return
 
-        # 停止任务命令
         import re
         stop_msg = re.sub(r'[^\w\u4e00-\u9fff]', '', normalized)
         if stop_msg in ("stop", "停止", "暂停", "停"):
             from src.core.task_registry import get_task_registry
-            cancelled, old_stream_id, extra = get_task_registry().cancel(f"{self.bot_key}:{session_key}")
+            cancelled, old_stream_id, extra = get_task_registry().cancel(f"{self.bot_key}:{runtime_session_key}")
             if cancelled:
-                # 用旧 stream 的 req_id + stream_id finish 旧消息气泡
                 old_req_id = extra.get("req_id")
                 if old_stream_id and old_req_id:
                     await self._reply_stream(old_req_id, old_stream_id, "⏹ 任务已被用户停止。", finish=True)
-                # 回复 stop 命令本身
                 await self._reply_text(req_id, "⏹ 已停止当前任务。", finish=True)
             else:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
             return
 
-        if self.orchestrator.has_pending_interaction(session_key):
-            interaction_result = await self.orchestrator.handle_interaction_text(session_key, content)
+        if self.orchestrator.has_pending_interaction(runtime_session_key):
+            interaction_result = await self.orchestrator.handle_interaction_text(runtime_session_key, content)
             if interaction_result:
                 ack = interaction_result.get("ack", "")
                 submitted = bool(interaction_result.get("submitted"))
-                if submitted and await self._handoff_running_reply(session_key, req_id, ack):
+                if submitted and await self._handoff_running_reply(runtime_session_key, req_id, ack):
                     return
                 if ack:
                     await self._reply_text(req_id, ack, finish=True)
                     return
 
-        # 检查内置/自定义命令
+        control_reply = await self.orchestrator.handle_control_command(
+            user_id=user_id,
+            content=content,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        if control_reply:
+            await self._reply_text(req_id, control_reply, finish=True)
+            return
+
         handler = self.command_router.handlers.get(content) or self.command_router.handlers.get(normalized)
         if handler:
             stream_id = uuid.uuid4().hex[:12]
             try:
                 msg_json, _ = handler.handle(content, stream_id, user_id)
-                # 命令处理器返回的是 MessageBuilder 格式的 JSON 字符串
                 import json as _json
                 msg_data = _json.loads(msg_json)
-                # 提取文本内容通过流式回复发送
                 if msg_data.get("msgtype") == "stream":
                     text_content = msg_data.get("stream", {}).get("content", "")
                 elif msg_data.get("msgtype") == "template_card":
-                    # 模板卡片暂不支持通过流式回复，回退为文本提示
                     text_content = "模板卡片命令暂不支持，请使用其他命令。"
                 else:
                     text_content = str(msg_data)
@@ -294,18 +313,14 @@ class MessageDispatcher:
                 await self._reply_text(req_id, f"命令处理出错：{e}", finish=True)
             return
 
-        # 调用AI处理，带节流流式推送
         stream_id = uuid.uuid4().hex[:12]
-        log_context = {
-            'chat_type': chattype,
-            'chat_id': body.get('chatid', ''),
-            'message_type': 'text',
-        }
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
         on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
-            req_id, stream_id, session_key,
+            req_id,
+            stream_id,
+            runtime_session_key,
             self.orchestrator.handle_text_message(
                 user_id=user_id,
                 message=content,
@@ -327,7 +342,9 @@ class MessageDispatcher:
         if not image_url:
             return
 
-        if self.orchestrator.has_pending_interaction(session_key):
+        log_context = self._build_log_context(body, chattype, "image")
+        runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
+        if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
@@ -343,12 +360,11 @@ class MessageDispatcher:
             return
 
         stream_id = uuid.uuid4().hex[:12]
-        log_context = {'chat_type': chattype, 'message_type': 'image'}
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
         on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
-            req_id, stream_id, session_key,
+            req_id, stream_id, runtime_session_key,
             self.orchestrator.handle_multimodal_message(
                 user_id=user_id,
                 content_blocks=content_blocks,
@@ -383,7 +399,9 @@ class MessageDispatcher:
         if not file_url:
             return
 
-        if self.orchestrator.has_pending_interaction(session_key):
+        log_context = self._build_log_context(body, chattype, "file")
+        runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
+        if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
@@ -402,12 +420,12 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         message = f"[用户发送了文件: {file_name}] 请分析这个文件的内容。"
-        log_context = {'chat_type': chattype, 'message_type': 'file', 'file_info': [{'filename': file_name}]}
+        log_context["file_info"] = [{"filename": file_name}]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
         on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
-            req_id, stream_id, session_key,
+            req_id, stream_id, runtime_session_key,
             self.orchestrator.handle_file_message(
                 user_id=user_id,
                 message=message,
@@ -424,12 +442,13 @@ class MessageDispatcher:
     async def _handle_mixed(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理图文混排消息"""
         mixed_data = body.get("mixed", {})
-        # 企业微信回调字段名为 msg_item（兼容 items）
         items = mixed_data.get("msg_item") or mixed_data.get("items") or []
         if not items:
             return
 
-        if self.orchestrator.has_pending_interaction(session_key):
+        log_context = self._build_log_context(body, chattype, "mixed")
+        runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
+        if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
@@ -437,9 +456,9 @@ class MessageDispatcher:
         for item in items:
             item_type = item.get("msgtype", "")
             if item_type == "text":
-                text = item.get("text", {}).get("content", "")
-                if text:
-                    content_blocks.append({"type": "text", "text": text})
+                text_value = item.get("text", {}).get("content", "")
+                if text_value:
+                    content_blocks.append({"type": "text", "text": text_value})
             elif item_type == "image":
                 image_url = item.get("image", {}).get("url", "")
                 aeskey = item.get("image", {}).get("aeskey", "")
@@ -452,8 +471,6 @@ class MessageDispatcher:
                     except Exception as e:
                         logger.warning("[Dispatcher:%s] 混排图片解密失败: %s", self.bot_key, e)
                         content_blocks.append({"type": "text", "text": "[图片加载失败]"})
-                elif image_url:
-                    content_blocks.append({"type": "text", "text": "[图片]"})
                 else:
                     content_blocks.append({"type": "text", "text": "[图片]"})
 
@@ -461,12 +478,11 @@ class MessageDispatcher:
             return
 
         stream_id = uuid.uuid4().hex[:12]
-        log_context = {'chat_type': chattype, 'message_type': 'mixed'}
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
         on_stream_delta = self._make_stream_delta_callback(reply_state)
 
         await self._run_with_task_registry(
-            req_id, stream_id, session_key,
+            req_id, stream_id, runtime_session_key,
             self.orchestrator.handle_multimodal_message(
                 user_id=user_id,
                 content_blocks=content_blocks,
@@ -525,36 +541,39 @@ class MessageDispatcher:
         event = body.get("event", {}) or {}
         task_id = event.get("task_id", "")
         session_key = self._resolve_session_key(body, user_id)
+        chattype = body.get("chattype") or event.get("chattype") or "single"
+        log_context = self._build_log_context(body, chattype, "template_card")
+        runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
 
         if task_id.startswith("choice@"):
             logger.info("[Dispatcher:%s] 处理AskUserQuestion卡片点击: task_id=%s", self.bot_key, task_id)
-            # TODO: 集成choice_manager处理逻辑
             return
 
         if task_id.startswith("codex@"):
-            has_pending = self.orchestrator.has_pending_interaction(session_key)
+            has_pending = self.orchestrator.has_pending_interaction(runtime_session_key)
             logger.info(
-                "[Dispatcher:%s] 处理 Codex 交互卡片: task_id=%s, session_key=%s, has_pending=%s, event=%s",
+                "[Dispatcher:%s] 处理 Codex 交互卡片: task_id=%s, session_key=%s, runtime_session_key=%s, has_pending=%s, event=%s",
                 self.bot_key,
                 task_id,
                 session_key,
+                runtime_session_key,
                 has_pending,
                 event,
             )
-            interaction_result = await self.orchestrator.handle_interaction_card(session_key, event)
+            interaction_result = await self.orchestrator.handle_interaction_card(runtime_session_key, event)
             if interaction_result:
                 ack = interaction_result.get("ack", "")
                 submitted = bool(interaction_result.get("submitted"))
-                if submitted and await self._handoff_running_reply(session_key, req_id, ack):
+                if submitted and await self._handoff_running_reply(runtime_session_key, req_id, ack):
                     return
                 if ack:
                     await self._reply_text(req_id, ack, finish=True)
             else:
                 logger.warning(
-                    "[Dispatcher:%s] Codex 卡片点击未产生响应: task_id=%s, session_key=%s, event=%s",
+                    "[Dispatcher:%s] Codex 卡片点击未产生响应: task_id=%s, runtime_session_key=%s, event=%s",
                     self.bot_key,
                     task_id,
-                    session_key,
+                    runtime_session_key,
                     event,
                 )
             return

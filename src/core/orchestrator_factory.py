@@ -131,6 +131,11 @@ class OrchestratorFactory:
                 profile=provider_config.get("profile", ""),
                 executable=provider_config.get("codex_path", "codex"),
                 approval_policy=provider_config.get("approval_policy", "on-request"),
+                workspace_root=provider_config.get("workspace_root", ""),
+                workspace_strategy=provider_config.get("workspace_strategy", "copy"),
+                default_group_workspace_mode=provider_config.get("default_group_workspace_mode", "personal"),
+                session_timeout_seconds=provider_config.get("session_timeout_seconds", 7200),
+                enable_project_workspace_mode=provider_config.get("enable_project_workspace_mode", True),
             )
 
         else:

@@ -15,11 +15,13 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .chat_logger import get_chat_logger
-from .session_manager import SessionManager
+from .project_registry import ProjectRegistry
+from .session_binding_manager import SessionBindingManager
+from .workspace_manager import WorkspaceManager
 from src.adapters.codex_app_server_adapter import (
     CodexAgentMessage,
     CodexAppServerAdapter,
@@ -35,8 +37,10 @@ from src.utils.weixin_utils import TemplateCardBuilder
 logger = logging.getLogger(__name__)
 
 DEFAULT_CODEX_CLI_MODEL = "gpt-5.3-codex"
-UPLOAD_ROOT_NAME = ".wecom_uploads"
 DEFAULT_APPROVAL_POLICY = "on-request"
+DEFAULT_WORKSPACE_ROOT_NAME = ".codex_data"
+MODE_PERSONAL = "personal_workspace"
+MODE_SHARED = "shared_workspace"
 
 OnInteractionRequest = Optional[Callable[[dict], Awaitable[None]]]
 
@@ -69,33 +73,124 @@ class CodexCliOrchestrator(BaseOrchestrator):
         profile: str = "",
         executable: str = "codex",
         approval_policy: str = DEFAULT_APPROVAL_POLICY,
+        workspace_root: str = "",
+        workspace_strategy: str = "copy",
+        default_group_workspace_mode: str = "personal",
+        session_timeout_seconds: int = 7200,
+        enable_project_workspace_mode: bool = True,
     ):
         self.bot_key = bot_key
         self.system_prompt = system_prompt or ""
-        self.working_dir = str(Path(working_dir).expanduser().resolve())
+        self.base_working_dir = str(Path(working_dir).expanduser().resolve())
+        self.workspace_root = str(
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root
+            else (Path(self.base_working_dir) / DEFAULT_WORKSPACE_ROOT_NAME).resolve()
+        )
+        self.workspace_strategy = workspace_strategy or "copy"
+        self.default_group_workspace_mode = (
+            MODE_SHARED
+            if str(default_group_workspace_mode).strip().lower() == "shared"
+            else MODE_PERSONAL
+        )
+        self.enable_project_workspace_mode = bool(enable_project_workspace_mode)
+        self.base_add_dirs = [str(Path(item).expanduser().resolve()) for item in (add_dirs or []) if item]
+
+        Path(self.workspace_root).mkdir(parents=True, exist_ok=True)
+        self.upload_root = Path(self.workspace_root) / "uploads" / self.bot_key
+        self.upload_root.mkdir(parents=True, exist_ok=True)
+
         self.adapter = CodexAppServerAdapter(
             model=model or DEFAULT_CODEX_CLI_MODEL,
-            working_dir=self.working_dir,
+            working_dir=self.base_working_dir,
             env_vars=env_vars,
             sandbox_mode=sandbox_mode,
             skip_git_repo_check=skip_git_repo_check,
             dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
-            add_dirs=add_dirs,
+            add_dirs=self.base_add_dirs,
             profile=profile,
             executable=executable,
             approval_policy=approval_policy,
         )
-        self.session_manager = SessionManager()
-        self.upload_root = Path(self.working_dir) / UPLOAD_ROOT_NAME / self.bot_key
-        self.upload_root.mkdir(parents=True, exist_ok=True)
+        self.project_registry = ProjectRegistry(self.workspace_root)
+        self.workspace_manager = WorkspaceManager(
+            self.workspace_root,
+            workspace_strategy=self.workspace_strategy,
+        )
+        self.binding_manager = SessionBindingManager(
+            self.workspace_root,
+            session_timeout_seconds=session_timeout_seconds,
+        )
         self._active_sessions: Dict[str, CodexAppServerSession] = {}
+        self._active_runtime_contexts: Dict[str, dict] = {}
 
         logger.info(
-            "[CodexCLI] 编排器初始化完成: bot_key=%s, working_dir=%s, upload_root=%s",
+            "[CodexCLI] 编排器初始化完成: bot_key=%s, working_dir=%s, workspace_root=%s, upload_root=%s, project_mode=%s",
             self.bot_key,
-            self.working_dir,
+            self.base_working_dir,
+            self.workspace_root,
             self.upload_root,
+            self.enable_project_workspace_mode,
         )
+
+    def get_runtime_session_key(
+        self,
+        user_id: str,
+        session_key: str = "",
+        log_context: dict = None,
+    ) -> str:
+        effective_key = session_key or user_id
+        if not self.enable_project_workspace_mode:
+            return effective_key
+
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type != "group":
+            return effective_key
+
+        binding = self.binding_manager.get_binding(self.bot_key, effective_key)
+        mode = (binding or {}).get("mode") or self.default_group_workspace_mode
+        if mode == MODE_SHARED:
+            return effective_key
+        return self._compose_personal_runtime_session_key(effective_key, user_id)
+
+    async def handle_control_command(
+        self,
+        user_id: str,
+        content: str,
+        session_key: str = "",
+        log_context: dict = None,
+    ) -> Optional[str]:
+        if not self.enable_project_workspace_mode:
+            return None
+
+        command = (content or "").strip()
+        if not command:
+            return None
+
+        if command == "项目列表":
+            return self._handle_list_projects_command(user_id, session_key, log_context)
+        if command == "当前项目":
+            return self._handle_current_project_command(user_id, session_key, log_context)
+        if command in {"当前工作区", "我的工作区"}:
+            return self._handle_current_workspace_command(user_id, session_key, log_context)
+        if command == "工作区列表":
+            return self._handle_list_workspaces_command(user_id, session_key, log_context)
+        if command == "使用个人工作区":
+            return self._handle_use_personal_workspace_command(user_id, session_key, log_context)
+        if command == "使用共享工作区":
+            return self._handle_use_shared_workspace_command(user_id, session_key, log_context)
+        if command.startswith("新建项目"):
+            project_name = command[len("新建项目") :].strip()
+            if not project_name:
+                return "用法：新建项目 <名称>"
+            return self._handle_create_project_command(user_id, project_name, session_key, log_context)
+        if command.startswith("进入项目"):
+            target = command[len("进入项目") :].strip()
+            if not target:
+                return "用法：进入项目 <名称或ID>"
+            return self._handle_enter_project_command(user_id, target, session_key, log_context)
+        return None
 
     async def handle_text_message(
         self,
@@ -129,9 +224,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
         on_stream_delta: OnStreamDelta = None,
         on_interaction_request: OnInteractionRequest = None,
     ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        if early_reply:
+            return await self._return_early_reply(early_reply, on_stream_delta)
+
         inputs, summary = await self._stage_and_build_inputs(
             content_blocks=content_blocks,
-            session_key=session_key or user_id,
+            upload_dir=runtime_context["upload_dir"],
+            working_dir=runtime_context["working_dir"],
         )
         return await self._run_codex_turn(
             user_id=user_id,
@@ -142,6 +246,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             on_stream_delta=on_stream_delta,
             on_interaction_request=on_interaction_request,
             message_content=summary,
+            runtime_context=runtime_context,
         )
 
     async def handle_file_message(
@@ -170,8 +275,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
         runtime = self._active_sessions.pop(session_key, None)
         if runtime:
             await runtime.close()
-        await self.session_manager.clear_session(self.bot_key, session_key)
-        upload_dir = self.upload_root / self._safe_name(session_key)
+        self._active_runtime_contexts.pop(session_key, None)
+        if self.enable_project_workspace_mode:
+            self.binding_manager.clear_thread(self.bot_key, session_key)
+        upload_dir = self._upload_dir_for_session(session_key)
         if upload_dir.exists():
             shutil.rmtree(upload_dir, ignore_errors=True)
         logger.info("[CodexCLI] 清空会话: bot=%s, session_key=%s", self.bot_key, session_key)
@@ -222,21 +329,47 @@ class CodexCliOrchestrator(BaseOrchestrator):
         on_stream_delta: OnStreamDelta,
         on_interaction_request: OnInteractionRequest,
         message_content: str,
+        runtime_context: dict = None,
     ) -> str:
         start_time = time.time()
         request_at = datetime.now()
         chat_logger = get_chat_logger()
-        log_context = log_context or {}
-        effective_key = session_key or user_id
-        current_thread_id = await self.session_manager.get_relay_session_id(
-            self.bot_key, effective_key
+        log_context = dict(log_context or {})
+
+        resolved_context, early_reply = self._ensure_runtime_context(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context,
         )
+        runtime_context = runtime_context or resolved_context
+        if early_reply:
+            if on_stream_delta:
+                await on_stream_delta(early_reply, True)
+            return early_reply
+        if runtime_context is None:
+            reply = self._group_project_required_message()
+            if on_stream_delta:
+                await on_stream_delta(reply, True)
+            return reply
+
+        effective_key = runtime_context["runtime_session_key"]
+        current_thread_id = runtime_context.get("thread_id") or ""
 
         response_text = ""
         thinking_lines = ["🤖 Codex 正在处理..."]
+        if runtime_context.get("project"):
+            thinking_lines.append(f"📁 项目：{runtime_context['project'].get('name')}")
+        thinking_lines.append(f"📂 工作区：{runtime_context['working_dir']}")
+        if runtime_context.get("initial_notice"):
+            thinking_lines.append(runtime_context["initial_notice"])
+
         commands_seen: List[str] = []
-        runtime = self.adapter.create_session()
+        runtime = self.adapter.create_session(
+            working_dir=runtime_context["working_dir"],
+            add_dirs=self._build_runtime_add_dirs(runtime_context["upload_dir"]),
+        )
         self._active_sessions[effective_key] = runtime
+        self._active_runtime_contexts[effective_key] = runtime_context
 
         try:
             current_thread_id = await runtime.start(
@@ -244,7 +377,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 developer_instructions=self._build_effective_system_prompt(user_id),
             )
             if current_thread_id:
-                await self.session_manager.save_relay_session_id(
+                self.binding_manager.save_thread_id(
                     self.bot_key,
                     effective_key,
                     current_thread_id,
@@ -306,10 +439,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                             pending_text = visible_prompt
                     if on_stream_delta:
                         await on_stream_delta(
-                            self._build_display_content(
-                                thinking_lines,
-                                pending_text,
-                            ),
+                            self._build_display_content(thinking_lines, pending_text),
                             False,
                         )
                     if on_interaction_request:
@@ -330,7 +460,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 await on_stream_delta(final_text, True)
 
             latency_ms = int((time.time() - start_time) * 1000)
-            log_context["session_key"] = effective_key
+            log_context["session_key"] = session_key or user_id
+            log_context["runtime_session_key"] = effective_key
+            log_context["workspace_path"] = runtime_context["working_dir"]
+            log_context["project_id"] = (runtime_context.get("project") or {}).get("project_id")
+            log_context["workspace_id"] = (runtime_context.get("workspace") or {}).get("workspace_id")
             log_context["codex_thread_id"] = current_thread_id or None
             chat_logger.log(
                 bot_key=self.bot_key,
@@ -351,7 +485,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
             logger.warning("[CodexCLI] 任务被取消: bot=%s, user=%s", self.bot_key, user_id)
             await runtime.close()
             latency_ms = int((time.time() - start_time) * 1000)
-            log_context["session_key"] = effective_key
+            log_context["session_key"] = session_key or user_id
+            log_context["runtime_session_key"] = effective_key
+            log_context["workspace_path"] = runtime_context["working_dir"]
             chat_logger.log(
                 bot_key=self.bot_key,
                 user_id=user_id,
@@ -369,7 +505,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
             logger.error("[CodexCLI] 处理消息失败: %s", e, exc_info=True)
             await runtime.close()
             latency_ms = int((time.time() - start_time) * 1000)
-            log_context["session_key"] = effective_key
+            log_context["session_key"] = session_key or user_id
+            log_context["runtime_session_key"] = effective_key
+            log_context["workspace_path"] = runtime_context["working_dir"]
             chat_logger.log(
                 bot_key=self.bot_key,
                 user_id=user_id,
@@ -385,6 +523,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             raise
         finally:
             self._active_sessions.pop(effective_key, None)
+            self._active_runtime_contexts.pop(effective_key, None)
             await runtime.close()
 
     def _build_effective_system_prompt(self, user_id: str) -> str:
@@ -398,10 +537,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
     async def _stage_and_build_inputs(
         self,
         content_blocks: List[dict],
-        session_key: str,
-    ) -> tuple[List[dict], str]:
-        session_dir = self.upload_root / self._safe_name(session_key)
-        session_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir: Path,
+        working_dir: str,
+    ) -> Tuple[List[dict], str]:
+        upload_dir.mkdir(parents=True, exist_ok=True)
 
         text_parts: List[str] = []
         image_inputs: List[dict] = []
@@ -422,10 +561,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     continue
                 mime_type, file_bytes = self._decode_data_url(data_url)
                 ext = self._ext_from_mime(mime_type, default=".png")
-                image_path = session_dir / f"image-{index}{ext}"
+                image_path = upload_dir / f"image-{index}{ext}"
                 image_path.write_bytes(file_bytes)
                 image_inputs.append({"type": "localImage", "path": str(image_path)})
-                image_refs.append(self._relative_upload_path(image_path))
+                image_refs.append(self._relative_upload_path(image_path, working_dir))
                 summary_parts.append("[图片]")
             elif block_type == "file_url":
                 file_url = block.get("file_url", {})
@@ -435,9 +574,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     continue
                 _, file_bytes = self._decode_data_url(data_url)
                 safe_name = self._safe_filename(filename)
-                file_path = session_dir / safe_name
+                file_path = upload_dir / safe_name
                 file_path.write_bytes(file_bytes)
-                file_refs.append(self._relative_upload_path(file_path))
+                file_refs.append(self._relative_upload_path(file_path, working_dir))
                 summary_parts.append(f"[文件:{safe_name}]")
 
         turn_text_parts: List[str] = []
@@ -447,13 +586,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             turn_text_parts.append(
                 "## 用户上传的图片\n\n"
                 + "这些图片已作为本地图片附件传入，同时也保存在以下路径：\n"
-                + "\n".join(f"- {path}" for path in image_refs)
+                + "\n".join(f"- {item}" for item in image_refs)
             )
         if file_refs:
             turn_text_parts.append(
                 "## 用户上传的文件\n\n"
-                + "这些文件已经保存到当前工作目录，可直接读取以下路径：\n"
-                + "\n".join(f"- {path}" for path in file_refs)
+                + "这些文件已经保存到当前工作目录外的上传区，可直接读取以下路径：\n"
+                + "\n".join(f"- {item}" for item in file_refs)
             )
 
         if not text_parts:
@@ -470,6 +609,380 @@ class CodexCliOrchestrator(BaseOrchestrator):
         inputs: List[dict] = [{"type": "text", "text": "\n\n".join(turn_text_parts)}]
         inputs.extend(image_inputs)
         return inputs, summary
+
+    def _ensure_runtime_context(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> Tuple[Optional[dict], Optional[str]]:
+        effective_key = session_key or user_id
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        chat_id = (log_context.get("chat_id") or (effective_key if chat_type == "group" else "")).strip()
+
+        if not self.enable_project_workspace_mode:
+            runtime_session_key = effective_key
+            return {
+                "conversation_session_key": effective_key,
+                "runtime_session_key": runtime_session_key,
+                "working_dir": self.base_working_dir,
+                "upload_dir": self._upload_dir_for_session(runtime_session_key),
+                "thread_id": "",
+                "project": None,
+                "workspace": None,
+                "mode": "legacy",
+                "initial_notice": "",
+            }, None
+
+        if chat_type == "group":
+            return self._ensure_group_runtime_context(user_id, effective_key, chat_id)
+        return self._ensure_single_runtime_context(user_id, effective_key)
+
+    def _ensure_single_runtime_context(
+        self,
+        user_id: str,
+        conversation_key: str,
+    ) -> Tuple[dict, Optional[str]]:
+        binding = self.binding_manager.get_binding(self.bot_key, conversation_key)
+        project = self.project_registry.get_project((binding or {}).get("project_id", "")) if binding else None
+        initial_notice = ""
+        if not project:
+            project, created = self._get_or_create_default_personal_project(user_id)
+            if created:
+                initial_notice = f"🆕 已自动创建默认个人项目：{project['name']}"
+
+        workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+        runtime_binding = self.binding_manager.bind_session(
+            self.bot_key,
+            conversation_key,
+            project["project_id"],
+            workspace["workspace_id"],
+            MODE_PERSONAL,
+        )
+        self.project_registry.touch_project(project["project_id"])
+        return {
+            "conversation_session_key": conversation_key,
+            "runtime_session_key": conversation_key,
+            "working_dir": workspace["path"],
+            "upload_dir": self._upload_dir_for_session(conversation_key),
+            "thread_id": runtime_binding.get("codex_thread_id", ""),
+            "project": project,
+            "workspace": workspace,
+            "mode": MODE_PERSONAL,
+            "initial_notice": initial_notice,
+        }, None
+
+    def _ensure_group_runtime_context(
+        self,
+        user_id: str,
+        conversation_key: str,
+        chat_id: str,
+    ) -> Tuple[Optional[dict], Optional[str]]:
+        control_binding = self.binding_manager.get_binding(self.bot_key, conversation_key)
+        if not control_binding or not control_binding.get("project_id"):
+            return None, self._group_project_required_message()
+
+        project = self.project_registry.get_project(control_binding.get("project_id", ""))
+        if not project:
+            self.binding_manager.clear_binding(self.bot_key, conversation_key)
+            return None, self._group_project_required_message()
+
+        mode = control_binding.get("mode") or self.default_group_workspace_mode
+        if mode == MODE_SHARED:
+            workspace = self.workspace_manager.get_or_create_shared_workspace(project, chat_id)
+            runtime_session_key = conversation_key
+            runtime_binding = self.binding_manager.bind_session(
+                self.bot_key,
+                runtime_session_key,
+                project["project_id"],
+                workspace["workspace_id"],
+                MODE_SHARED,
+            )
+        else:
+            workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+            runtime_session_key = self._compose_personal_runtime_session_key(conversation_key, user_id)
+            runtime_binding = self.binding_manager.bind_session(
+                self.bot_key,
+                runtime_session_key,
+                project["project_id"],
+                workspace["workspace_id"],
+                MODE_PERSONAL,
+            )
+            self.binding_manager.bind_session(
+                self.bot_key,
+                conversation_key,
+                project["project_id"],
+                "",
+                MODE_PERSONAL,
+            )
+
+        self.project_registry.touch_project(project["project_id"])
+        return {
+            "conversation_session_key": conversation_key,
+            "runtime_session_key": runtime_session_key,
+            "working_dir": workspace["path"],
+            "upload_dir": self._upload_dir_for_session(runtime_session_key),
+            "thread_id": runtime_binding.get("codex_thread_id", ""),
+            "project": project,
+            "workspace": workspace,
+            "mode": mode,
+            "initial_notice": "",
+        }, None
+
+    def _get_or_create_default_personal_project(self, user_id: str) -> Tuple[dict, bool]:
+        existing = self.project_registry.resolve_project("default", user_id=user_id)
+        if existing:
+            return existing, False
+        project = self.project_registry.create_project(
+            name="default",
+            kind="personal",
+            owner_user_id=user_id,
+            source_type="local_path",
+            source_path=self.base_working_dir,
+        )
+        return project, True
+
+    def _handle_list_projects_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        chat_id = log_context.get("chat_id", "") if chat_type == "group" else ""
+        if chat_type == "group":
+            projects = [
+                item
+                for item in self.project_registry.list_projects(user_id=user_id, chat_id=chat_id)
+                if item.get("owner_chat_id") == chat_id
+            ]
+            current_binding = self.binding_manager.get_binding(self.bot_key, session_key)
+        else:
+            projects = self.project_registry.list_projects(user_id=user_id)
+            current_binding = self.binding_manager.get_binding(self.bot_key, session_key or user_id)
+
+        if not projects:
+            if chat_type == "group":
+                return "当前群聊还没有项目。\n\n可发送：\n- 新建项目 <名称>\n- 进入项目 <名称或ID>"
+            return "你当前还没有项目。\n\n可发送：\n- 新建项目 <名称>\n- 直接发需求（会自动创建默认个人项目）"
+
+        current_project_id = (current_binding or {}).get("project_id", "")
+        lines = ["项目列表："]
+        for project in projects:
+            marker = "⭐ " if project.get("project_id") == current_project_id else "- "
+            kind_text = "群项目" if project.get("owner_chat_id") else "个人项目"
+            lines.append(f"{marker}{project.get('name')} ({project.get('project_id')}) [{kind_text}]")
+        return "\n".join(lines)
+
+    def _handle_create_project_command(self, user_id: str, project_name: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type == "group":
+            chat_id = log_context.get("chat_id", "") or session_key
+            project = self.project_registry.create_project(
+                name=project_name,
+                kind="shared",
+                owner_user_id=user_id,
+                owner_chat_id=chat_id,
+                source_type="empty",
+            )
+            workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+            self.binding_manager.bind_session(
+                self.bot_key,
+                session_key,
+                project["project_id"],
+                "",
+                self.default_group_workspace_mode,
+            )
+            if self.default_group_workspace_mode == MODE_SHARED:
+                workspace = self.workspace_manager.get_or_create_shared_workspace(project, chat_id)
+                self.binding_manager.bind_session(
+                    self.bot_key,
+                    session_key,
+                    project["project_id"],
+                    workspace["workspace_id"],
+                    MODE_SHARED,
+                )
+            return (
+                f"已创建群项目：{project['name']}\n"
+                f"项目ID：{project['project_id']}\n"
+                f"当前模式：{'共享工作区' if self.default_group_workspace_mode == MODE_SHARED else '个人工作区'}\n"
+                f"当前工作区：{workspace['path']}"
+            )
+
+        project = self.project_registry.create_project(
+            name=project_name,
+            kind="personal",
+            owner_user_id=user_id,
+            source_type="empty",
+        )
+        workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+        target_session = session_key or user_id
+        self.binding_manager.bind_session(
+            self.bot_key,
+            target_session,
+            project["project_id"],
+            workspace["workspace_id"],
+            MODE_PERSONAL,
+        )
+        return (
+            f"已创建个人项目：{project['name']}\n"
+            f"项目ID：{project['project_id']}\n"
+            f"当前工作区：{workspace['path']}"
+        )
+
+    def _handle_enter_project_command(self, user_id: str, target: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type == "group":
+            chat_id = log_context.get("chat_id", "") or session_key
+            project = self.project_registry.resolve_project(target, user_id=user_id, chat_id=chat_id)
+            if not project or project.get("owner_chat_id") != chat_id:
+                return "当前群聊只能进入本群项目。请先发送：项目列表"
+            mode = self.default_group_workspace_mode
+            workspace_id = ""
+            if mode == MODE_SHARED:
+                workspace = self.workspace_manager.get_or_create_shared_workspace(project, chat_id)
+                workspace_id = workspace["workspace_id"]
+            else:
+                workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+            self.binding_manager.bind_session(
+                self.bot_key,
+                session_key,
+                project["project_id"],
+                workspace_id,
+                mode,
+            )
+            return (
+                f"已进入群项目：{project['name']}\n"
+                f"模式：{'共享工作区' if mode == MODE_SHARED else '个人工作区'}\n"
+                f"当前工作区：{workspace['path']}"
+            )
+
+        target_session = session_key or user_id
+        project = self.project_registry.resolve_project(target, user_id=user_id)
+        if not project:
+            return "未找到该项目，请先发送：项目列表"
+        workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+        self.binding_manager.bind_session(
+            self.bot_key,
+            target_session,
+            project["project_id"],
+            workspace["workspace_id"],
+            MODE_PERSONAL,
+        )
+        return f"已进入项目：{project['name']}\n当前工作区：{workspace['path']}"
+
+    def _handle_current_project_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+        project = runtime_context.get("project")
+        if not project:
+            return f"当前工作目录：{runtime_context['working_dir']}"
+        return (
+            f"当前项目：{project['name']}\n"
+            f"项目ID：{project['project_id']}\n"
+            f"项目源：{project.get('repo_path') or project.get('source_path') or '(空项目)'}"
+        )
+
+    def _handle_current_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+        workspace = runtime_context.get("workspace")
+        if not workspace:
+            return f"当前工作目录：{runtime_context['working_dir']}"
+        mode_text = "共享工作区" if runtime_context.get("mode") == MODE_SHARED else "个人工作区"
+        return (
+            f"当前工作区：{workspace['workspace_id']}\n"
+            f"模式：{mode_text}\n"
+            f"路径：{workspace['path']}"
+        )
+
+    def _handle_list_workspaces_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+        project = runtime_context.get("project")
+        if not project:
+            return "当前未启用项目工作区模式。"
+        workspaces = self.workspace_manager.list_workspaces(project["project_id"])
+        if not workspaces:
+            return "当前项目下还没有工作区。"
+        current_workspace_id = (runtime_context.get("workspace") or {}).get("workspace_id", "")
+        lines = [f"工作区列表（项目 {project['name']}）："]
+        for workspace in workspaces:
+            marker = "⭐ " if workspace.get("workspace_id") == current_workspace_id else "- "
+            owner = workspace.get("owner_user_id") or workspace.get("owner_chat_id") or "-"
+            kind = "共享" if workspace.get("workspace_type") == "shared" else "个人"
+            lines.append(f"{marker}{workspace['workspace_id']} [{kind}] owner={owner}")
+        return "\n".join(lines)
+
+    def _handle_use_personal_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type != "group":
+            return "单聊默认就是个人工作区。"
+        binding = self.binding_manager.get_binding(self.bot_key, session_key)
+        if not binding or not binding.get("project_id"):
+            return self._group_project_required_message()
+        project = self.project_registry.get_project(binding["project_id"])
+        if not project:
+            return self._group_project_required_message()
+        workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
+        self.binding_manager.bind_session(
+            self.bot_key,
+            session_key,
+            project["project_id"],
+            "",
+            MODE_PERSONAL,
+        )
+        return f"已切换为个人工作区模式。\n当前工作区：{workspace['path']}"
+
+    def _handle_use_shared_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type != "group":
+            return "单聊不支持共享工作区。"
+        chat_id = log_context.get("chat_id", "") or session_key
+        binding = self.binding_manager.get_binding(self.bot_key, session_key)
+        if not binding or not binding.get("project_id"):
+            return self._group_project_required_message()
+        project = self.project_registry.get_project(binding["project_id"])
+        if not project:
+            return self._group_project_required_message()
+        workspace = self.workspace_manager.get_or_create_shared_workspace(project, chat_id)
+        self.binding_manager.bind_session(
+            self.bot_key,
+            session_key,
+            project["project_id"],
+            workspace["workspace_id"],
+            MODE_SHARED,
+        )
+        return f"已切换为共享工作区模式。\n当前工作区：{workspace['path']}"
+
+    async def _return_early_reply(self, reply: str, on_stream_delta: OnStreamDelta) -> str:
+        if on_stream_delta:
+            await on_stream_delta(reply, True)
+        return reply
+
+    @staticmethod
+    def _group_project_required_message() -> str:
+        return "当前群聊还没有绑定项目。\n\n请先发送：\n- 新建项目 <名称>\n- 进入项目 <名称或ID>"
+
+    def _upload_dir_for_session(self, session_key: str) -> Path:
+        path = self.upload_root / self._safe_name(session_key)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _build_runtime_add_dirs(self, upload_dir: Path) -> List[str]:
+        dirs = list(self.base_add_dirs)
+        upload_dir_str = str(upload_dir.resolve())
+        if upload_dir_str not in dirs:
+            dirs.append(upload_dir_str)
+        return dirs
+
+    @staticmethod
+    def _compose_personal_runtime_session_key(conversation_key: str, user_id: str) -> str:
+        return f"{conversation_key}::user::{user_id}"
 
     @staticmethod
     def _build_display_content(
@@ -645,7 +1158,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if interaction.interaction_type == "command_approval":
             item = interaction.item or {}
             command = (item.get("command") or interaction.raw_params.get("command") or "").strip()
-            cwd = interaction.raw_params.get("cwd") or self.working_dir
+            cwd = interaction.raw_params.get("cwd") or self.base_working_dir
             reason = interaction.raw_params.get("reason") or ""
             parts = [f"命令：{self._short_command(command) or '(空)'}", f"目录：{cwd}"]
             if reason:
@@ -973,8 +1486,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
         guessed = mimetypes.guess_extension(mime_type or "")
         return guessed or default
 
-    def _relative_upload_path(self, path: Path) -> str:
-        return path.resolve().relative_to(Path(self.working_dir)).as_posix()
+    def _relative_upload_path(self, path: Path, working_dir: str = "") -> str:
+        target = path.resolve()
+        base = Path(working_dir or self.base_working_dir).resolve()
+        try:
+            return target.relative_to(base).as_posix()
+        except ValueError:
+            return str(target)
 
     @staticmethod
     def _safe_filename(filename: str) -> str:

@@ -106,7 +106,7 @@ bots:
   #   bot_type: "codex_cli"
   #   name: "Codex CLI"
   #   description: "Local Codex CLI coding bot"
-  #   working_dir: "/path/to/project"  # 必填，本地项目目录
+  #   working_dir: "/path/to/project"  # 必填，默认项目源目录 / 兼容旧配置入口
   #   model: ""  # 留空默认使用 gpt-5.3-codex
   #   system_prompt: "你是一个擅长本地代码修改与排障的 AI 助手。"
   #   env_vars:
@@ -117,6 +117,11 @@ bots:
   #     skip_git_repo_check: false
   #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never
   #     dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
+  #     workspace_root: "/path/to/project/.codex_data"  # 可选，默认 <working_dir>/.codex_data
+  #     workspace_strategy: "copy"            # 可选: copy
+  #     default_group_workspace_mode: "personal"  # 可选: personal | shared
+  #     session_timeout_seconds: 7200
+  #     enable_project_workspace_mode: true
   #     # add_dirs:
   #     #   - "/another/writable/path"
   #     # profile: "default"

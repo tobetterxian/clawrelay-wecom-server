@@ -585,15 +585,21 @@ class CodexAppServerAdapter:
             self.dangerously_bypass_approvals_and_sandbox,
         )
 
-    def create_session(self) -> CodexAppServerSession:
+    def create_session(
+        self,
+        working_dir: str = "",
+        add_dirs: Optional[List[str]] = None,
+    ) -> CodexAppServerSession:
+        effective_working_dir = working_dir or self.working_dir
+        effective_add_dirs = self.add_dirs if add_dirs is None else add_dirs
         return CodexAppServerSession(
             model=self.model,
-            working_dir=self.working_dir,
+            working_dir=effective_working_dir,
             env_vars=self.env_vars,
             sandbox_mode=self.sandbox_mode,
             skip_git_repo_check=self.skip_git_repo_check,
             dangerously_bypass_approvals_and_sandbox=self.dangerously_bypass_approvals_and_sandbox,
-            add_dirs=self.add_dirs,
+            add_dirs=effective_add_dirs,
             profile=self.profile,
             executable=self.executable,
             approval_policy=self.approval_policy,

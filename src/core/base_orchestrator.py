@@ -109,3 +109,22 @@ class BaseOrchestrator(ABC):
     async def handle_interaction_card(self, session_key: str, event: dict) -> Optional[str]:
         """处理模板卡片交互回调"""
         return None
+
+    async def handle_control_command(
+        self,
+        user_id: str,
+        content: str,
+        session_key: str = "",
+        log_context: dict = None,
+    ) -> Optional[str]:
+        """处理编排器自带的控制命令（默认无）"""
+        return None
+
+    def get_runtime_session_key(
+        self,
+        user_id: str,
+        session_key: str = "",
+        log_context: dict = None,
+    ) -> str:
+        """返回当前消息应落到的运行时会话 key"""
+        return session_key or user_id
