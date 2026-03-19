@@ -104,21 +104,37 @@ python main.py
 git clone https://github.com/wxkingstar/clawrelay-wecom-server.git
 cd clawrelay-wecom-server
 
+# 准备环境变量
+cp .env.example .env
+
 # 编辑配置（Docker 中不支持交互式向导，需提前填写）
 cp config/bots.yaml.example config/bots.yaml
+vim .env
 vim config/bots.yaml
 
-docker compose up -d
+docker compose up -d --build
 ```
 
-> Docker 模式下 `relay_url` 需使用 `http://host.docker.internal:50009`（而非 `localhost`）连接宿主机的 clawrelay-api。
+> Docker 模式下，`config/bots.yaml` 已支持 `${VAR}` 和 `${VAR:-default}` 占位符；推荐把 API key、GitHub 凭证等放在 `.env` 中，通过运行时注入，而不是写死在 YAML 里。
+
+> 如果仍使用 `clawrelay-api`，Docker 内的 `relay_url` 建议使用 `http://host.docker.internal:50009`（而非 `localhost`）连接宿主机服务。
 
 ```bash
 docker compose logs -f app   # 查看日志
 docker compose down           # 停止
 ```
 
+Docker 推荐挂载：
+
+- `./config -> /app/config`
+- `./logs -> /app/logs`
+- `./workspace -> /workspace`
+- `./data/workspaces -> /data/workspaces`
+- `./data/codex-home -> /data/codex-home`
+- `./data/claude-home -> /data/claude-home`
+
 如果你要让机器人创建一个新项目并自动发布到 GitHub + Cloudflare，可参考 `docs/GITHUB_CLOUDFLARE_DEPLOY.md`。
+如果你要继续推进 Docker 运行时配置方案，可参考 `docs/DOCKER_RUNTIME_CONFIG_PLAN.md`。
 
 ---
 
@@ -446,6 +462,9 @@ def register_commands(command_router):
 |--------|------|--------|
 | `BOT_CONFIG_PATH` | 配置文件路径 | `config/bots.yaml` |
 | `CHAT_LOG_DIR` | 聊天日志目录 | `logs` |
+| `WORKSPACE_ROOT_BASE` | Docker 推荐工作区根目录占位符 | `/data/workspaces` |
+| `CODEX_HOME_BASE` | Docker 推荐 Codex CLI HOME 根目录占位符 | `/data/codex-home` |
+| `CLAUDE_HOME_BASE` | Docker 推荐 Claude CLI HOME 根目录占位符 | `/data/claude-home` |
 | `WEIXIN_AGENT_TIMEOUT_SECONDS` | 任务超时（秒） | `30` |
 | `WEIXIN_MAX_FILE_SIZE` | 文件大小限制（字节） | `20971520` (20MB) |
 

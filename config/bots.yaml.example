@@ -19,7 +19,7 @@ bots:
     # [Required] ClawRelay API endpoint
     # Local: http://localhost:50009
     # Docker: http://host.docker.internal:50009
-    relay_url: "http://localhost:50009"
+    relay_url: "${CLAUDE_RELAY_URL:-http://host.docker.internal:50009}"
 
     # [Optional] Bot display name (used to filter @mentions in group chat)
     name: "AI Assistant"
@@ -63,7 +63,7 @@ bots:
   #   model: ""  # 留空自动选择，或指定具体模型
   #   system_prompt: "你是一个友好的AI助手。"
   #   provider_config:
-  #     api_key: "YOUR_GEMINI_API_KEY"
+  #     api_key: "${GEMINI_API_KEY}"
   #     enable_search: false  # 设置为 true 启用 Google Search 联网功能（需要 v1beta API）
 
   # ========================================
@@ -78,8 +78,8 @@ bots:
   #   model: ""  # 留空自动选择，或指定如 gpt-4o
   #   system_prompt: "You are a helpful AI assistant."
   #   provider_config:
-  #     api_key: "YOUR_OPENAI_API_KEY"
-  #     base_url: "https://api.openai.com/v1"  # 可选，用于自定义端点或第三方兼容服务
+  #     api_key: "${OPENAI_API_KEY}"
+  #     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"  # 可选，用于自定义端点或第三方兼容服务
 
   # ========================================
   # Codex 机器人（通过 OpenAI Responses API）
@@ -93,8 +93,8 @@ bots:
   #   model: ""  # 留空默认使用 gpt-5.3-codex
   #   system_prompt: "你是一个擅长代码分析和实现的 AI 助手。"
   #   provider_config:
-  #     api_key: "YOUR_OPENAI_API_KEY"
-  #     base_url: "https://api.openai.com/v1"
+  #     api_key: "${OPENAI_API_KEY}"
+  #     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
   #     reasoning_effort: "medium"  # 可选: low | medium | high
 
   # ========================================
@@ -106,19 +106,19 @@ bots:
   #   bot_type: "codex_cli"
   #   name: "Codex CLI"
   #   description: "Local Codex CLI coding bot"
-  #   working_dir: "/path/to/project"  # 必填，默认项目源目录 / 兼容旧配置入口
+  #   working_dir: "/workspace"  # Docker 推荐挂载工作目录
   #   model: ""  # 留空默认使用 gpt-5.3-codex
   #   system_prompt: "你是一个擅长本地代码修改与排障的 AI 助手。"
   #   env_vars:
-  #     OPENAI_API_KEY: "YOUR_OPENAI_API_KEY"
+  #     OPENAI_API_KEY: "${OPENAI_API_KEY}"
   #   provider_config:
   #     codex_path: "/home/youruser/.nvm/versions/node/v20.20.1/bin/codex"
   #     sandbox_mode: "workspace-write"   # 可选: read-only | workspace-write
   #     skip_git_repo_check: false
   #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never
   #     dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
-  #     workspace_root: "/path/to/project/.codex_data"  # 可选，默认 <working_dir>/.codex_data
-  #     codex_home: "/path/to/shared/codex-home"  # 可选，作为 Codex 运行 HOME；实际配置会落到其下的 .codex/
+  #     workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"  # 可选，默认 <working_dir>/.codex_data
+  #     codex_home: "${CODEX_HOME_BASE:-/data/codex-home}/codex_cli_bot"  # 可选，作为 Codex 运行 HOME；实际配置会落到其下的 .codex/
   #     default_workspace_init_mode: "empty"  # 可选: empty | git_remote | legacy_copy
   #     workspace_strategy: "copy"            # 兼容旧配置，等价于 legacy_copy
   #     default_group_workspace_mode: "personal"  # 可选: personal | shared
@@ -140,5 +140,5 @@ bots:
   #   model: ""  # 留空自动选择最佳可用模型
   #   system_prompt: "You are Claude, a helpful AI assistant."
   #   provider_config:
-  #     api_key: "YOUR_API_KEY"
-  #     base_url: "https://your-api-endpoint.com/v1"  # 第三方 API 端点
+  #     api_key: "${ANTHROPIC_API_KEY}"
+  #     base_url: "${OPENAI_BASE_URL:-https://your-api-endpoint.com/v1}"  # 第三方 API 端点

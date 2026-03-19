@@ -109,6 +109,8 @@ coverage.xml
 
 # 文档（内部开发记录）
 docs/*
+!docs/CLAUDE_CLI_LOCAL_PLAN.md
+!docs/DOCKER_RUNTIME_CONFIG_PLAN.md
 !docs/GITHUB_CLOUDFLARE_DEPLOY.md
 !docs/examples/
 docs/examples/*

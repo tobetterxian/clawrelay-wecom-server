@@ -5,6 +5,7 @@
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -18,6 +19,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "bots.yaml"
 
 # 占位符前缀，用于检测未配置的字段
 PLACEHOLDER_PREFIX = "YOUR_"
+ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 class BotConfig:
@@ -85,6 +87,8 @@ class BotConfigManager:
             logger.error("读取配置文件失败: %s — %s", config_file, e)
             return
 
+        data = self._expand_env_placeholders(data)
+
         bots_data = data.get("bots", {})
         if not bots_data:
             logger.warning("配置文件中没有找到 bots 配置: %s", config_file)
@@ -129,7 +133,33 @@ class BotConfigManager:
 
     @staticmethod
     def _is_placeholder(value: str) -> bool:
-        return value.upper().startswith(PLACEHOLDER_PREFIX)
+        return str(value or "").upper().startswith(PLACEHOLDER_PREFIX)
+
+    def _expand_env_placeholders(self, value):
+        if isinstance(value, dict):
+            return {
+                key: self._expand_env_placeholders(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._expand_env_placeholders(item) for item in value]
+        if isinstance(value, str):
+            return self._expand_env_string(value)
+        return value
+
+    def _expand_env_string(self, value: str) -> str:
+        def replacer(match: re.Match) -> str:
+            var_name = match.group(1)
+            default_value = match.group(2)
+            env_value = os.getenv(var_name)
+            if env_value not in (None, ""):
+                return env_value
+            if default_value is not None:
+                return default_value
+            logger.warning("环境变量未设置，使用空字符串: %s", var_name)
+            return ""
+
+        return ENV_VAR_PATTERN.sub(replacer, value)
 
     def needs_setup(self) -> bool:
         """检查是否需要引导配置"""

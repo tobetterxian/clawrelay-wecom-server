@@ -1,7 +1,9 @@
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import os
 
+from config.bot_config import BotConfigManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.json_state_store import JsonStateStore
 from src.core.project_registry import ProjectRegistry
@@ -167,6 +169,58 @@ def test_json_state_store_recreates_missing_parent_directory():
 
         assert state_path.exists()
         assert store.read_list() == [{"ok": True}]
+
+
+def test_bot_config_expands_env_placeholders():
+    with TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / "bots.yaml"
+        config_path.write_text(
+            """
+bots:
+  demo:
+    bot_id: "${BOT_ID}"
+    secret: "${BOT_SECRET}"
+    bot_type: "openai"
+    working_dir: "${WORK_DIR:-/workspace}"
+    env_vars:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    provider_config:
+      api_key: "${OPENAI_API_KEY}"
+      base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        original_values = {
+            "BOT_ID": os.environ.get("BOT_ID"),
+            "BOT_SECRET": os.environ.get("BOT_SECRET"),
+            "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+            "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL"),
+            "WORK_DIR": os.environ.get("WORK_DIR"),
+        }
+        try:
+            os.environ["BOT_ID"] = "bot-1"
+            os.environ["BOT_SECRET"] = "secret-1"
+            os.environ["OPENAI_API_KEY"] = "sk-test"
+            os.environ.pop("OPENAI_BASE_URL", None)
+            os.environ.pop("WORK_DIR", None)
+
+            manager = BotConfigManager(str(config_path))
+            bot = manager.get_bot("demo")
+
+            assert bot is not None
+            assert bot.bot_id == "bot-1"
+            assert bot.secret == "secret-1"
+            assert bot.working_dir == "/workspace"
+            assert bot.env_vars["OPENAI_API_KEY"] == "sk-test"
+            assert bot.provider_config["api_key"] == "sk-test"
+            assert bot.provider_config["base_url"] == "https://api.openai.com/v1"
+        finally:
+            for key, value in original_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def _run_git(*args: str, cwd: Path) -> None:

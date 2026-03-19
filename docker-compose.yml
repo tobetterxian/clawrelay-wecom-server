@@ -3,8 +3,22 @@ services:
     build: .
     container_name: clawrelay-wecom-server
     restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BOT_CONFIG_PATH: ${BOT_CONFIG_PATH:-/app/config/bots.yaml}
+      CHAT_LOG_DIR: ${CHAT_LOG_DIR:-/app/logs}
+      WORKSPACE_ROOT_BASE: ${WORKSPACE_ROOT_BASE:-/data/workspaces}
+      CODEX_HOME_BASE: ${CODEX_HOME_BASE:-/data/codex-home}
+      CLAUDE_HOME_BASE: ${CLAUDE_HOME_BASE:-/data/claude-home}
+      GIT_SSH_COMMAND: ${GIT_SSH_COMMAND:-}
     volumes:
-      - ./config:/app/config:ro
+      - ./config:/app/config
       - ./logs:/app/logs
+      - ./workspace:/workspace
+      - ./data/workspaces:/data/workspaces
+      - ./data/codex-home:/data/codex-home
+      - ./data/claude-home:/data/claude-home
+      - ./secrets:/run/local-secrets:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
