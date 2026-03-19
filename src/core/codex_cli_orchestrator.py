@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .chat_logger import get_chat_logger
+from .github_repository_manager import GitHubRepositoryInfo, GitHubRepositoryManager
 from .project_deployment_manager import ProjectDeploymentManager
 from .project_registry import ProjectRegistry
 from .session_binding_manager import SessionBindingManager
@@ -52,6 +53,8 @@ DEFAULT_CODEX_CLI_MODEL = "gpt-5.3-codex"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_WORKSPACE_ROOT_NAME = ".codex_data"
 DEFAULT_PERSONAL_PROJECT_NAME = "default"
+DEFAULT_GITHUB_REPOSITORY_LIST_LIMIT = 10
+GITHUB_REPOSITORY_SELECTION_TTL_SECONDS = 600
 MODE_PERSONAL = "personal_workspace"
 MODE_SHARED = "shared_workspace"
 CODEX_TRANSIENT_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
@@ -148,6 +151,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             approval_policy=approval_policy,
         )
         self.project_registry = ProjectRegistry(self.workspace_root)
+        self.github_repository_manager = GitHubRepositoryManager(env_vars=runtime_env_vars)
         self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
@@ -160,6 +164,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         )
         self._active_sessions: Dict[str, CodexAppServerSession] = {}
         self._active_runtime_contexts: Dict[str, dict] = {}
+        self._github_repository_selections: Dict[str, dict] = {}
 
         logger.info(
             "[CodexCLI] 编排器初始化完成: bot_key=%s, working_dir=%s, workspace_root=%s, codex_home=%s, upload_root=%s, project_mode=%s, default_workspace_init_mode=%s",
@@ -217,6 +222,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return self._handle_current_project_command(user_id, session_key, log_context)
         if command == "远程状态":
             return self._handle_remote_status_command(user_id, session_key, log_context)
+        if command == "当前选中仓库":
+            return self._handle_current_selected_repository_command(user_id, session_key, log_context)
         if command in {"部署状态", "当前部署"}:
             return self._handle_deployment_status_command(user_id, session_key, log_context)
         if command in {"当前工作区", "我的工作区"}:
@@ -227,6 +234,45 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return self._handle_use_personal_workspace_command(user_id, session_key, log_context)
         if command == "使用共享工作区":
             return self._handle_use_shared_workspace_command(user_id, session_key, log_context)
+        github_request, usage_message = self._parse_github_repository_command(command)
+        if usage_message:
+            return usage_message
+        if github_request:
+            action = github_request["action"]
+            if action == "list_user_repositories":
+                return self._handle_list_github_repositories_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                    query=github_request.get("query", ""),
+                )
+            if action == "list_org_repositories":
+                return self._handle_list_github_org_repositories_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                    org=github_request["org"],
+                    query=github_request.get("query", ""),
+                )
+            if action == "select_repository":
+                return self._handle_select_github_repository_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                    index=github_request["index"],
+                )
+            if action == "derive_from_selected_repository":
+                selected_repository = self._get_selected_github_repository(user_id, session_key, log_context)
+                if not selected_repository:
+                    return "当前还没有选中 GitHub 仓库。请先发送：GitHub仓库列表 或 选择仓库 <序号>"
+                return self._handle_create_project_command(
+                    user_id=user_id,
+                    project_name=github_request["name"] or selected_repository.name,
+                    session_key=session_key,
+                    log_context=log_context,
+                    workspace_init_mode=WORKSPACE_INIT_GIT_REMOTE,
+                    git_remote_url=selected_repository.preferred_clone_url,
+                )
         deployment_request, usage_message = self._parse_deployment_command(command)
         if usage_message:
             return usage_message
@@ -307,6 +353,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "项目列表",
             "当前项目",
             "远程状态",
+            "当前选中仓库",
             "部署状态",
             "当前部署",
             "当前工作区",
@@ -317,6 +364,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
         }:
             return True
         if command.startswith("进入项目"):
+            return True
+        github_request, usage_message = self._parse_github_repository_command(command)
+        if github_request or usage_message:
             return True
         deployment_request, usage_message = self._parse_deployment_command(command)
         if deployment_request or usage_message:
@@ -967,6 +1017,77 @@ class CodexCliOrchestrator(BaseOrchestrator):
             )
         return "\n".join(lines)
 
+    def _handle_list_github_repositories_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+        query: str = "",
+    ) -> str:
+        try:
+            repositories = self.github_repository_manager.list_user_repositories(
+                query=query,
+                limit=DEFAULT_GITHUB_REPOSITORY_LIST_LIMIT,
+            )
+        except Exception as exc:
+            return f"获取 GitHub 仓库列表失败：{exc}"
+
+        scope_text = "当前账号"
+        self._remember_github_repository_list(user_id, session_key, log_context, repositories, scope_text)
+        return self._build_github_repository_list_reply(scope_text, repositories, query=query)
+
+    def _handle_list_github_org_repositories_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+        org: str = "",
+        query: str = "",
+    ) -> str:
+        try:
+            repositories = self.github_repository_manager.list_org_repositories(
+                org=org,
+                query=query,
+                limit=DEFAULT_GITHUB_REPOSITORY_LIST_LIMIT,
+            )
+        except Exception as exc:
+            return f"获取 GitHub 组织仓库失败：{exc}"
+
+        scope_text = f"组织 {org}"
+        self._remember_github_repository_list(user_id, session_key, log_context, repositories, scope_text)
+        return self._build_github_repository_list_reply(scope_text, repositories, query=query)
+
+    def _handle_select_github_repository_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+        index: int = 0,
+    ) -> str:
+        selection = self._get_github_repository_selection(user_id, session_key, log_context)
+        if not selection:
+            return "当前没有可选仓库列表，或列表已过期。请先发送：GitHub仓库列表"
+
+        repositories = selection.get("repositories") or []
+        if index < 1 or index > len(repositories):
+            return f"仓库序号超出范围，请输入 1 到 {len(repositories)} 之间的数字"
+
+        selected_index = index - 1
+        selection["selected_index"] = selected_index
+        repository = repositories[selected_index]
+        return self._build_selected_github_repository_reply(repository)
+
+    def _handle_current_selected_repository_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        repository = self._get_selected_github_repository(user_id, session_key, log_context)
+        if not repository:
+            return "当前还没有选中 GitHub 仓库。请先发送：GitHub仓库列表"
+        return self._build_selected_github_repository_reply(repository)
+
     def _handle_create_project_command(
         self,
         user_id: str,
@@ -1130,6 +1251,50 @@ class CodexCliOrchestrator(BaseOrchestrator):
             lines.append("可发送：发布到新仓库 <Git地址>")
         if source_url:
             lines.append("可发送：同步上游")
+        return "\n".join(lines)
+
+    def _build_github_repository_list_reply(
+        self,
+        scope_text: str,
+        repositories: List[GitHubRepositoryInfo],
+        query: str = "",
+    ) -> str:
+        query_text = str(query or "").strip()
+        title = f"GitHub 仓库列表（{scope_text}）"
+        if query_text:
+            title += f" / 关键词：{query_text}"
+        lines = [title]
+        if not repositories:
+            lines.append("没有匹配的仓库。")
+            lines.append("可尝试：GitHub仓库列表 / GitHub组织仓库 <org>")
+            return "\n".join(lines)
+
+        for index, repository in enumerate(repositories, start=1):
+            visibility = "私有" if repository.private else "公开"
+            updated_at = repository.updated_at[:10] if repository.updated_at else "-"
+            branch = repository.default_branch or "-"
+            lines.append(
+                f"{index}. {repository.full_name} [{visibility}] branch={branch} updated={updated_at}"
+            )
+            if repository.description:
+                lines.append(f"   {self._truncate_text(repository.description, 72)}")
+
+        lines.append("可发送：选择仓库 <序号>")
+        lines.append("或：从选中仓库派生项目 <名称>")
+        return "\n".join(lines)
+
+    def _build_selected_github_repository_reply(self, repository: GitHubRepositoryInfo) -> str:
+        visibility = "私有" if repository.private else "公开"
+        lines = [
+            f"已选中 GitHub 仓库：{repository.full_name}",
+            f"可见性：{visibility}",
+            f"默认分支：{repository.default_branch or '-'}",
+            f"更新时间：{repository.updated_at or '-'}",
+            f"克隆地址：{repository.preferred_clone_url or '(未提供)'}",
+        ]
+        if repository.description:
+            lines.append(f"描述：{repository.description}")
+        lines.append(f"下一步：从选中仓库派生项目 {repository.name}")
         return "\n".join(lines)
 
     def _handle_deployment_status_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
@@ -1520,6 +1685,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"🆕 首次使用说明：已自动进入默认个人项目 `{project_name}`\n"
             "💡 你现在可以直接继续发开发需求\n"
             "🏷️ 若想指定项目名，请先发送：新建项目 <名称>\n"
+            "📦 若想从已有 GitHub 仓库挑一个开始，可发送：GitHub仓库列表\n"
             "例如：新建项目 hello-world\n"
             "📘 可发送：项目帮助 / 帮助 / 部署帮助"
         )
@@ -1594,6 +1760,71 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if github_remote_url and github_remote_url != source_remote_url:
             return github_remote_url
         return ""
+
+    def _remember_github_repository_list(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict,
+        repositories: List[GitHubRepositoryInfo],
+        scope_text: str,
+    ) -> None:
+        selection_key = self._github_repository_selection_key(user_id, session_key, log_context)
+        self._github_repository_selections[selection_key] = {
+            "created_at": time.time(),
+            "repositories": list(repositories or []),
+            "selected_index": None,
+            "scope_text": scope_text,
+        }
+
+    def _get_github_repository_selection(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict,
+    ) -> Optional[dict]:
+        selection_key = self._github_repository_selection_key(user_id, session_key, log_context)
+        selection = self._github_repository_selections.get(selection_key)
+        if not selection:
+            return None
+        if time.time() - float(selection.get("created_at") or 0) > GITHUB_REPOSITORY_SELECTION_TTL_SECONDS:
+            self._github_repository_selections.pop(selection_key, None)
+            return None
+        return selection
+
+    def _get_selected_github_repository(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict,
+    ) -> Optional[GitHubRepositoryInfo]:
+        selection = self._get_github_repository_selection(user_id, session_key, log_context)
+        if not selection:
+            return None
+
+        selected_index = selection.get("selected_index")
+        repositories = selection.get("repositories") or []
+        if selected_index is None:
+            return None
+        if selected_index < 0 or selected_index >= len(repositories):
+            return None
+        return repositories[selected_index]
+
+    @staticmethod
+    def _github_repository_selection_key(user_id: str, session_key: str, log_context: dict = None) -> str:
+        log_context = log_context or {}
+        effective_key = session_key or user_id
+        chat_type = (log_context.get("chat_type") or "single").strip().lower()
+        if chat_type == "group":
+            return f"{effective_key}::github::{user_id}"
+        return effective_key
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 72) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 3)] + "..."
 
     def _upload_dir_for_session(self, session_key: str) -> Path:
         path = self.upload_root / self._safe_name(session_key)
@@ -1739,6 +1970,50 @@ class CodexCliOrchestrator(BaseOrchestrator):
         except ValueError:
             return [item.strip() for item in text.split() if item.strip()]
 
+    def _parse_github_repository_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
+        command = (command or "").strip()
+        if not command:
+            return None, None
+
+        if command.startswith("GitHub仓库列表"):
+            query = command[len("GitHub仓库列表") :].strip()
+            return {
+                "action": "list_user_repositories",
+                "query": query,
+            }, None
+
+        if command.startswith("GitHub组织仓库"):
+            args = self._split_command_args(command[len("GitHub组织仓库") :].strip())
+            if not args:
+                return None, "用法：GitHub组织仓库 <org> [关键词]"
+            return {
+                "action": "list_org_repositories",
+                "org": args[0],
+                "query": " ".join(args[1:]).strip(),
+            }, None
+
+        if command.startswith("选择仓库"):
+            body = command[len("选择仓库") :].strip()
+            if not body:
+                return None, "用法：选择仓库 <序号>"
+            try:
+                index = int(body)
+            except ValueError:
+                return None, "仓库序号必须是数字"
+            return {
+                "action": "select_repository",
+                "index": index,
+            }, None
+
+        if command.startswith("从选中仓库派生项目"):
+            name = command[len("从选中仓库派生项目") :].strip()
+            return {
+                "action": "derive_from_selected_repository",
+                "name": name,
+            }, None
+
+        return None, None
+
     def _parse_deployment_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
         command = (command or "").strip()
         if not command:
@@ -1826,6 +2101,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "- 新建项目 <名称>\n"
             "- 新建仓库项目 <名称> <Git地址>\n"
             "- 从仓库派生项目 <名称> <源Git地址>\n"
+            "- GitHub仓库列表 [关键词]\n"
+            "- GitHub组织仓库 <org> [关键词]\n"
+            "- 选择仓库 <序号> / 当前选中仓库 / 从选中仓库派生项目 <名称>\n"
             "- 新建复制项目 <名称> [本地目录]\n"
             "- 新建项目 git_remote <名称> <Git地址>\n"
             "- 新建项目 legacy_copy <名称> [本地目录]\n"

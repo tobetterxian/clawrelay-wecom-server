@@ -7,6 +7,7 @@ import os
 
 from config.bot_config import BotConfig, BotConfigManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
+from src.core.github_repository_manager import GitHubRepositoryInfo, GitHubRepositoryManager
 from src.core.json_state_store import JsonStateStore
 from src.core.project_deployment_manager import ProjectDeploymentManager
 from src.core.project_registry import ProjectRegistry
@@ -195,6 +196,8 @@ def test_project_help_mentions_default_project_flow():
     assert "默认个人项目 default" in help_text
     assert "新建项目 <名称>" in help_text
     assert "从仓库派生项目 <名称> <源Git地址>" in help_text
+    assert "GitHub仓库列表 [关键词]" in help_text
+    assert "选择仓库 <序号>" in help_text
     assert "部署帮助" in help_text
     assert "准备GitHub仓库 <Git地址>" in help_text
     assert "发布到新仓库 <新Git地址>" in help_text
@@ -244,6 +247,37 @@ def test_parse_deployment_commands():
         assert request["entry_file"] == "src/index.ts"
 
 
+def test_parse_github_repository_commands():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        request, usage = orchestrator._parse_github_repository_command("GitHub仓库列表 hello")
+        assert usage is None
+        assert request["action"] == "list_user_repositories"
+        assert request["query"] == "hello"
+
+        request, usage = orchestrator._parse_github_repository_command("GitHub组织仓库 openai sdk")
+        assert usage is None
+        assert request["action"] == "list_org_repositories"
+        assert request["org"] == "openai"
+        assert request["query"] == "sdk"
+
+        request, usage = orchestrator._parse_github_repository_command("选择仓库 3")
+        assert usage is None
+        assert request["action"] == "select_repository"
+        assert request["index"] == 3
+
+        request, usage = orchestrator._parse_github_repository_command("从选中仓库派生项目 hello-app")
+        assert usage is None
+        assert request["action"] == "derive_from_selected_repository"
+        assert request["name"] == "hello-app"
+
+
 def test_default_project_usage_hint_detects_named_project_request():
     hint = CodexCliOrchestrator._build_default_project_usage_hint(
         message_content="请帮我创建一个 hello world 项目并开始实现",
@@ -289,6 +323,42 @@ def test_prepare_github_remote_initializes_repo_and_origin():
         assert result.origin_url == "git@github.com:demo/hello.git"
         assert result.current_branch == "main"
         assert manager.get_git_origin(workspace) == "git@github.com:demo/hello.git"
+
+
+def test_github_repository_manager_filters_repositories():
+    manager = GitHubRepositoryManager(env_vars={"GITHUB_TOKEN": "dummy"})
+    manager._request_repositories = lambda endpoint, query_params: [
+        {
+            "full_name": "demo/hello-world",
+            "name": "hello-world",
+            "owner": {"login": "demo"},
+            "private": False,
+            "default_branch": "main",
+            "updated_at": "2026-03-19T10:00:00Z",
+            "description": "hello example",
+            "clone_url": "https://github.com/demo/hello-world.git",
+            "ssh_url": "git@github.com:demo/hello-world.git",
+            "html_url": "https://github.com/demo/hello-world",
+        },
+        {
+            "full_name": "demo/internal-tool",
+            "name": "internal-tool",
+            "owner": {"login": "demo"},
+            "private": True,
+            "default_branch": "main",
+            "updated_at": "2026-03-18T10:00:00Z",
+            "description": "private tool",
+            "clone_url": "https://github.com/demo/internal-tool.git",
+            "ssh_url": "git@github.com:demo/internal-tool.git",
+            "html_url": "https://github.com/demo/internal-tool",
+        },
+    ]
+
+    repositories = manager.list_user_repositories(query="hello", limit=10)
+
+    assert len(repositories) == 1
+    assert repositories[0].full_name == "demo/hello-world"
+    assert repositories[0].preferred_clone_url == "git@github.com:demo/hello-world.git"
 
 
 def test_publish_to_new_remote_preserves_upstream():
@@ -405,6 +475,78 @@ def test_orchestrator_supports_derive_publish_and_remote_status_commands():
         assert "发布到新的 Git 仓库" in publish_reply
         assert "发布仓库：git@github.com:demo/publish.git" in remote_after
         assert f"当前 upstream：{source}" in remote_after
+
+
+def test_orchestrator_lists_selects_and_derives_from_github_repository():
+    with TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / "source"
+        source.mkdir()
+
+        _run_git("init", cwd=source)
+        _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=source)
+        _run_git("config", "user.email", "test@example.com", cwd=source)
+        _run_git("config", "user.name", "Test User", cwd=source)
+        (source / "README.md").write_text("hello\n", encoding="utf-8")
+        _run_git("add", "README.md", cwd=source)
+        _run_git("commit", "-m", "init", cwd=source)
+
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator.github_repository_manager.list_user_repositories = lambda query="", limit=10: [
+            GitHubRepositoryInfo(
+                full_name="demo/source",
+                name="source",
+                owner="demo",
+                private=False,
+                default_branch="main",
+                updated_at="2026-03-19T12:00:00Z",
+                description="demo repo",
+                clone_url=str(source),
+                ssh_url="",
+                html_url="https://github.com/demo/source",
+            )
+        ]
+
+        async def run_flow():
+            list_reply = await orchestrator.handle_control_command(
+                "alice",
+                "GitHub仓库列表 source",
+                session_key="alice",
+            )
+            select_reply = await orchestrator.handle_control_command(
+                "alice",
+                "选择仓库 1",
+                session_key="alice",
+            )
+            current_reply = await orchestrator.handle_control_command(
+                "alice",
+                "当前选中仓库",
+                session_key="alice",
+            )
+            derive_reply = await orchestrator.handle_control_command(
+                "alice",
+                "从选中仓库派生项目 derived-demo",
+                session_key="alice",
+            )
+            project_reply = await orchestrator.handle_control_command(
+                "alice",
+                "当前项目",
+                session_key="alice",
+            )
+            return list_reply, select_reply, current_reply, derive_reply, project_reply
+
+        list_reply, select_reply, current_reply, derive_reply, project_reply = asyncio.run(run_flow())
+
+        assert "GitHub 仓库列表（当前账号） / 关键词：source" in list_reply
+        assert "1. demo/source" in list_reply
+        assert "已选中 GitHub 仓库：demo/source" in select_reply
+        assert f"克隆地址：{source}" in current_reply
+        assert "已创建个人项目：derived-demo" in derive_reply
+        assert f"来源仓库：{source}" in project_reply
 
 
 def test_scaffold_cloudflare_pages_writes_workflow():
