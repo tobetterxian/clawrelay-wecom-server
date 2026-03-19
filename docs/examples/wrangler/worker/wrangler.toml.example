@@ -1,0 +1,4 @@
+name = "hello-worker"
+main = "src/index.ts"
+compatibility_date = "2026-03-19"
+workers_dev = true

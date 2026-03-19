@@ -108,7 +108,19 @@ coverage.xml
 *.p12
 
 # 文档（内部开发记录）
-docs/
+docs/*
+!docs/GITHUB_CLOUDFLARE_DEPLOY.md
+!docs/examples/
+docs/examples/*
+!docs/examples/github-actions/
+docs/examples/github-actions/*
+!docs/examples/github-actions/cloudflare-pages-deploy.yml
+!docs/examples/github-actions/cloudflare-worker-deploy.yml
+!docs/examples/wrangler/
+docs/examples/wrangler/*
+!docs/examples/wrangler/worker/
+docs/examples/wrangler/worker/*
+!docs/examples/wrangler/worker/wrangler.toml.example
 site/
 
 # 打包文件

@@ -118,6 +118,8 @@ docker compose logs -f app   # 查看日志
 docker compose down           # 停止
 ```
 
+如果你要让机器人创建一个新项目并自动发布到 GitHub + Cloudflare，可参考 `docs/GITHUB_CLOUDFLARE_DEPLOY.md`。
+
 ---
 
 ## 功能一览
