@@ -118,7 +118,9 @@ bots:
   #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never
   #     dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
   #     workspace_root: "/path/to/project/.codex_data"  # 可选，默认 <working_dir>/.codex_data
-  #     workspace_strategy: "copy"            # 可选: copy
+  #     codex_home: "/path/to/shared/codex-home"  # 可选，作为 Codex 运行 HOME；实际配置会落到其下的 .codex/
+  #     default_workspace_init_mode: "empty"  # 可选: empty | git_remote | legacy_copy
+  #     workspace_strategy: "copy"            # 兼容旧配置，等价于 legacy_copy
   #     default_group_workspace_mode: "personal"  # 可选: personal | shared
   #     session_timeout_seconds: 7200
   #     enable_project_workspace_mode: true
@@ -140,4 +142,3 @@ bots:
   #   provider_config:
   #     api_key: "YOUR_API_KEY"
   #     base_url: "https://your-api-endpoint.com/v1"  # 第三方 API 端点
-

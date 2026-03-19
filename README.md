@@ -302,7 +302,8 @@ bots:
       approval_policy: "on-request"     # 可选: untrusted | on-request | on-failure | never
       dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
       workspace_root: "/path/to/project/.codex_data"  # 可选，默认 <working_dir>/.codex_data
-      workspace_strategy: "copy"           # 可选: copy
+      default_workspace_init_mode: "empty" # 可选: empty | git_remote | legacy_copy
+      workspace_strategy: "copy"           # 兼容旧配置，等价于 legacy_copy
       default_group_workspace_mode: "personal"  # 可选: personal | shared
       session_timeout_seconds: 7200
       enable_project_workspace_mode: true
@@ -316,8 +317,9 @@ bots:
 - 如果服务进程拿不到 `PATH` 中的 `codex`，可显式配置 `provider_config.codex_path`
 - 会按企业微信运行时会话保存 `thread_id`，后续消息自动走 `thread/resume + turn/start`
 - 默认启用 `项目 / 工作区 / 会话` 三层模型：单聊自动进入个人项目，群聊先绑定项目，再按个人/共享工作区路由
+- 默认工作区初始化优先使用 `empty` / `git_remote`，不再默认复制本地大目录；`workspace_strategy: copy` 仅作兼容，实际等价 `legacy_copy`
 - 图片和文件统一落到 `workspace_root/uploads/<bot_key>/<runtime_session_key>/...`，不再写进共享项目根目录
-- 支持文字命令：`项目列表`、`新建项目 <名称>`、`进入项目 <名称或ID>`、`当前项目`、`当前工作区`、`工作区列表`、`使用个人工作区`、`使用共享工作区`
+- 支持文字命令：`项目列表`、`新建项目 <名称>`、`新建仓库项目 <名称> <Git地址>`、`新建复制项目 <名称> [本地目录]`、`进入项目 <名称或ID>`、`当前项目`、`当前工作区`、`工作区列表`、`使用个人工作区`、`使用共享工作区`
 - 若当前环境的 Codex 沙箱不可用（例如 `bwrap` / user namespace 异常），可在**可信环境**里启用 `dangerously_bypass_approvals_and_sandbox: true`
 - 审批、文件改动确认、补充提问会通过企业微信文字回复回传，体验更接近原生交互式 Codex
 - 这个类型更适合本地读写代码、执行命令、排障，以及多人协作场景下的目录隔离

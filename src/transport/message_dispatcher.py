@@ -7,6 +7,7 @@ WebSocket消息分发器
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 
@@ -44,6 +45,11 @@ _CODEX_CLI_SANDBOX_HINT = (
 _CODEX_CLI_EXEC_HINT = (
     "本地 Codex CLI 调用失败，请联系管理员检查 codex 登录状态、网络连通性和工作目录配置。"
 )
+_CODEX_CLI_RECONNECT_HINT = (
+    "本地 Codex CLI 与服务端连接暂时中断，系统正在重连，请稍后再试。"
+)
+_CODEX_CLI_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
+
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
     msg = str(e)
@@ -55,6 +61,8 @@ def _friendly_error(e: Exception) -> str:
         return _CODEX_CLI_NOT_FOUND_HINT
     if "bwrap: Creating new namespace failed" in msg:
         return _CODEX_CLI_SANDBOX_HINT
+    if "[CodexCLI] Reconnecting in progress" in msg or _CODEX_CLI_RECONNECT_RE.match(msg.strip()):
+        return _CODEX_CLI_RECONNECT_HINT
     if "[CodexCLI] Process exited" in msg or "Codex app-server 进程异常退出" in msg:
         return _CODEX_CLI_EXEC_HINT
     return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
@@ -135,6 +143,16 @@ class MessageDispatcher:
                 )
 
         return {"on_interaction_request": on_interaction_request}
+
+    def _is_orchestrator_control_command(self, content: str) -> bool:
+        checker = getattr(self.orchestrator, "is_control_command", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(content))
+        except Exception as e:
+            logger.warning("[Dispatcher:%s] 检查控制命令失败: %s", self.bot_key, e)
+            return False
 
     @staticmethod
     def _pending_interaction_notice() -> str:
@@ -273,7 +291,9 @@ class MessageDispatcher:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
             return
 
-        if self.orchestrator.has_pending_interaction(runtime_session_key):
+        is_control_command = self._is_orchestrator_control_command(content)
+
+        if self.orchestrator.has_pending_interaction(runtime_session_key) and not is_control_command:
             interaction_result = await self.orchestrator.handle_interaction_text(runtime_session_key, content)
             if interaction_result:
                 ack = interaction_result.get("ack", "")

@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from .json_state_store import JsonStateStore
+from .workspace_init_modes import (
+    DEFAULT_WORKSPACE_INIT_MODE,
+    WORKSPACE_INIT_EMPTY,
+    WORKSPACE_INIT_GIT_REMOTE,
+    WORKSPACE_INIT_LEGACY_COPY,
+    infer_project_workspace_init_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +76,10 @@ class ProjectRegistry:
         kind: str,
         owner_user_id: str,
         owner_chat_id: str = '',
-        source_type: str = 'empty',
+        source_type: str = '',
         source_path: str = '',
+        workspace_init_mode: str = DEFAULT_WORKSPACE_INIT_MODE,
+        git_remote_url: str = '',
     ) -> dict:
         normalized_name = (name or '').strip()
         if not normalized_name:
@@ -89,9 +98,22 @@ class ProjectRegistry:
         base_id = f'proj_{owner_slug}_{project_slug}'
         project_id = self._dedupe_project_id(base_id)
 
-        repo_path = self._resolve_repo_path(project_id, source_type, source_path)
-        if source_type == 'empty':
-            Path(repo_path).mkdir(parents=True, exist_ok=True)
+        workspace_init_mode = infer_project_workspace_init_mode(
+            {
+                'workspace_init_mode': workspace_init_mode,
+                'source_type': source_type,
+                'source_path': source_path,
+                'git_remote_url': git_remote_url,
+            },
+            fallback=DEFAULT_WORKSPACE_INIT_MODE,
+        )
+        resolved_source_path = self._resolve_source_path(workspace_init_mode, source_path)
+        git_remote_url = str(git_remote_url or '').strip()
+        if workspace_init_mode == WORKSPACE_INIT_GIT_REMOTE and not git_remote_url:
+            raise ValueError('远程 Git 仓库地址不能为空')
+
+        project_root = (self.projects_root / project_id).resolve()
+        project_root.mkdir(parents=True, exist_ok=True)
 
         now = _utc_now()
         project = {
@@ -100,9 +122,12 @@ class ProjectRegistry:
             'kind': kind or 'personal',
             'owner_user_id': owner_user_id or '',
             'owner_chat_id': owner_chat_id or '',
-            'source_type': source_type or 'empty',
-            'source_path': str(Path(source_path).expanduser().resolve()) if source_path else '',
-            'repo_path': repo_path,
+            'workspace_init_mode': workspace_init_mode,
+            'source_type': self._mode_to_source_type(workspace_init_mode),
+            'source_path': resolved_source_path,
+            'git_remote_url': git_remote_url if workspace_init_mode == WORKSPACE_INIT_GIT_REMOTE else '',
+            'repo_path': '',
+            'project_root': str(project_root),
             'created_at': now,
             'updated_at': now,
         }
@@ -115,6 +140,12 @@ class ProjectRegistry:
             kind,
         )
         return project
+
+    def delete_project(self, project_id: str) -> None:
+        def updater(rows: List[dict]) -> None:
+            rows[:] = [row for row in rows if row.get('project_id') != project_id]
+
+        self.store.update_list(updater)
 
     def touch_project(self, project_id: str) -> Optional[dict]:
         now = _utc_now()
@@ -136,15 +167,26 @@ class ProjectRegistry:
             return True
         return False
 
-    def _resolve_repo_path(self, project_id: str, source_type: str, source_path: str) -> str:
-        if source_type == 'local_path':
+    @staticmethod
+    def _resolve_source_path(workspace_init_mode: str, source_path: str) -> str:
+        if workspace_init_mode == WORKSPACE_INIT_LEGACY_COPY:
+            if not source_path:
+                raise ValueError('兼容复制模式需要提供本地源目录')
             source = Path(source_path).expanduser().resolve()
             if not source.exists():
                 raise ValueError(f'项目源目录不存在: {source}')
             if not source.is_dir():
                 raise ValueError(f'项目源目录不是文件夹: {source}')
             return str(source)
-        return str((self.projects_root / project_id / 'repo').resolve())
+        return ''
+
+    @staticmethod
+    def _mode_to_source_type(workspace_init_mode: str) -> str:
+        if workspace_init_mode == WORKSPACE_INIT_GIT_REMOTE:
+            return WORKSPACE_INIT_GIT_REMOTE
+        if workspace_init_mode == WORKSPACE_INIT_LEGACY_COPY:
+            return 'local_path'
+        return WORKSPACE_INIT_EMPTY
 
     def _dedupe_project_id(self, base_id: str) -> str:
         project_ids = {row.get('project_id', '') for row in self.store.read_list()}

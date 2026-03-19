@@ -120,6 +120,10 @@ class BaseOrchestrator(ABC):
         """处理编排器自带的控制命令（默认无）"""
         return None
 
+    def is_control_command(self, content: str) -> bool:
+        """当前文本是否为编排器控制命令"""
+        return False
+
     def get_runtime_session_key(
         self,
         user_id: str,

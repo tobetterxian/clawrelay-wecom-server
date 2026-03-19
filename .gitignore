@@ -126,4 +126,5 @@ node_modules/
 
 # 测试脚本（开发用）
 test_*.py
+!tests/test_codex_reconnect_handling.py
 check_*.py

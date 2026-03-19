@@ -43,7 +43,9 @@ class JsonStateStore:
         return data if isinstance(data, list) else []
 
     def _write_atomic(self, rows: List[dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(self.path.suffix + '.tmp')
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path.write_text(
             json.dumps(rows, ensure_ascii=False, indent=2),
             encoding='utf-8',

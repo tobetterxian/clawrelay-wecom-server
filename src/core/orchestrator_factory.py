@@ -12,6 +12,7 @@ from .base_orchestrator import BaseOrchestrator
 from .claude_relay_orchestrator import ClaudeRelayOrchestrator
 from .codex_orchestrator import CodexOrchestrator
 from .codex_cli_orchestrator import CodexCliOrchestrator
+from .workspace_init_modes import DEFAULT_WORKSPACE_INIT_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,11 @@ class OrchestratorFactory:
                 raise ValueError(
                     f"Codex CLI 机器人 {bot_config.bot_key} 缺少 working_dir 配置"
                 )
+            default_workspace_init_mode = (
+                provider_config.get("default_workspace_init_mode")
+                or provider_config.get("workspace_strategy")
+                or DEFAULT_WORKSPACE_INIT_MODE
+            )
 
             return CodexCliOrchestrator(
                 bot_key=bot_config.bot_key,
@@ -132,7 +138,9 @@ class OrchestratorFactory:
                 executable=provider_config.get("codex_path", "codex"),
                 approval_policy=provider_config.get("approval_policy", "on-request"),
                 workspace_root=provider_config.get("workspace_root", ""),
-                workspace_strategy=provider_config.get("workspace_strategy", "copy"),
+                codex_home=provider_config.get("codex_home", ""),
+                workspace_strategy=provider_config.get("workspace_strategy", ""),
+                default_workspace_init_mode=default_workspace_init_mode,
                 default_group_workspace_mode=provider_config.get("default_group_workspace_mode", "personal"),
                 session_timeout_seconds=provider_config.get("session_timeout_seconds", 7200),
                 enable_project_workspace_mode=provider_config.get("enable_project_workspace_mode", True),
