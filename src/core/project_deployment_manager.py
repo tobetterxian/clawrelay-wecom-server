@@ -66,6 +66,16 @@ class GitRemoteSyncResult:
 
 
 @dataclass
+class GitIdentityResult:
+    workspace_path: str
+    user_name: str = ""
+    user_email: str = ""
+    repo_exists: bool = False
+    repo_initialized: bool = False
+    is_configured: bool = False
+
+
+@dataclass
 class CloudflareDeployScaffoldResult:
     workspace_path: str
     deployment_type: str
@@ -344,6 +354,48 @@ class ProjectDeploymentManager:
                 remotes[name] = url
         return remotes
 
+    def get_git_identity(self, workspace_path: str | Path) -> GitIdentityResult:
+        root = self._resolve_workspace(workspace_path)
+        repo_exists = (root / ".git").exists()
+        if not repo_exists:
+            return GitIdentityResult(
+                workspace_path=str(root),
+                repo_exists=False,
+                is_configured=False,
+            )
+
+        user_name = self._read_git_config(root, "user.name")
+        user_email = self._read_git_config(root, "user.email")
+        return GitIdentityResult(
+            workspace_path=str(root),
+            user_name=user_name,
+            user_email=user_email,
+            repo_exists=True,
+            is_configured=bool(user_name and user_email),
+        )
+
+    def set_git_identity(
+        self,
+        workspace_path: str | Path,
+        user_name: str,
+        user_email: str,
+    ) -> GitIdentityResult:
+        root = self._resolve_workspace(workspace_path)
+        normalized_name = str(user_name or "").strip()
+        normalized_email = str(user_email or "").strip()
+        if not normalized_name:
+            raise ValueError("Git user.name 不能为空")
+        if not normalized_email:
+            raise ValueError("Git user.email 不能为空")
+
+        repo_initialized = self._ensure_git_repository(root)
+        self._run_git(root, "config", "--local", "user.name", normalized_name)
+        self._run_git(root, "config", "--local", "user.email", normalized_email)
+
+        result = self.get_git_identity(root)
+        result.repo_initialized = repo_initialized
+        return result
+
     @staticmethod
     def deployment_summary(project: dict) -> str:
         deployment_type = str(project.get("deployment_type") or "").strip()
@@ -428,3 +480,19 @@ class ProjectDeploymentManager:
             return self._run_git(cwd, "symbolic-ref", "--short", "HEAD").strip()
         except RuntimeError:
             return ""
+
+    def _read_git_config(self, cwd: Path, key: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "config", "--local", "--get", key],
+                cwd=str(cwd),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return ""
+
+        if completed.returncode != 0:
+            return ""
+        return (completed.stdout or "").strip()

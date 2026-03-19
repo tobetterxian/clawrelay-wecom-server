@@ -196,8 +196,12 @@ def test_project_help_mentions_default_project_flow():
     assert "默认个人项目 default" in help_text
     assert "新建项目 <名称>" in help_text
     assert "从仓库派生项目 <名称> <源Git地址>" in help_text
+    assert "创建GitHub仓库 <仓库名>" in help_text
+    assert "创建GitHub仓库并发布 <仓库名>" in help_text
     assert "GitHub仓库列表 [关键词]" in help_text
     assert "选择仓库 <序号>" in help_text
+    assert "Git身份状态" in help_text
+    assert "设置Git身份 <name> <email>" in help_text
     assert "部署帮助" in help_text
     assert "准备GitHub仓库 <Git地址>" in help_text
     assert "发布到新仓库 <新Git地址>" in help_text
@@ -276,6 +280,47 @@ def test_parse_github_repository_commands():
         assert usage is None
         assert request["action"] == "derive_from_selected_repository"
         assert request["name"] == "hello-app"
+
+        request, usage = orchestrator._parse_github_repository_command("创建GitHub仓库 hello-repo")
+        assert usage is None
+        assert request["action"] == "create_user_repository"
+        assert request["name"] == "hello-repo"
+        assert request["private"] is True
+        assert request["publish_after_create"] is False
+
+        request, usage = orchestrator._parse_github_repository_command("创建GitHub公开仓库并发布 hello-repo")
+        assert usage is None
+        assert request["action"] == "create_user_repository"
+        assert request["name"] == "hello-repo"
+        assert request["private"] is False
+        assert request["publish_after_create"] is True
+
+        request, usage = orchestrator._parse_github_repository_command(
+            "创建GitHub组织仓库 demo-org hello-repo"
+        )
+        assert usage is None
+        assert request["action"] == "create_org_repository"
+        assert request["org"] == "demo-org"
+        assert request["name"] == "hello-repo"
+
+
+def test_parse_git_identity_commands():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        request, usage = orchestrator._parse_git_identity_command(
+            '设置Git身份 "Kangaroo 117" kangaroo117@users.noreply.github.com'
+        )
+
+        assert usage is None
+        assert request["action"] == "set_git_identity"
+        assert request["name"] == "Kangaroo 117"
+        assert request["email"] == "kangaroo117@users.noreply.github.com"
 
 
 def test_default_project_usage_hint_detects_named_project_request():
@@ -361,6 +406,28 @@ def test_github_repository_manager_filters_repositories():
     assert repositories[0].preferred_clone_url == "git@github.com:demo/hello-world.git"
 
 
+def test_github_repository_manager_creates_repository():
+    manager = GitHubRepositoryManager(env_vars={"GITHUB_TOKEN": "dummy"})
+    manager._request_json = lambda endpoint, query_params=None, method="GET", payload=None: {
+        "full_name": "kangaroo117/hello-repo",
+        "name": "hello-repo",
+        "owner": {"login": "kangaroo117"},
+        "private": True,
+        "default_branch": "main",
+        "updated_at": "2026-03-19T10:00:00Z",
+        "description": "",
+        "clone_url": "https://github.com/kangaroo117/hello-repo.git",
+        "ssh_url": "git@github.com:kangaroo117/hello-repo.git",
+        "html_url": "https://github.com/kangaroo117/hello-repo",
+    }
+
+    repository = manager.create_user_repository("hello-repo", private=True)
+
+    assert repository.full_name == "kangaroo117/hello-repo"
+    assert repository.private is True
+    assert repository.ssh_url == "git@github.com:kangaroo117/hello-repo.git"
+
+
 def test_publish_to_new_remote_preserves_upstream():
     with TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -389,6 +456,30 @@ def test_publish_to_new_remote_preserves_upstream():
         assert result.upstream_action == "preserved_from_origin"
         assert remotes["origin"] == "git@github.com:demo/publish.git"
         assert remotes["upstream"] == str(source)
+
+
+def test_project_deployment_manager_sets_git_identity_for_workspace():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        before = manager.get_git_identity(str(workspace))
+        result = manager.set_git_identity(
+            str(workspace),
+            "kangaroo117",
+            "kangaroo117@users.noreply.github.com",
+        )
+
+        assert before.repo_exists is False
+        assert before.is_configured is False
+        assert result.repo_exists is True
+        assert result.repo_initialized is True
+        assert result.is_configured is True
+        assert result.user_name == "kangaroo117"
+        assert result.user_email == "kangaroo117@users.noreply.github.com"
+        assert _git_output("config", "--local", "--get", "user.name", cwd=workspace) == "kangaroo117"
+        assert _git_output("config", "--local", "--get", "user.email", cwd=workspace) == "kangaroo117@users.noreply.github.com"
 
 
 def test_sync_upstream_fetches_remote_updates():
@@ -547,6 +638,141 @@ def test_orchestrator_lists_selects_and_derives_from_github_repository():
         assert f"克隆地址：{source}" in current_reply
         assert "已创建个人项目：derived-demo" in derive_reply
         assert f"来源仓库：{source}" in project_reply
+
+
+def test_orchestrator_creates_github_repository_without_gh():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator.github_repository_manager.create_user_repository = lambda name, private=True: GitHubRepositoryInfo(
+            full_name=f"kangaroo117/{name}",
+            name=name,
+            owner="kangaroo117",
+            private=private,
+            default_branch="main",
+            updated_at="2026-03-19T12:00:00Z",
+            description="",
+            clone_url=f"https://github.com/kangaroo117/{name}.git",
+            ssh_url=f"git@github.com:kangaroo117/{name}.git",
+            html_url=f"https://github.com/kangaroo117/{name}",
+        )
+        original_alias_checker = orchestrator._ssh_host_alias_configured
+        orchestrator._ssh_host_alias_configured = lambda alias: alias == "github-kangaroo117"
+        try:
+            reply = asyncio.run(
+                orchestrator.handle_control_command(
+                    "alice",
+                    "创建GitHub仓库 hello-repo",
+                    session_key="alice",
+                )
+            )
+        finally:
+            orchestrator._ssh_host_alias_configured = original_alias_checker
+
+        assert "已创建 GitHub 仓库：kangaroo117/hello-repo" in reply
+        assert "推荐发布地址：git@github-kangaroo117:kangaroo117/hello-repo.git" in reply
+        assert "可发送：发布到新仓库 git@github-kangaroo117:kangaroo117/hello-repo.git" in reply
+
+
+def test_orchestrator_creates_and_publishes_github_repository():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator.github_repository_manager.create_user_repository = lambda name, private=True: GitHubRepositoryInfo(
+            full_name=f"kangaroo117/{name}",
+            name=name,
+            owner="kangaroo117",
+            private=private,
+            default_branch="main",
+            updated_at="2026-03-19T12:00:00Z",
+            description="",
+            clone_url=f"https://github.com/kangaroo117/{name}.git",
+            ssh_url=f"git@github.com:kangaroo117/{name}.git",
+            html_url=f"https://github.com/kangaroo117/{name}",
+        )
+        original_alias_checker = orchestrator._ssh_host_alias_configured
+        orchestrator._ssh_host_alias_configured = lambda alias: alias == "github-kangaroo117"
+        try:
+            reply = asyncio.run(
+                orchestrator.handle_control_command(
+                    "alice",
+                    "创建GitHub仓库并发布 hello-repo",
+                    session_key="alice",
+                )
+            )
+            current_project = asyncio.run(
+                orchestrator.handle_control_command(
+                    "alice",
+                    "当前项目",
+                    session_key="alice",
+                )
+            )
+        finally:
+            orchestrator._ssh_host_alias_configured = original_alias_checker
+
+        assert "已创建 GitHub 仓库：kangaroo117/hello-repo" in reply
+        assert "已将当前项目发布到新的 Git 仓库" in reply
+        assert "git@github-kangaroo117:kangaroo117/hello-repo.git" in current_project
+
+
+def test_orchestrator_supports_git_identity_commands_and_project_status():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            create_reply = await orchestrator.handle_control_command(
+                "alice",
+                "新建项目 demo",
+                session_key="alice",
+            )
+            status_before = await orchestrator.handle_control_command(
+                "alice",
+                "Git身份状态",
+                session_key="alice",
+            )
+            set_reply = await orchestrator.handle_control_command(
+                "alice",
+                "设置Git身份 kangaroo117 kangaroo117@users.noreply.github.com",
+                session_key="alice",
+            )
+            status_after = await orchestrator.handle_control_command(
+                "alice",
+                "Git身份状态",
+                session_key="alice",
+            )
+            project_reply = await orchestrator.handle_control_command(
+                "alice",
+                "当前项目",
+                session_key="alice",
+            )
+            return create_reply, status_before, set_reply, status_after, project_reply
+
+        create_reply, status_before, set_reply, status_after, project_reply = asyncio.run(run_flow())
+
+        assert "已创建个人项目：demo" in create_reply
+        assert "Git仓库：未初始化" in status_before
+        assert "状态：未配置" in status_before
+        assert "可发送：设置Git身份 <name> <email>" in status_before
+        assert "已设置当前工作区 Git 身份" in set_reply
+        assert "Git 初始化：已初始化新仓库" in set_reply
+        assert "user.name：kangaroo117" in set_reply
+        assert "user.email：kangaroo117@users.noreply.github.com" in set_reply
+        assert "状态：已配置" in status_after
+        assert "user.name：kangaroo117" in status_after
+        assert "Git身份：kangaroo117 <kangaroo117@users.noreply.github.com>" in project_reply
 
 
 def test_scaffold_cloudflare_pages_writes_workflow():

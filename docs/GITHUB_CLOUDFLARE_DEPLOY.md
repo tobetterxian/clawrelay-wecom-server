@@ -135,6 +135,11 @@ Workers 项目推荐：
 
 - `GitHub仓库列表 [关键词]`
 - `GitHub组织仓库 <org> [关键词]`
+- `创建GitHub仓库 <仓库名>`
+- `创建GitHub公开仓库 <仓库名>`
+- `创建GitHub私有仓库 <仓库名>`
+- `创建GitHub组织仓库 <org> <仓库名>`
+- `创建GitHub仓库并发布 <仓库名>`
 - `选择仓库 <序号>`
 - `当前选中仓库`
 - `从选中仓库派生项目 <名称>`
@@ -163,6 +168,15 @@ Workers 项目推荐：
 - 发布到新仓库时，系统会尽量保留原来的源仓库为 `upstream`
 - 新仓库会作为新的 `origin`
 - `同步上游` 当前只执行 `git fetch`，不会自动 merge / rebase
+
+## 不安装 gh 也能创建新仓库
+
+如果已经配置了 `GITHUB_TOKEN` 或 `GH_TOKEN`，现在可以直接通过企业微信命令：
+
+1. `创建GitHub仓库 my-new-project`
+2. `创建GitHub仓库并发布 my-new-project`
+
+这样会直接调用 GitHub API 创建仓库，不依赖本机 `gh` 命令。
 
 ## 以后让机器人自动生成项目时，建议这样提需求
 

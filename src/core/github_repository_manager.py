@@ -1,8 +1,8 @@
 """
 GitHub 仓库管理器
 
-负责通过 GitHub API 或本地 gh CLI 列出当前账号 / 组织下的仓库，
-供对话式选择与项目派生使用。
+负责通过 GitHub API 或本地 gh CLI 列出 / 创建当前账号或组织下的仓库，
+供对话式选择、项目派生与发布使用。
 """
 
 from __future__ import annotations
@@ -82,6 +82,68 @@ class GitHubRepositoryManager:
         )
         return self._filter_and_normalize_repositories(repositories, query=query, limit=limit)
 
+    def create_user_repository(
+        self,
+        name: str,
+        private: bool = True,
+        description: str = "",
+        auto_init: bool = False,
+    ) -> GitHubRepositoryInfo:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("GitHub 仓库名称不能为空")
+
+        payload = {
+            "name": normalized_name,
+            "private": bool(private),
+            "auto_init": bool(auto_init),
+        }
+        if str(description or "").strip():
+            payload["description"] = str(description).strip()
+
+        data = self._request_json(
+            endpoint="/user/repos",
+            method="POST",
+            payload=payload,
+        )
+        repository = self._normalize_repository(data)
+        if not repository:
+            raise RuntimeError("创建 GitHub 仓库成功，但返回数据无法识别")
+        return repository
+
+    def create_org_repository(
+        self,
+        org: str,
+        name: str,
+        private: bool = True,
+        description: str = "",
+        auto_init: bool = False,
+    ) -> GitHubRepositoryInfo:
+        normalized_org = str(org or "").strip()
+        normalized_name = str(name or "").strip()
+        if not normalized_org:
+            raise ValueError("GitHub 组织名不能为空")
+        if not normalized_name:
+            raise ValueError("GitHub 仓库名称不能为空")
+
+        payload = {
+            "name": normalized_name,
+            "private": bool(private),
+            "auto_init": bool(auto_init),
+        }
+        if str(description or "").strip():
+            payload["description"] = str(description).strip()
+
+        data = self._request_json(
+            endpoint=f"/orgs/{normalized_org}/repos",
+            method="POST",
+            payload=payload,
+        )
+        repository = self._normalize_repository(data)
+        if not repository:
+            raise RuntimeError("创建 GitHub 组织仓库成功，但返回数据无法识别")
+        return repository
+
     def _filter_and_normalize_repositories(
         self,
         repositories: List[dict],
@@ -133,75 +195,103 @@ class GitHubRepositoryManager:
         )
 
     def _request_repositories(self, endpoint: str, query_params: Dict[str, str]) -> List[dict]:
+        data = self._request_json(endpoint=endpoint, query_params=query_params, method="GET")
+        if not isinstance(data, list):
+            raise RuntimeError("GitHub API 返回格式异常")
+        return data
+
+    def _request_json(
+        self,
+        endpoint: str,
+        query_params: Optional[Dict[str, str]] = None,
+        method: str = "GET",
+        payload: Optional[Dict[str, object]] = None,
+    ):
         token = self._resolve_token()
         if token:
-            return self._request_repositories_via_http(endpoint, query_params, token)
+            return self._request_json_via_http(endpoint, query_params or {}, token, method=method, payload=payload)
         if self._gh_available():
-            return self._request_repositories_via_gh(endpoint, query_params)
+            return self._request_json_via_gh(endpoint, query_params or {}, method=method, payload=payload)
         raise RuntimeError("未检测到 GitHub 凭证，请配置 GITHUB_TOKEN / GH_TOKEN 或先执行 gh auth login")
 
-    def _request_repositories_via_http(
+    def _request_json_via_http(
         self,
         endpoint: str,
         query_params: Dict[str, str],
         token: str,
-    ) -> List[dict]:
+        method: str = "GET",
+        payload: Optional[Dict[str, object]] = None,
+    ):
         query = urlencode(query_params or {})
         url = f"{GITHUB_API_BASE}{endpoint}"
         if query:
             url = f"{url}?{query}"
 
+        data_bytes = None
+        if payload is not None:
+            data_bytes = json.dumps(payload).encode("utf-8")
+
         request = Request(
             url,
+            method=method,
+            data=data_bytes,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token}",
                 "User-Agent": "clawrelay-wecom-server",
                 "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
             },
         )
         try:
             with urlopen(request, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8") or "[]")
+                response_text = response.read().decode("utf-8") or "null"
+                data = json.loads(response_text)
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
             raise RuntimeError(f"GitHub API 请求失败（HTTP {exc.code}）：{body or exc.reason}") from exc
         except URLError as exc:
             raise RuntimeError(f"GitHub API 网络请求失败：{exc}") from exc
 
-        if not isinstance(data, list):
-            raise RuntimeError("GitHub API 返回格式异常")
         return data
 
-    def _request_repositories_via_gh(
+    def _request_json_via_gh(
         self,
         endpoint: str,
         query_params: Dict[str, str],
-    ) -> List[dict]:
+        method: str = "GET",
+        payload: Optional[Dict[str, object]] = None,
+    ):
         query = urlencode(query_params or {})
         path = endpoint.lstrip("/")
         api_target = f"{path}?{query}" if query else path
         env = os.environ.copy()
         env.update({key: value for key, value in self.env_vars.items() if value is not None})
 
+        command = [self.gh_executable, "api"]
+        if method and method.upper() != "GET":
+            command.extend(["-X", method.upper()])
+        if payload is not None:
+            command.extend(["--input", "-"])
+        command.append(api_target)
+
         completed = subprocess.run(
-            [self.gh_executable, "api", api_target],
+            command,
             check=False,
             capture_output=True,
             text=True,
             env=env,
+            input=json.dumps(payload) if payload is not None else None,
         )
         if completed.returncode != 0:
             output = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(f"gh api 调用失败：{output or 'unknown error'}")
 
         try:
-            data = json.loads(completed.stdout or "[]")
+            data = json.loads(completed.stdout or "null")
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"gh api 返回了无法解析的 JSON：{exc}") from exc
 
-        if not isinstance(data, list):
-            raise RuntimeError("gh api 返回格式异常")
         return data
 
     def _resolve_token(self) -> str:
