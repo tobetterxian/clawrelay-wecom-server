@@ -115,11 +115,9 @@ Workers 项目推荐：
 2. 在 GitHub 仓库中创建：
    - Secret: `CLOUDFLARE_API_TOKEN`
    - Secret: `CLOUDFLARE_ACCOUNT_ID`
-   - Variable: `CF_PAGES_PROJECT_NAME`
-   - Variable: `CF_PAGES_BUILD_DIR`
 3. 把 `docs/examples/github-actions/cloudflare-pages-deploy.yml:1` 复制到目标项目：
    - `.github/workflows/deploy-cloudflare-pages.yml`
-4. 根据项目调整安装和构建命令
+4. 根据项目调整安装和构建命令；如果通过机器人命令 `启用Pages部署 <Pages项目名> [构建目录]` 生成，则项目名和构建目录会直接写入工作流，不需要再配 GitHub Variables
 5. 推送到 `main`，自动部署
 
 ## Workers 项目接入步骤
@@ -132,6 +130,34 @@ Workers 项目推荐：
    - `.github/workflows/deploy-cloudflare-worker.yml`
 4. 需要时参考 `docs/examples/wrangler/worker/wrangler.toml.example:1`
 5. 推送到 `main`，自动部署
+
+## 企业微信对话命令
+
+- `从仓库派生项目 <名称> <源Git地址>`
+- `远程状态`
+- `部署帮助`
+- `部署状态`
+- `准备GitHub仓库 <Git地址>`
+- `发布到新仓库 <新Git地址>`
+- `同步上游`
+- `启用Pages部署 <Pages项目名> [构建目录]`
+- `启用Worker部署 <Worker名称> [入口文件]`
+
+## 二次开发并发布到新仓库
+
+适合“从现有 GitHub 仓库选一个做二次开发，完成后再推到你自己的新仓库”：
+
+1. `从仓库派生项目 my-app <源Git地址>`
+2. 在当前项目里继续开发
+3. `发布到新仓库 <新Git地址>`
+4. 需要时执行 `同步上游`
+5. 再执行 `启用Pages部署 ...` 或 `启用Worker部署 ...`
+
+说明：
+
+- 发布到新仓库时，系统会尽量保留原来的源仓库为 `upstream`
+- 新仓库会作为新的 `origin`
+- `同步上游` 当前只执行 `git fetch`，不会自动 merge / rebase
 
 ## 以后让机器人自动生成项目时，建议这样提需求
 

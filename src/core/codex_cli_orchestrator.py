@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .chat_logger import get_chat_logger
+from .project_deployment_manager import ProjectDeploymentManager
 from .project_registry import ProjectRegistry
 from .session_binding_manager import SessionBindingManager
 from .workspace_manager import WorkspaceManager
@@ -50,10 +51,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_CODEX_CLI_MODEL = "gpt-5.3-codex"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_WORKSPACE_ROOT_NAME = ".codex_data"
+DEFAULT_PERSONAL_PROJECT_NAME = "default"
 MODE_PERSONAL = "personal_workspace"
 MODE_SHARED = "shared_workspace"
 CODEX_TRANSIENT_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
 CODEX_TRANSIENT_RETRY_LIMIT = 2
+DEFAULT_PROJECT_REQUEST_RE = re.compile(
+    r"(新建|创建|搭建|做(?:一个|个)?|开发|实现|生成).{0,24}项目",
+    re.IGNORECASE,
+)
 
 OnInteractionRequest = Optional[Callable[[dict], Awaitable[None]]]
 
@@ -142,6 +148,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             approval_policy=approval_policy,
         )
         self.project_registry = ProjectRegistry(self.workspace_root)
+        self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
             workspace_strategy=self.workspace_strategy,
@@ -200,12 +207,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not command:
             return None
 
-        if command in {"项目帮助", "工作区帮助"}:
+        if command in {"项目帮助", "工作区帮助", "项目命令", "帮助", "help", "?", "？", "怎么用"}:
             return self._project_command_help()
+        if command in {"部署帮助", "部署命令"}:
+            return self._deployment_command_help()
         if command == "项目列表":
             return self._handle_list_projects_command(user_id, session_key, log_context)
         if command == "当前项目":
             return self._handle_current_project_command(user_id, session_key, log_context)
+        if command == "远程状态":
+            return self._handle_remote_status_command(user_id, session_key, log_context)
+        if command in {"部署状态", "当前部署"}:
+            return self._handle_deployment_status_command(user_id, session_key, log_context)
         if command in {"当前工作区", "我的工作区"}:
             return self._handle_current_workspace_command(user_id, session_key, log_context)
         if command == "工作区列表":
@@ -214,6 +227,48 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return self._handle_use_personal_workspace_command(user_id, session_key, log_context)
         if command == "使用共享工作区":
             return self._handle_use_shared_workspace_command(user_id, session_key, log_context)
+        deployment_request, usage_message = self._parse_deployment_command(command)
+        if usage_message:
+            return usage_message
+        if deployment_request:
+            action = deployment_request["action"]
+            if action == "prepare_github_remote":
+                return self._handle_prepare_github_remote_command(
+                    user_id=user_id,
+                    remote_url=deployment_request["remote_url"],
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "enable_pages":
+                return self._handle_enable_pages_deployment_command(
+                    user_id=user_id,
+                    pages_project_name=deployment_request["pages_project_name"],
+                    build_dir=deployment_request.get("build_dir", "dist"),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "publish_new_remote":
+                return self._handle_publish_to_new_remote_command(
+                    user_id=user_id,
+                    remote_url=deployment_request["remote_url"],
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "sync_upstream":
+                return self._handle_sync_upstream_command(
+                    user_id=user_id,
+                    upstream_remote_url=deployment_request.get("upstream_remote_url", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "enable_worker":
+                return self._handle_enable_worker_deployment_command(
+                    user_id=user_id,
+                    worker_name=deployment_request["worker_name"],
+                    entry_file=deployment_request.get("entry_file", "src/index.ts"),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
         create_request, usage_message = self._parse_project_create_command(command)
         if usage_message:
             return usage_message
@@ -241,8 +296,19 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if command in {
             "项目帮助",
             "工作区帮助",
+            "项目命令",
+            "帮助",
+            "help",
+            "?",
+            "？",
+            "怎么用",
+            "部署帮助",
+            "部署命令",
             "项目列表",
             "当前项目",
+            "远程状态",
+            "部署状态",
+            "当前部署",
             "当前工作区",
             "我的工作区",
             "工作区列表",
@@ -251,6 +317,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
         }:
             return True
         if command.startswith("进入项目"):
+            return True
+        deployment_request, usage_message = self._parse_deployment_command(command)
+        if deployment_request or usage_message:
             return True
         create_request, usage_message = self._parse_project_create_command(command)
         return bool(create_request or usage_message)
@@ -424,11 +493,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
         thinking_lines.append(f"📂 工作区：{runtime_context['working_dir']}")
         if runtime_context.get("initial_notice"):
             thinking_lines.append(runtime_context["initial_notice"])
+        else:
+            usage_hint = self._build_default_project_usage_hint(
+                message_content=message_content,
+                runtime_context=runtime_context,
+            )
+            if usage_hint:
+                thinking_lines.append(usage_hint)
 
         reconnect_retry_count = 0
 
         while True:
-            response_text = ""
+            response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
             commands_seen: List[str] = []
             turn_progressed = False
             runtime = self.adapter.create_session(
@@ -734,6 +810,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "workspace": None,
                 "mode": "legacy",
                 "initial_notice": "",
+                "first_reply_guidance": "",
             }, None
 
         if chat_type == "group":
@@ -748,10 +825,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
         binding = self.binding_manager.get_binding(self.bot_key, conversation_key)
         project = self.project_registry.get_project((binding or {}).get("project_id", "")) if binding else None
         initial_notice = ""
+        first_reply_guidance = ""
         if not project:
             project, created = self._get_or_create_default_personal_project(user_id)
             if created:
-                initial_notice = f"🆕 已自动创建默认个人项目：{project['name']}"
+                initial_notice = self._build_default_project_created_notice(project["name"])
+                first_reply_guidance = self._build_first_use_help_text(project["name"])
 
         workspace = self.workspace_manager.get_or_create_personal_workspace(project, user_id)
         runtime_binding = self.binding_manager.bind_session(
@@ -772,6 +851,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "workspace": workspace,
             "mode": MODE_PERSONAL,
             "initial_notice": initial_notice,
+            "first_reply_guidance": first_reply_guidance,
         }, None
 
     def _ensure_group_runtime_context(
@@ -829,14 +909,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "workspace": workspace,
             "mode": mode,
             "initial_notice": "",
+            "first_reply_guidance": "",
         }, None
 
     def _get_or_create_default_personal_project(self, user_id: str) -> Tuple[dict, bool]:
-        existing = self.project_registry.resolve_project("default", user_id=user_id)
+        existing = self.project_registry.resolve_project(DEFAULT_PERSONAL_PROJECT_NAME, user_id=user_id)
         if existing:
             return existing, False
         project = self.project_registry.create_project(
-            name="default",
+            name=DEFAULT_PERSONAL_PROJECT_NAME,
             kind="personal",
             owner_user_id=user_id,
             workspace_init_mode=WORKSPACE_INIT_EMPTY,
@@ -1017,12 +1098,326 @@ class CodexCliOrchestrator(BaseOrchestrator):
         project = runtime_context.get("project")
         if not project:
             return f"当前工作目录：{runtime_context['working_dir']}"
-        return (
-            f"当前项目：{project['name']}\n"
-            f"项目ID：{project['project_id']}\n"
-            f"初始化方式：{workspace_init_mode_label(infer_project_workspace_init_mode(project, fallback=self.default_workspace_init_mode))}\n"
-            f"项目源：{project_source_summary(project)}"
+        deployment_summary = self.project_deployment_manager.deployment_summary(project)
+        lines = [
+            f"当前项目：{project['name']}",
+            f"项目ID：{project['project_id']}",
+            f"初始化方式：{workspace_init_mode_label(infer_project_workspace_init_mode(project, fallback=self.default_workspace_init_mode))}",
+            f"项目源：{project_source_summary(project)}",
+        ]
+        lines.extend(self._build_remote_status_lines(project, runtime_context["working_dir"]))
+        lines.append(f"部署状态：{deployment_summary}")
+        return "\n".join(lines)
+
+    def _handle_remote_status_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        if not project:
+            return f"当前工作目录：{runtime_context['working_dir']}"
+
+        lines = [
+            f"当前项目：{project['name']}",
+            f"工作区：{runtime_context['working_dir']}",
+        ]
+        lines.extend(self._build_remote_status_lines(project, runtime_context["working_dir"]))
+
+        source_url = self._project_source_remote_url(project)
+        publish_url = self._project_publish_remote_url(project)
+        if source_url and not publish_url:
+            lines.append("可发送：发布到新仓库 <Git地址>")
+        if source_url:
+            lines.append("可发送：同步上游")
+        return "\n".join(lines)
+
+    def _handle_deployment_status_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        if not project:
+            return f"当前工作目录：{runtime_context['working_dir']}"
+
+        workspace_path = runtime_context["working_dir"]
+        deployment_summary = self.project_deployment_manager.deployment_summary(project)
+
+        lines = [
+            f"当前项目：{project['name']}",
+            f"工作区：{workspace_path}",
+            f"部署状态：{deployment_summary}",
+        ]
+        lines.extend(self._build_remote_status_lines(project, workspace_path))
+
+        remotes = self.project_deployment_manager.list_git_remotes(workspace_path)
+        if not remotes.get("origin"):
+            lines.append("可发送：准备GitHub仓库 <Git地址>")
+        if not str(project.get("deployment_type") or "").strip():
+            lines.append("可发送：启用Pages部署 <Pages项目名> [构建目录]")
+            lines.append("或：启用Worker部署 <Worker名称> [入口文件]")
+        return "\n".join(lines)
+
+    def _handle_prepare_github_remote_command(
+        self,
+        user_id: str,
+        remote_url: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        result = self.project_deployment_manager.prepare_github_remote(workspace_path, remote_url)
+        if project:
+            source_remote_url = self._project_source_remote_url(project)
+            updates = {
+                "github_remote_url": result.origin_url,
+            }
+            if not source_remote_url or result.origin_url != source_remote_url:
+                updates["publish_git_remote_url"] = result.origin_url
+            self.project_registry.update_project(
+                project["project_id"],
+                **updates,
+            )
+
+        origin_action_text = {
+            "added": "已新增",
+            "updated": "已更新",
+            "unchanged": "保持不变",
+        }.get(result.origin_action, result.origin_action)
+
+        lines = [
+            "已为当前工作区准备 GitHub 仓库",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{workspace_path}",
+            f"origin：{result.origin_url}",
+            f"Git 初始化：{'已初始化新仓库' if result.repo_initialized else '沿用现有仓库'}",
+            f"origin 处理：{origin_action_text}",
+        ]
+        if result.current_branch:
+            lines.append(f"当前分支：{result.current_branch}")
+        lines.append("下一步：推送代码后，可继续发送 `启用Pages部署 ...` 或 `启用Worker部署 ...`")
+        return "\n".join(lines)
+
+    def _handle_publish_to_new_remote_command(
+        self,
+        user_id: str,
+        remote_url: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        source_remote_url = self._project_source_remote_url(project)
+        upstream_remote_url = str(project.get("upstream_remote_url") or "").strip() or source_remote_url
+        result = self.project_deployment_manager.publish_to_new_remote(
+            workspace_path=workspace_path,
+            publish_remote_url=remote_url,
+            upstream_remote_url=upstream_remote_url,
         )
+
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                github_remote_url=result.origin_url,
+                publish_git_remote_url=result.origin_url,
+                upstream_remote_url=result.upstream_url or upstream_remote_url,
+                source_git_remote_url=source_remote_url or result.upstream_url or upstream_remote_url,
+            )
+
+        origin_action_text = {
+            "added": "已新增",
+            "updated": "已更新",
+            "unchanged": "保持不变",
+        }.get(result.origin_action, result.origin_action)
+        upstream_action_text = {
+            "added": "已新增 upstream",
+            "updated": "已更新 upstream",
+            "unchanged": "保持不变",
+            "preserved_from_origin": "已保留原 origin 为 upstream",
+        }.get(result.upstream_action, result.upstream_action)
+
+        lines = [
+            "已将当前项目发布到新的 Git 仓库",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{workspace_path}",
+            f"新 origin：{result.origin_url}",
+            f"origin 处理：{origin_action_text}",
+            f"upstream 处理：{upstream_action_text}",
+        ]
+        if result.upstream_url:
+            lines.append(f"上游仓库：{result.upstream_url}")
+        if result.current_branch:
+            lines.append(f"当前分支：{result.current_branch}")
+        lines.append("下一步：可执行 git push -u origin <分支>，或继续发送 `启用Pages部署 ...` / `启用Worker部署 ...`")
+        return "\n".join(lines)
+
+    def _handle_sync_upstream_command(
+        self,
+        user_id: str,
+        upstream_remote_url: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        source_remote_url = (
+            str(upstream_remote_url or "").strip()
+            or str((project or {}).get("upstream_remote_url") or "").strip()
+            or self._project_source_remote_url(project)
+        )
+        result = self.project_deployment_manager.sync_upstream(
+            workspace_path=workspace_path,
+            upstream_remote_url=source_remote_url,
+        )
+        if project and result.remotes.get("upstream"):
+            self.project_registry.update_project(
+                project["project_id"],
+                source_git_remote_url=self._project_source_remote_url(project) or result.remotes.get("upstream", ""),
+                upstream_remote_url=result.remotes.get("upstream", ""),
+            )
+
+        fetch_action_text = {
+            "fetched": "已抓取",
+            "fetched_origin": "已从 origin 抓取",
+            "added_upstream_and_fetched": "已新增 upstream 并抓取",
+            "updated_upstream_and_fetched": "已更新 upstream 并抓取",
+        }.get(result.fetch_action, result.fetch_action)
+
+        lines = [
+            "已同步上游远程仓库元数据",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{workspace_path}",
+            f"远程：{result.remote_name}",
+            f"地址：{result.remote_url}",
+            f"结果：{fetch_action_text}",
+            "说明：当前只执行 git fetch，不会自动 merge / rebase",
+        ]
+        if result.current_branch:
+            lines.append(f"当前分支：{result.current_branch}")
+        return "\n".join(lines)
+
+    def _handle_enable_pages_deployment_command(
+        self,
+        user_id: str,
+        pages_project_name: str,
+        build_dir: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        result = self.project_deployment_manager.scaffold_cloudflare_pages(
+            workspace_path=workspace_path,
+            pages_project_name=pages_project_name,
+            build_dir=build_dir,
+        )
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                github_remote_url=current_origin or str(project.get("github_remote_url") or "").strip(),
+                deployment_type=result.deployment_type,
+                deployment_config={
+                    "workflow_path": result.workflow_path,
+                    "pages_project_name": result.pages_project_name,
+                    "build_dir": result.build_dir,
+                },
+            )
+
+        file_summaries = "、".join(
+            f"{item.relative_path}（{self._file_action_label(item.action)}）"
+            for item in result.files
+        )
+        lines = [
+            "已为当前工作区写入 Cloudflare Pages 部署脚手架",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{workspace_path}",
+            f"Pages 项目名：{result.pages_project_name}",
+            f"构建目录：{result.build_dir}",
+            f"工作流：{result.workflow_path}",
+            f"写入文件：{file_summaries}",
+            f"当前 origin：{current_origin or '(未配置)'}",
+            "GitHub Secrets：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID",
+            "推送到 main 后会自动触发 GitHub Actions 部署",
+        ]
+        if not current_origin:
+            lines.append("提示：当前工作区还未配置 origin，可先发送：准备GitHub仓库 <Git地址>")
+        lines.append("提示：Cloudflare Pages 项目需提前在控制台或 wrangler 中创建")
+        return "\n".join(lines)
+
+    def _handle_enable_worker_deployment_command(
+        self,
+        user_id: str,
+        worker_name: str,
+        entry_file: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        result = self.project_deployment_manager.scaffold_cloudflare_worker(
+            workspace_path=workspace_path,
+            worker_name=worker_name,
+            entry_file=entry_file,
+        )
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                github_remote_url=current_origin or str(project.get("github_remote_url") or "").strip(),
+                deployment_type=result.deployment_type,
+                deployment_config={
+                    "workflow_path": result.workflow_path,
+                    "worker_name": result.worker_name,
+                    "entry_file": result.entry_file,
+                    "compatibility_date": result.compatibility_date,
+                },
+            )
+
+        file_summaries = "、".join(
+            f"{item.relative_path}（{self._file_action_label(item.action)}）"
+            for item in result.files
+        )
+        lines = [
+            "已为当前工作区写入 Cloudflare Worker 部署脚手架",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{workspace_path}",
+            f"Worker 名称：{result.worker_name}",
+            f"入口文件：{result.entry_file}",
+            f"兼容日期：{result.compatibility_date}",
+            f"工作流：{result.workflow_path}",
+            f"写入文件：{file_summaries}",
+            f"当前 origin：{current_origin or '(未配置)'}",
+            "GitHub Secrets：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID",
+            "推送到 main 后会自动触发 GitHub Actions 部署",
+        ]
+        for warning in result.warnings:
+            lines.append(f"提示：{warning}")
+        if not current_origin:
+            lines.append("提示：当前工作区还未配置 origin，可先发送：准备GitHub仓库 <Git地址>")
+        return "\n".join(lines)
 
     def _handle_current_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
         runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
@@ -1111,8 +1506,94 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "当前群聊还没有绑定项目。\n\n请先发送：\n"
             "- 新建项目 <名称>\n"
             "- 新建仓库项目 <名称> <Git地址>\n"
-            "- 进入项目 <名称或ID>"
+            "- 进入项目 <名称或ID>\n\n"
+            "可发送：项目帮助"
         )
+
+    @staticmethod
+    def _build_default_project_created_notice(project_name: str) -> str:
+        return f"🆕 已自动创建默认个人项目：{project_name}"
+
+    @staticmethod
+    def _build_first_use_help_text(project_name: str) -> str:
+        return (
+            f"🆕 首次使用说明：已自动进入默认个人项目 `{project_name}`\n"
+            "💡 你现在可以直接继续发开发需求\n"
+            "🏷️ 若想指定项目名，请先发送：新建项目 <名称>\n"
+            "例如：新建项目 hello-world\n"
+            "📘 可发送：项目帮助 / 帮助 / 部署帮助"
+        )
+
+    @classmethod
+    def _build_default_project_usage_hint(
+        cls,
+        message_content: str,
+        runtime_context: dict,
+    ) -> str:
+        project = (runtime_context or {}).get("project") or {}
+        if str(project.get("name") or "").strip().lower() != DEFAULT_PERSONAL_PROJECT_NAME:
+            return ""
+
+        content = (message_content or "").strip()
+        if not content or not cls._looks_like_named_project_request(content):
+            return ""
+
+        return (
+            "💡 你当前正在默认项目 default 中继续开发；"
+            "若想单独创建命名项目，请先发送：新建项目 <名称>（例如：新建项目 hello-world）"
+        )
+
+    @classmethod
+    def _looks_like_named_project_request(cls, content: str) -> bool:
+        text = (content or "").strip()
+        if not text:
+            return False
+
+        normalized = text.lower()
+        if DEFAULT_PROJECT_REQUEST_RE.search(text):
+            return True
+        return "项目" in text and any(
+            keyword in normalized
+            for keyword in ("hello world", "helloworld", "project ")
+        )
+
+    def _build_remote_status_lines(self, project: dict, workspace_path: str) -> List[str]:
+        remotes = self.project_deployment_manager.list_git_remotes(workspace_path)
+        source_remote_url = self._project_source_remote_url(project)
+        publish_remote_url = self._project_publish_remote_url(project)
+        upstream_remote_url = str((project or {}).get("upstream_remote_url") or "").strip()
+
+        lines = [
+            f"来源仓库：{source_remote_url or '(未配置)'}",
+            f"发布仓库：{publish_remote_url or '(未配置)'}",
+            f"当前 origin：{remotes.get('origin', '') or '(未配置)'}",
+            f"当前 upstream：{remotes.get('upstream', '') or upstream_remote_url or '(未配置)'}",
+        ]
+        return lines
+
+    @staticmethod
+    def _project_source_remote_url(project: dict) -> str:
+        project = project or {}
+        return (
+            str(project.get("source_git_remote_url") or "").strip()
+            or str(project.get("git_remote_url") or "").strip()
+        )
+
+    @staticmethod
+    def _project_publish_remote_url(project: dict) -> str:
+        project = project or {}
+        publish_remote_url = str(project.get("publish_git_remote_url") or "").strip()
+        if publish_remote_url:
+            return publish_remote_url
+
+        github_remote_url = str(project.get("github_remote_url") or "").strip()
+        source_remote_url = (
+            str(project.get("source_git_remote_url") or "").strip()
+            or str(project.get("git_remote_url") or "").strip()
+        )
+        if github_remote_url and github_remote_url != source_remote_url:
+            return github_remote_url
+        return ""
 
     def _upload_dir_for_session(self, session_key: str) -> Path:
         path = self.upload_root / self._safe_name(session_key)
@@ -1157,6 +1638,17 @@ class CodexCliOrchestrator(BaseOrchestrator):
         command = (command or "").strip()
         if not command:
             return None, None
+
+        if command.startswith("从仓库派生项目") or command.startswith("派生项目"):
+            prefix = "从仓库派生项目" if command.startswith("从仓库派生项目") else "派生项目"
+            args = self._split_command_args(command[len(prefix) :].strip())
+            if len(args) < 2:
+                return None, f"用法：{prefix} <名称> <源Git地址>"
+            return {
+                "name": args[0],
+                "workspace_init_mode": WORKSPACE_INIT_GIT_REMOTE,
+                "git_remote_url": " ".join(args[1:]).strip(),
+            }, None
 
         if command.startswith("新建空项目"):
             name = command[len("新建空项目") :].strip()
@@ -1247,6 +1739,67 @@ class CodexCliOrchestrator(BaseOrchestrator):
         except ValueError:
             return [item.strip() for item in text.split() if item.strip()]
 
+    def _parse_deployment_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
+        command = (command or "").strip()
+        if not command:
+            return None, None
+
+        for prefix in ("发布到新仓库", "推送到新仓库", "发布新仓库"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if not args:
+                    return None, f"用法：{prefix} <新Git地址>"
+                return {
+                    "action": "publish_new_remote",
+                    "remote_url": " ".join(args).strip(),
+                }, None
+
+        if command.startswith("同步上游"):
+            args = self._split_command_args(command[len("同步上游") :].strip())
+            return {
+                "action": "sync_upstream",
+                "upstream_remote_url": " ".join(args).strip(),
+            }, None
+
+        for prefix in ("准备GitHub仓库", "绑定GitHub仓库", "设置GitHub仓库"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if not args:
+                    return None, f"用法：{prefix} <Git地址>"
+                return {
+                    "action": "prepare_github_remote",
+                    "remote_url": " ".join(args).strip(),
+                }, None
+
+        for prefix in ("启用Pages部署", "启用Cloudflare Pages部署"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if not args:
+                    return None, f"用法：{prefix} <Pages项目名> [构建目录]"
+                return {
+                    "action": "enable_pages",
+                    "pages_project_name": args[0],
+                    "build_dir": " ".join(args[1:]).strip() or "dist",
+                }, None
+
+        for prefix in (
+            "启用Worker部署",
+            "启用Workers部署",
+            "启用Cloudflare Worker部署",
+            "启用Cloudflare Workers部署",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if not args:
+                    return None, f"用法：{prefix} <Worker名称> [入口文件]"
+                return {
+                    "action": "enable_worker",
+                    "worker_name": args[0],
+                    "entry_file": " ".join(args[1:]).strip() or "src/index.ts",
+                }, None
+
+        return None, None
+
     def _build_project_created_reply(
         self,
         project: dict,
@@ -1269,14 +1822,46 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _project_command_help() -> str:
         return (
             "项目命令：\n"
+            "- 直接发开发需求：会自动进入默认个人项目 default\n"
             "- 新建项目 <名称>\n"
             "- 新建仓库项目 <名称> <Git地址>\n"
+            "- 从仓库派生项目 <名称> <源Git地址>\n"
             "- 新建复制项目 <名称> [本地目录]\n"
             "- 新建项目 git_remote <名称> <Git地址>\n"
             "- 新建项目 legacy_copy <名称> [本地目录]\n"
             "- 进入项目 <名称或ID>\n"
-            "- 项目列表 / 当前项目 / 当前工作区 / 工作区列表"
+            "- 项目列表 / 当前项目 / 当前工作区 / 工作区列表 / 远程状态\n"
+            "- 部署帮助 / 部署状态 / 同步上游\n"
+            "- 准备GitHub仓库 <Git地址>\n"
+            "- 发布到新仓库 <新Git地址>\n"
+            "- 启用Pages部署 <Pages项目名> [构建目录]\n"
+            "- 启用Worker部署 <Worker名称> [入口文件]\n"
+            "- 查看完整说明：项目帮助 / 项目命令 / 帮助"
         )
+
+    @staticmethod
+    def _deployment_command_help() -> str:
+        return (
+            "部署命令：\n"
+            "- 远程状态\n"
+            "- 部署状态\n"
+            "- 准备GitHub仓库 <Git地址>\n"
+            "- 发布到新仓库 <新Git地址>\n"
+            "- 同步上游\n"
+            "- 启用Pages部署 <Pages项目名> [构建目录]\n"
+            "- 启用Worker部署 <Worker名称> [入口文件]\n"
+            "- GitHub 推送凭证建议使用宿主机 SSH / gh 登录\n"
+            "- Cloudflare 凭证建议只放 GitHub Actions Secrets，不要发到聊天里"
+        )
+
+    @staticmethod
+    def _file_action_label(action: str) -> str:
+        return {
+            "created": "已创建",
+            "updated": "已更新",
+            "unchanged": "未变化",
+            "kept": "已保留",
+        }.get(str(action or "").strip(), str(action or "").strip() or "未知")
 
     @staticmethod
     def _format_command_result(event: CodexCommandExecutionComplete) -> str:

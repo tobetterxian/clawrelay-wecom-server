@@ -1,5 +1,6 @@
 import logging
 import subprocess
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
@@ -7,6 +8,7 @@ import os
 from config.bot_config import BotConfig, BotConfigManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.json_state_store import JsonStateStore
+from src.core.project_deployment_manager import ProjectDeploymentManager
 from src.core.project_registry import ProjectRegistry
 from src.core.workspace_init_modes import (
     WORKSPACE_INIT_EMPTY,
@@ -93,6 +95,26 @@ def test_default_personal_project_uses_empty_workspace():
         assert project["git_remote_url"] == ""
 
 
+def test_default_personal_project_notice_contains_usage_guidance():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        runtime_context, early_reply = orchestrator._ensure_single_runtime_context("alice", "alice")
+
+        assert early_reply is None
+        assert "默认个人项目" in runtime_context["initial_notice"]
+        assert runtime_context["initial_notice"].strip() == "🆕 已自动创建默认个人项目：default"
+        assert "首次使用说明" in runtime_context["first_reply_guidance"]
+        assert "新建项目 <名称>" in runtime_context["first_reply_guidance"]
+        assert "项目帮助 / 帮助" in runtime_context["first_reply_guidance"]
+
+
 def test_workspace_copy_skips_windows_reserved_name():
     with TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -160,6 +182,84 @@ def test_project_create_command_supports_new_modes():
         assert create_request["workspace_init_mode"] == WORKSPACE_INIT_LEGACY_COPY
         assert create_request["source_path"] == str(working_dir.resolve())
 
+        create_request, usage = orchestrator._parse_project_create_command(
+            "从仓库派生项目 demo https://example.com/base.git"
+        )
+        assert usage is None
+        assert create_request["workspace_init_mode"] == WORKSPACE_INIT_GIT_REMOTE
+        assert create_request["git_remote_url"] == "https://example.com/base.git"
+
+
+def test_project_help_mentions_default_project_flow():
+    help_text = CodexCliOrchestrator._project_command_help()
+    assert "默认个人项目 default" in help_text
+    assert "新建项目 <名称>" in help_text
+    assert "从仓库派生项目 <名称> <源Git地址>" in help_text
+    assert "部署帮助" in help_text
+    assert "准备GitHub仓库 <Git地址>" in help_text
+    assert "发布到新仓库 <新Git地址>" in help_text
+    assert "帮助" in help_text
+
+
+def test_parse_deployment_commands():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        request, usage = orchestrator._parse_deployment_command(
+            "准备GitHub仓库 git@github.com:demo/hello.git"
+        )
+        assert usage is None
+        assert request["action"] == "prepare_github_remote"
+        assert request["remote_url"] == "git@github.com:demo/hello.git"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "发布到新仓库 git@github.com:demo/publish.git"
+        )
+        assert usage is None
+        assert request["action"] == "publish_new_remote"
+        assert request["remote_url"] == "git@github.com:demo/publish.git"
+
+        request, usage = orchestrator._parse_deployment_command("同步上游")
+        assert usage is None
+        assert request["action"] == "sync_upstream"
+        assert request["upstream_remote_url"] == ""
+
+        request, usage = orchestrator._parse_deployment_command("启用Pages部署 hello-pages dist")
+        assert usage is None
+        assert request["action"] == "enable_pages"
+        assert request["pages_project_name"] == "hello-pages"
+        assert request["build_dir"] == "dist"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "启用Worker部署 hello-worker src/index.ts"
+        )
+        assert usage is None
+        assert request["action"] == "enable_worker"
+        assert request["worker_name"] == "hello-worker"
+        assert request["entry_file"] == "src/index.ts"
+
+
+def test_default_project_usage_hint_detects_named_project_request():
+    hint = CodexCliOrchestrator._build_default_project_usage_hint(
+        message_content="请帮我创建一个 hello world 项目并开始实现",
+        runtime_context={"project": {"name": "default"}},
+    )
+    assert "默认项目 default" in hint
+    assert "新建项目 <名称>" in hint
+
+
+def test_default_project_usage_hint_ignores_regular_request():
+    hint = CodexCliOrchestrator._build_default_project_usage_hint(
+        message_content="请修复当前目录里的一个 bug",
+        runtime_context={"project": {"name": "default"}},
+    )
+    assert hint == ""
+
 
 def test_json_state_store_recreates_missing_parent_directory():
     with TemporaryDirectory() as tmpdir:
@@ -171,6 +271,230 @@ def test_json_state_store_recreates_missing_parent_directory():
 
         assert state_path.exists()
         assert store.read_list() == [{"ok": True}]
+
+
+def test_prepare_github_remote_initializes_repo_and_origin():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        result = manager.prepare_github_remote(
+            str(workspace),
+            "git@github.com:demo/hello.git",
+        )
+
+        assert result.repo_initialized is True
+        assert result.origin_action == "added"
+        assert result.origin_url == "git@github.com:demo/hello.git"
+        assert result.current_branch == "main"
+        assert manager.get_git_origin(workspace) == "git@github.com:demo/hello.git"
+
+
+def test_publish_to_new_remote_preserves_upstream():
+    with TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / "source"
+        source.mkdir()
+
+        _run_git("init", cwd=source)
+        _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=source)
+        _run_git("config", "user.email", "test@example.com", cwd=source)
+        _run_git("config", "user.name", "Test User", cwd=source)
+        (source / "README.md").write_text("hello\n", encoding="utf-8")
+        _run_git("add", "README.md", cwd=source)
+        _run_git("commit", "-m", "init", cwd=source)
+
+        workspace = Path(tmpdir) / "workspace"
+        _run_git("clone", str(source), str(workspace), cwd=Path(tmpdir))
+
+        manager = ProjectDeploymentManager()
+        result = manager.publish_to_new_remote(
+            str(workspace),
+            "git@github.com:demo/publish.git",
+            upstream_remote_url=str(source),
+        )
+        remotes = manager.list_git_remotes(workspace)
+
+        assert result.origin_action == "added"
+        assert result.upstream_action == "preserved_from_origin"
+        assert remotes["origin"] == "git@github.com:demo/publish.git"
+        assert remotes["upstream"] == str(source)
+
+
+def test_sync_upstream_fetches_remote_updates():
+    with TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / "source"
+        source.mkdir()
+
+        _run_git("init", cwd=source)
+        _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=source)
+        _run_git("config", "user.email", "test@example.com", cwd=source)
+        _run_git("config", "user.name", "Test User", cwd=source)
+        (source / "README.md").write_text("hello\n", encoding="utf-8")
+        _run_git("add", "README.md", cwd=source)
+        _run_git("commit", "-m", "init", cwd=source)
+
+        workspace = Path(tmpdir) / "workspace"
+        _run_git("clone", str(source), str(workspace), cwd=Path(tmpdir))
+
+        manager = ProjectDeploymentManager()
+        manager.publish_to_new_remote(
+            str(workspace),
+            "git@github.com:demo/publish.git",
+            upstream_remote_url=str(source),
+        )
+
+        (source / "CHANGELOG.md").write_text("update\n", encoding="utf-8")
+        _run_git("add", "CHANGELOG.md", cwd=source)
+        _run_git("commit", "-m", "update", cwd=source)
+
+        result = manager.sync_upstream(str(workspace), str(source))
+        remote_branches = _git_output("branch", "-r", cwd=workspace)
+
+        assert result.remote_name == "upstream"
+        assert "upstream/main" in remote_branches
+
+
+def test_orchestrator_supports_derive_publish_and_remote_status_commands():
+    with TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / "source"
+        source.mkdir()
+
+        _run_git("init", cwd=source)
+        _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=source)
+        _run_git("config", "user.email", "test@example.com", cwd=source)
+        _run_git("config", "user.name", "Test User", cwd=source)
+        (source / "README.md").write_text("hello\n", encoding="utf-8")
+        _run_git("add", "README.md", cwd=source)
+        _run_git("commit", "-m", "init", cwd=source)
+
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            reply = await orchestrator.handle_control_command(
+                "alice",
+                f"从仓库派生项目 demo {source}",
+                session_key="alice",
+            )
+            remote_before = await orchestrator.handle_control_command(
+                "alice",
+                "远程状态",
+                session_key="alice",
+            )
+            publish_reply = await orchestrator.handle_control_command(
+                "alice",
+                "发布到新仓库 git@github.com:demo/publish.git",
+                session_key="alice",
+            )
+            remote_after = await orchestrator.handle_control_command(
+                "alice",
+                "远程状态",
+                session_key="alice",
+            )
+            return reply, remote_before, publish_reply, remote_after
+
+        reply, remote_before, publish_reply, remote_after = asyncio.run(run_flow())
+
+        assert "已创建个人项目：demo" in reply
+        assert f"来源仓库：{source}" in remote_before
+        assert "发布到新的 Git 仓库" in publish_reply
+        assert "发布仓库：git@github.com:demo/publish.git" in remote_after
+        assert f"当前 upstream：{source}" in remote_after
+
+
+def test_scaffold_cloudflare_pages_writes_workflow():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        result = manager.scaffold_cloudflare_pages(
+            str(workspace),
+            pages_project_name="Hello Pages",
+            build_dir="build-output",
+        )
+
+        workflow_path = workspace / ".github" / "workflows" / "deploy-cloudflare-pages.yml"
+        content = workflow_path.read_text(encoding="utf-8")
+
+        assert result.deployment_type == "cloudflare_pages"
+        assert result.pages_project_name == "hello-pages"
+        assert result.build_dir == "build-output"
+        assert workflow_path.exists()
+        assert "pages deploy build-output --project-name=hello-pages" in content
+
+
+def test_scaffold_cloudflare_worker_writes_workflow_and_wrangler():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        result = manager.scaffold_cloudflare_worker(
+            str(workspace),
+            worker_name="Hello Worker",
+            entry_file="src/worker.ts",
+        )
+
+        workflow_path = workspace / ".github" / "workflows" / "deploy-cloudflare-worker.yml"
+        wrangler_path = workspace / "wrangler.toml"
+        wrangler_content = wrangler_path.read_text(encoding="utf-8")
+
+        assert result.deployment_type == "cloudflare_worker"
+        assert result.worker_name == "hello-worker"
+        assert result.entry_file == "src/worker.ts"
+        assert workflow_path.exists()
+        assert wrangler_path.exists()
+        assert 'name = "hello-worker"' in wrangler_content
+        assert 'main = "src/worker.ts"' in wrangler_content
+
+
+def test_project_registry_update_project_supports_deployment_metadata():
+    with TemporaryDirectory() as tmpdir:
+        registry = ProjectRegistry(tmpdir)
+        project = registry.create_project(
+            name="demo",
+            kind="personal",
+            owner_user_id="alice",
+            workspace_init_mode=WORKSPACE_INIT_EMPTY,
+        )
+
+        updated = registry.update_project(
+            project["project_id"],
+            github_remote_url="git@github.com:demo/hello.git",
+            deployment_type="cloudflare_pages",
+            deployment_config={
+                "pages_project_name": "hello-pages",
+                "build_dir": "dist",
+            },
+        )
+
+        assert updated is not None
+        assert updated["github_remote_url"] == "git@github.com:demo/hello.git"
+        assert updated["deployment_type"] == "cloudflare_pages"
+        assert updated["deployment_config"]["pages_project_name"] == "hello-pages"
+
+
+def test_git_remote_project_tracks_source_metadata():
+    with TemporaryDirectory() as tmpdir:
+        registry = ProjectRegistry(tmpdir)
+        project = registry.create_project(
+            name="demo",
+            kind="personal",
+            owner_user_id="alice",
+            workspace_init_mode=WORKSPACE_INIT_GIT_REMOTE,
+            git_remote_url="https://example.com/base.git",
+        )
+
+        assert project["git_remote_url"] == "https://example.com/base.git"
+        assert project["source_git_remote_url"] == "https://example.com/base.git"
+        assert project["github_remote_url"] == "https://example.com/base.git"
+        assert project["publish_git_remote_url"] == ""
 
 
 def test_bot_config_expands_env_placeholders():
@@ -341,3 +665,16 @@ def _run_git(*args: str, cwd: Path) -> None:
     )
     if result.returncode != 0:
         raise AssertionError(result.stderr or result.stdout or f"git {' '.join(args)} failed")
+
+
+def _git_output(*args: str, cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout or f"git {' '.join(args)} failed")
+    return (result.stdout or "").strip()

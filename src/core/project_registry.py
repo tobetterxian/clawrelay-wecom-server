@@ -116,6 +116,7 @@ class ProjectRegistry:
         project_root.mkdir(parents=True, exist_ok=True)
 
         now = _utc_now()
+        source_git_remote_url = git_remote_url if workspace_init_mode == WORKSPACE_INIT_GIT_REMOTE else ''
         project = {
             'project_id': project_id,
             'name': normalized_name,
@@ -125,7 +126,13 @@ class ProjectRegistry:
             'workspace_init_mode': workspace_init_mode,
             'source_type': self._mode_to_source_type(workspace_init_mode),
             'source_path': resolved_source_path,
-            'git_remote_url': git_remote_url if workspace_init_mode == WORKSPACE_INIT_GIT_REMOTE else '',
+            'git_remote_url': source_git_remote_url,
+            'source_git_remote_url': source_git_remote_url,
+            'upstream_remote_url': '',
+            'publish_git_remote_url': '',
+            'github_remote_url': source_git_remote_url,
+            'deployment_type': '',
+            'deployment_config': {},
             'repo_path': '',
             'project_root': str(project_root),
             'created_at': now,
@@ -155,6 +162,23 @@ class ProjectRegistry:
                 if row.get('project_id') == project_id:
                     row['updated_at'] = now
                     return row
+            return None
+
+        return self.store.update_list(updater)
+
+    def update_project(self, project_id: str, **updates) -> Optional[dict]:
+        if not project_id:
+            return None
+
+        now = _utc_now()
+
+        def updater(rows: List[dict]) -> Optional[dict]:
+            for row in rows:
+                if row.get('project_id') != project_id:
+                    continue
+                row.update(updates)
+                row['updated_at'] = now
+                return row
             return None
 
         return self.store.update_list(updater)
