@@ -1,0 +1,16 @@
+services:
+  app:
+    # 复制为 docker-compose.override.yml 后按宿主机环境覆盖。
+    # Linux 若希望容器写出的文件归属当前用户，可取消下一行注释。
+    # user: "${UID:-1000}:${GID:-1000}"
+
+    environment:
+      # GitHub SSH Deploy Key 示例。基础 compose 已挂载 ./secrets -> /run/local-secrets。
+      GIT_SSH_COMMAND: >-
+        ssh -i /run/local-secrets/github_id_ed25519
+        -o StrictHostKeyChecking=yes
+        -o UserKnownHostsFile=/run/local-secrets/github_known_hosts
+
+    volumes:
+      # 可选：把额外本地仓库挂进容器，供 codex_cli / legacy_copy 使用。
+      - ./workspace-extra:/workspace-extra

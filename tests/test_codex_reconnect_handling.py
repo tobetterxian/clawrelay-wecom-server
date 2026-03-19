@@ -1,9 +1,10 @@
+import logging
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
 
-from config.bot_config import BotConfigManager
+from config.bot_config import BotConfig, BotConfigManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.json_state_store import JsonStateStore
 from src.core.project_registry import ProjectRegistry
@@ -13,6 +14,7 @@ from src.core.workspace_init_modes import (
     WORKSPACE_INIT_LEGACY_COPY,
 )
 from src.core.workspace_manager import WorkspaceManager
+from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_check
 
 
 def test_detects_transient_reconnect_message():
@@ -221,6 +223,112 @@ bots:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+def test_bot_config_aggregates_missing_env_warnings(caplog):
+    with TemporaryDirectory() as tmpdir:
+        caplog.set_level(logging.WARNING)
+        config_path = Path(tmpdir) / "bots.yaml"
+        config_path.write_text(
+            """
+bots:
+  demo:
+    bot_id: "${BOT_ID}"
+    secret: "${BOT_SECRET}"
+    bot_type: "openai"
+    env_vars:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    provider_config:
+      api_key: "${OPENAI_API_KEY}"
+      base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        original_values = {
+            "BOT_ID": os.environ.get("BOT_ID"),
+            "BOT_SECRET": os.environ.get("BOT_SECRET"),
+            "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+            "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL"),
+        }
+        try:
+            os.environ.pop("BOT_ID", None)
+            os.environ.pop("BOT_SECRET", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("OPENAI_BASE_URL", None)
+
+            manager = BotConfigManager(str(config_path))
+            assert manager.get_bot("demo") is None
+
+            warning_messages = [
+                record.getMessage()
+                for record in caplog.records
+                if "未设置的环境变量" in record.getMessage()
+            ]
+            assert len(warning_messages) == 1
+            warning_message = warning_messages[0]
+            assert "BOT_ID" in warning_message
+            assert "BOT_SECRET" in warning_message
+            assert "OPENAI_API_KEY" in warning_message
+            assert "bots.demo.bot_id" in warning_message
+            assert "bots.demo.secret" in warning_message
+        finally:
+            for key, value in original_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+def test_setup_wizard_reports_non_interactive_hint(capsys):
+    with TemporaryDirectory() as tmpdir:
+        config_path = Path(tmpdir) / "bots.yaml"
+        manager = BotConfigManager(str(config_path))
+
+        assert manager.run_setup_wizard() is False
+
+        output = capsys.readouterr().out
+        assert "非交互环境" in output
+        assert ".env.example" in output
+        assert "config/bots.yaml.example" in output
+
+
+def test_codex_docker_yaml_examples_parse():
+    import yaml
+
+    for relative_path in [
+        "docker-compose.yml",
+        "docker-compose.codex.yml",
+        "docker-compose.override.example.yml",
+        "config/bots.yaml.example",
+        "config/bots.codex-cli.docker.yaml.example",
+    ]:
+        with open(relative_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        assert data is not None
+
+
+def test_codex_cli_startup_check_reports_missing_executable():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "workspace"
+        working_dir.mkdir()
+
+        bot_config = BotConfig(
+            bot_key="codex_bot",
+            bot_id="bot-1",
+            secret="secret-1",
+            bot_type="codex_cli",
+            working_dir=str(working_dir),
+            provider_config={
+                "codex_path": "definitely-not-installed-codex",
+                "workspace_root": str(Path(tmpdir) / "workspaces"),
+                "codex_home": str(Path(tmpdir) / "codex-home"),
+            },
+        )
+
+        result = run_codex_cli_startup_check(bot_config)
+        assert result.errors
+        assert "未找到 codex 可执行文件" in result.errors[0]
 
 
 def _run_git(*args: str, cwd: Path) -> None:

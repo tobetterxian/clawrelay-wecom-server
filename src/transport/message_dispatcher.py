@@ -10,8 +10,10 @@ import logging
 import re
 import time
 import uuid
+from typing import Optional
 
 from config.bot_config import BotConfig
+from src.core.base_orchestrator import BaseOrchestrator
 from src.transport.ws_client import WsClient
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.session_manager import SessionManager
@@ -74,7 +76,12 @@ STREAM_THROTTLE_INTERVAL = 0.3
 class MessageDispatcher:
     """WebSocket消息分发与回复"""
 
-    def __init__(self, ws_client: WsClient, bot_config: BotConfig):
+    def __init__(
+        self,
+        ws_client: WsClient,
+        bot_config: BotConfig,
+        orchestrator: Optional[BaseOrchestrator] = None,
+    ):
         self.ws = ws_client
         self.config = bot_config
         self.bot_key = bot_config.bot_key
@@ -83,7 +90,7 @@ class MessageDispatcher:
         self.command_router = CommandRouter()
 
         # 使用工厂创建编排器
-        self.orchestrator = OrchestratorFactory.create(bot_config)
+        self.orchestrator = orchestrator or OrchestratorFactory.create(bot_config)
 
         # 会话管理
         self.session_manager = SessionManager()

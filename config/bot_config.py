@@ -70,6 +70,7 @@ class BotConfigManager:
 
     def __init__(self, config_path: str = ""):
         self.bots: Dict[str, BotConfig] = {}
+        self._missing_env_usages: Dict[str, set[str]] = {}
         self._config_path = config_path or os.getenv("BOT_CONFIG_PATH", "") or str(DEFAULT_CONFIG_PATH)
         self._load_from_yaml(self._config_path)
 
@@ -87,7 +88,9 @@ class BotConfigManager:
             logger.error("读取配置文件失败: %s — %s", config_file, e)
             return
 
+        self._missing_env_usages = {}
         data = self._expand_env_placeholders(data)
+        self._log_missing_env_summary(config_file)
 
         bots_data = data.get("bots", {})
         if not bots_data:
@@ -135,19 +138,28 @@ class BotConfigManager:
     def _is_placeholder(value: str) -> bool:
         return str(value or "").upper().startswith(PLACEHOLDER_PREFIX)
 
-    def _expand_env_placeholders(self, value):
+    def _expand_env_placeholders(self, value, path: str = ""):
         if isinstance(value, dict):
             return {
-                key: self._expand_env_placeholders(item)
+                key: self._expand_env_placeholders(
+                    item,
+                    f"{path}.{key}" if path else str(key),
+                )
                 for key, item in value.items()
             }
         if isinstance(value, list):
-            return [self._expand_env_placeholders(item) for item in value]
+            return [
+                self._expand_env_placeholders(
+                    item,
+                    f"{path}[{index}]",
+                )
+                for index, item in enumerate(value)
+            ]
         if isinstance(value, str):
-            return self._expand_env_string(value)
+            return self._expand_env_string(value, path)
         return value
 
-    def _expand_env_string(self, value: str) -> str:
+    def _expand_env_string(self, value: str, path: str = "") -> str:
         def replacer(match: re.Match) -> str:
             var_name = match.group(1)
             default_value = match.group(2)
@@ -156,10 +168,34 @@ class BotConfigManager:
                 return env_value
             if default_value is not None:
                 return default_value
-            logger.warning("环境变量未设置，使用空字符串: %s", var_name)
+            self._record_missing_env(var_name, path)
             return ""
 
         return ENV_VAR_PATTERN.sub(replacer, value)
+
+    def _record_missing_env(self, var_name: str, path: str) -> None:
+        locations = self._missing_env_usages.setdefault(var_name, set())
+        if path:
+            locations.add(path)
+
+    def _log_missing_env_summary(self, config_file: Path) -> None:
+        if not self._missing_env_usages:
+            return
+
+        summary_items = []
+        for var_name in sorted(self._missing_env_usages):
+            locations = sorted(self._missing_env_usages[var_name])
+            if locations:
+                summary_items.append(f"{var_name} [{', '.join(locations)}]")
+            else:
+                summary_items.append(var_name)
+
+        logger.warning(
+            "配置文件 %s 有 %d 个未设置的环境变量，占位符将展开为空字符串: %s",
+            config_file,
+            len(self._missing_env_usages),
+            "; ".join(summary_items),
+        )
 
     def needs_setup(self) -> bool:
         """检查是否需要引导配置"""
@@ -168,6 +204,21 @@ class BotConfigManager:
     def run_setup_wizard(self) -> bool:
         """交互式引导用户配置第一个机器人，返回是否成功"""
         config_file = Path(self._config_path)
+
+        if not sys.stdin.isatty():
+            print()
+            print("=" * 58)
+            print("  ClawRelay WeCom Server — 非交互环境")
+            print("=" * 58)
+            print()
+            print("  当前无法启动首次配置向导。")
+            print("  请先准备以下文件后再启动：")
+            print("  1. .env（可先复制 .env.example）")
+            print("  2. config/bots.yaml（可先复制 config/bots.yaml.example）")
+            print()
+            print(f"  当前目标配置路径: {config_file}")
+            print()
+            return False
 
         print()
         print("=" * 58)

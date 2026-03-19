@@ -104,18 +104,22 @@ python main.py
 git clone https://github.com/wxkingstar/clawrelay-wecom-server.git
 cd clawrelay-wecom-server
 
-# 准备环境变量
+# 准备环境变量（默认启用的机器人会读取 WECOM_BOT_ID / WECOM_BOT_SECRET）
 cp .env.example .env
 
-# 编辑配置（Docker 中不支持交互式向导，需提前填写）
+# 准备 bot 配置模板
 cp config/bots.yaml.example config/bots.yaml
+
+# 常见场景只需要编辑 .env；
+# 只有切换 bot_type / 高级 provider_config 时再改 bots.yaml
 vim .env
-vim config/bots.yaml
 
 docker compose up -d --build
 ```
 
 > Docker 模式下，`config/bots.yaml` 已支持 `${VAR}` 和 `${VAR:-default}` 占位符；推荐把 API key、GitHub 凭证等放在 `.env` 中，通过运行时注入，而不是写死在 YAML 里。
+
+> 如果 `.env` 少填了变量，启动日志现在会汇总输出缺失项和对应配置路径，便于一次性补齐。
 
 > 如果仍使用 `clawrelay-api`，Docker 内的 `relay_url` 建议使用 `http://host.docker.internal:50009`（而非 `localhost`）连接宿主机服务。
 
@@ -133,8 +137,39 @@ Docker 推荐挂载：
 - `./data/codex-home -> /data/codex-home`
 - `./data/claude-home -> /data/claude-home`
 
+当前默认镜像已包含 `git` 和 `openssh-client`，可直接支持 `git_remote` 工作区初始化以及容器内 `git clone/push`。
+如果你要在容器里直接运行 `codex_cli`，建议继续参考 `docs/CODEX_CLI_DOCKER_PLAN.md` 里的镜像扩展方案。
+如果你需要宿主机专属覆盖配置，可复制 `docker-compose.override.example.yml` 为 `docker-compose.override.yml` 再按本机环境调整。
+
 如果你要让机器人创建一个新项目并自动发布到 GitHub + Cloudflare，可参考 `docs/GITHUB_CLOUDFLARE_DEPLOY.md`。
 如果你要继续推进 Docker 运行时配置方案，可参考 `docs/DOCKER_RUNTIME_CONFIG_PLAN.md`。
+如果你要把 `codex_cli` 做成真正的容器内开箱即用，可参考 `docs/CODEX_CLI_DOCKER_PLAN.md`。
+
+### Codex CLI 容器模式
+
+如果你希望 **`codex_cli` 也直接跑在容器里**，仓库现在提供了专用镜像变体和 compose overlay：
+
+```bash
+cp .env.example .env
+cp config/bots.codex-cli.docker.yaml.example config/bots.yaml
+
+# 至少填写：
+# - WECOM_BOT_ID
+# - WECOM_BOT_SECRET
+# - OPENAI_API_KEY
+vim .env
+
+docker compose -f docker-compose.yml -f docker-compose.codex.yml up -d --build
+```
+
+说明：
+
+- `docker-compose.codex.yml` 会把镜像切到 `Dockerfile.codex`
+- `Dockerfile.codex` 会在镜像内安装 Node.js 运行时和 `@openai/codex`
+- `Dockerfile.codex` 已内置 Docker `HEALTHCHECK`，会检查配置加载、`codex --version`、目录状态
+- `config/bots.codex-cli.docker.yaml.example` 提供了容器内 `codex_cli` 的最小可用模板
+- 如需固定版本，可在 `.env` 中改 `CODEX_NPM_PACKAGE`，例如 `@openai/codex@latest`
+- 服务启动前还会执行一次 `codex_cli` 启动自检，若 `codex` 缺失、关键目录不可写或配置异常，会在启动阶段直接报错退出
 
 ---
 
@@ -314,7 +349,7 @@ bots:
       OPENAI_API_KEY: "YOUR_OPENAI_API_KEY"
 
     provider_config:
-      codex_path: "/home/youruser/.nvm/versions/node/v20.20.1/bin/codex"
+      codex_path: "codex"                  # 若已在 PATH 中，可直接写 codex
       sandbox_mode: "workspace-write"      # 可选: read-only | workspace-write
       skip_git_repo_check: false
       approval_policy: "on-request"     # 可选: untrusted | on-request | on-failure | never
@@ -465,6 +500,9 @@ def register_commands(command_router):
 | `WORKSPACE_ROOT_BASE` | Docker 推荐工作区根目录占位符 | `/data/workspaces` |
 | `CODEX_HOME_BASE` | Docker 推荐 Codex CLI HOME 根目录占位符 | `/data/codex-home` |
 | `CLAUDE_HOME_BASE` | Docker 推荐 Claude CLI HOME 根目录占位符 | `/data/claude-home` |
+| `CODEX_NPM_PACKAGE` | `Dockerfile.codex` 安装的 Codex CLI npm 包 | `@openai/codex` |
+| `WECOM_BOT_ID` | `config/bots.yaml.example` 默认启用机器人 ID 占位符 | 空 |
+| `WECOM_BOT_SECRET` | `config/bots.yaml.example` 默认启用机器人密钥占位符 | 空 |
 | `WEIXIN_AGENT_TIMEOUT_SECONDS` | 任务超时（秒） | `30` |
 | `WEIXIN_MAX_FILE_SIZE` | 文件大小限制（字节） | `20971520` (20MB) |
 

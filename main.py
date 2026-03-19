@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from config.bot_config import BotConfigManager
 from src.transport.ws_client import WsClient
 from src.transport.message_dispatcher import MessageDispatcher
+from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_checks
 from src.utils.single_instance import SingleInstanceLock, SingleInstanceError
 
 # Version
@@ -37,7 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 INSTANCE_LOCK_PATH = PROJECT_ROOT / "logs" / "clawrelay-wecom-server.lock"
 
 
-async def run_bot(bot_config) -> None:
+async def run_bot(bot_config, orchestrator=None) -> None:
     """为单个bot运行WebSocket连接"""
     if not bot_config.secret:
         logger.error("机器人 %s 未配置secret，跳过", bot_config.bot_key)
@@ -49,7 +50,7 @@ async def run_bot(bot_config) -> None:
         bot_key=bot_config.bot_key,
     )
 
-    dispatcher = MessageDispatcher(ws_client, bot_config)
+    dispatcher = MessageDispatcher(ws_client, bot_config, orchestrator=orchestrator)
 
     # 绑定回调
     ws_client._on_msg_callback = dispatcher.on_msg_callback
@@ -78,11 +79,16 @@ async def main():
         logger.error("没有找到任何有效的机器人配置，退出")
         return
 
+    prepared_orchestrators = run_codex_cli_startup_checks(all_configs)
+
     # 为每个bot启动一个Task
     tasks = []
     for bot_key, bot_config in all_configs.items():
         logger.info("  - %s: %s", bot_key, bot_config.description)
-        task = asyncio.create_task(run_bot(bot_config), name=f"bot:{bot_key}")
+        task = asyncio.create_task(
+            run_bot(bot_config, orchestrator=prepared_orchestrators.get(bot_key)),
+            name=f"bot:{bot_key}",
+        )
         tasks.append(task)
 
     logger.info("=" * 60)

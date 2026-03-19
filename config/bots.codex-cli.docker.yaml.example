@@ -1,0 +1,26 @@
+bots:
+  codex_cli_bot:
+    bot_id: "${WECOM_BOT_ID}"
+    secret: "${WECOM_BOT_SECRET}"
+    bot_type: "codex_cli"
+    name: "Codex CLI"
+    description: "Codex CLI in Docker"
+    working_dir: "/workspace"
+    model: ""
+    system_prompt: "你是一个擅长本地代码修改、排障和 Git 工作流的 AI 助手。"
+
+    env_vars:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+
+    provider_config:
+      codex_path: "codex"
+      sandbox_mode: "workspace-write"
+      skip_git_repo_check: false
+      approval_policy: "on-request"
+      dangerously_bypass_approvals_and_sandbox: false
+      workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"
+      codex_home: "${CODEX_HOME_BASE:-/data/codex-home}/codex_cli_bot"
+      default_workspace_init_mode: "empty"
+      default_group_workspace_mode: "personal"
+      session_timeout_seconds: 7200
+      enable_project_workspace_mode: true

@@ -10,8 +10,9 @@ bots:
   # ========================================
   default:
     # [Required] Enterprise WeChat bot credentials
-    bot_id: "YOUR_BOT_ID"
-    secret: "YOUR_BOT_SECRET"
+    # Docker 推荐直接放到 .env，再由这里读取
+    bot_id: "${WECOM_BOT_ID}"
+    secret: "${WECOM_BOT_SECRET}"
 
     # [Required] Bot type: claude_code | gemini | openai | codex | codex_cli
     bot_type: "claude_code"
@@ -112,7 +113,7 @@ bots:
   #   env_vars:
   #     OPENAI_API_KEY: "${OPENAI_API_KEY}"
   #   provider_config:
-  #     codex_path: "/home/youruser/.nvm/versions/node/v20.20.1/bin/codex"
+  #     codex_path: "codex"  # 容器内或 PATH 已配置时推荐直接使用命令名
   #     sandbox_mode: "workspace-write"   # 可选: read-only | workspace-write
   #     skip_git_repo_check: false
   #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never

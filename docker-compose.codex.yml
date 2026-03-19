@@ -1,0 +1,9 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.codex
+      args:
+        CODEX_NPM_PACKAGE: ${CODEX_NPM_PACKAGE:-@openai/codex}
+    environment:
+      CODEX_NPM_PACKAGE: ${CODEX_NPM_PACKAGE:-@openai/codex}

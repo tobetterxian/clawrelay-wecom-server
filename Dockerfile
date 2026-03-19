@@ -2,7 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Base runtime dependencies
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -10,6 +20,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p logs
+RUN mkdir -p \
+    logs \
+    /workspace \
+    /data/workspaces \
+    /data/codex-home \
+    /data/claude-home \
+    /run/local-secrets
 
 CMD ["python", "main.py"]
