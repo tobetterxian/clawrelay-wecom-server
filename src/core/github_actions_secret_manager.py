@@ -44,6 +44,17 @@ class GitHubActionsSecretManager:
         written.append("CLOUDFLARE_ACCOUNT_ID")
         return written
 
+    def seed_wechat_miniprogram_repository_secrets(
+        self,
+        owner: str,
+        repo: str,
+        private_key: str,
+    ) -> List[str]:
+        written: List[str] = []
+        self.upsert_repository_secret(owner, repo, "WECHAT_MINIPROGRAM_PRIVATE_KEY", private_key)
+        written.append("WECHAT_MINIPROGRAM_PRIVATE_KEY")
+        return written
+
     def upsert_repository_secret(
         self,
         owner: str,

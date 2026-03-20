@@ -111,6 +111,19 @@ class CloudflareDeployScaffoldResult:
     compatibility_date: str = ""
 
 
+@dataclass
+class WeChatMiniProgramScaffoldResult:
+    workspace_path: str
+    deployment_type: str
+    workflow_path: str
+    script_path: str
+    files: List[FileWriteResult] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    appid: str = ""
+    project_path: str = "."
+    robot: int = 1
+
+
 class ProjectDeploymentManager:
     def __init__(self, repo_root: str = ""):
         self.repo_root = (
@@ -329,6 +342,46 @@ class ProjectDeploymentManager:
             compatibility_date=compatibility_date,
         )
 
+    def scaffold_wechat_miniprogram_upload(
+        self,
+        workspace_path: str,
+        appid: str,
+        project_path: str = ".",
+        robot: int = 1,
+    ) -> WeChatMiniProgramScaffoldResult:
+        root = self._resolve_workspace(workspace_path)
+        normalized_appid = str(appid or "").strip()
+        normalized_project_path = self._normalize_repo_relative_path(project_path or ".")
+        normalized_robot = int(robot or 1)
+        if not normalized_appid:
+            raise ValueError("微信小程序 AppID 不能为空")
+        if normalized_robot < 1 or normalized_robot > 30:
+            raise ValueError("微信小程序 CI robot 必须在 1 到 30 之间")
+
+        workflow_content = self._load_text("github-actions/wechat-miniprogram-upload.yml")
+        workflow_content = workflow_content.replace("__WECHAT_MINIPROGRAM_APPID__", normalized_appid)
+        workflow_content = workflow_content.replace("__WECHAT_PROJECT_PATH__", normalized_project_path)
+        workflow_content = workflow_content.replace("__WECHAT_MINIPROGRAM_ROBOT__", str(normalized_robot))
+
+        script_content = self._load_text("github-actions/upload-wechat-miniprogram.js")
+
+        workflow_path = root / ".github" / "workflows" / "upload-wechat-miniprogram.yml"
+        script_path = root / ".github" / "scripts" / "upload-wechat-miniprogram.js"
+
+        workflow_result = self._write_text(root, workflow_path, workflow_content)
+        script_result = self._write_text(root, script_path, script_content)
+
+        return WeChatMiniProgramScaffoldResult(
+            workspace_path=str(root),
+            deployment_type="wechat_miniprogram",
+            workflow_path=".github/workflows/upload-wechat-miniprogram.yml",
+            script_path=".github/scripts/upload-wechat-miniprogram.js",
+            files=[workflow_result, script_result],
+            appid=normalized_appid,
+            project_path=normalized_project_path,
+            robot=normalized_robot,
+        )
+
     def get_git_origin(self, workspace_path: str | Path) -> str:
         return self.get_git_remote(workspace_path, "origin")
 
@@ -511,6 +564,13 @@ class ProjectDeploymentManager:
                 f" / name={deployment_config.get('worker_name', '-')}"
                 f" / entry={deployment_config.get('entry_file', '-')}"
             )
+        elif deployment_type == "wechat_miniprogram":
+            lines.append(
+                "微信小程序"
+                f" / appid={deployment_config.get('appid', '-')}"
+                f" / path={deployment_config.get('project_path', '.')}"
+                f" / robot={deployment_config.get('robot', '-')}"
+            )
         else:
             lines.append(deployment_type)
 
@@ -561,6 +621,16 @@ class ProjectDeploymentManager:
             action = "created"
         path.write_text(content, encoding="utf-8")
         return FileWriteResult(relative_path=str(path.relative_to(workspace_root)), action=action)
+
+    @staticmethod
+    def _normalize_repo_relative_path(value: str, fallback: str = ".") -> str:
+        normalized = str(value or "").replace("\\", "/").strip() or fallback
+        if re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("/"):
+            raise ValueError("项目路径必须是仓库内相对路径")
+        parts = [part for part in normalized.split("/") if part not in ("", ".")]
+        if any(part == ".." for part in parts):
+            raise ValueError("项目路径不能包含 ..")
+        return "/".join(parts) or "."
 
     def _run_git(self, cwd: Path, *args: str) -> str:
         completed = self._run_git_process(cwd, *args)

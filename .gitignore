@@ -114,6 +114,7 @@ docs/*
 !docs/DOCKER_RUNTIME_CONFIG_PLAN.md
 !docs/GITHUB_CLOUDFLARE_DEPLOY.md
 !docs/GITHUB_MULTI_ACCOUNT_SSH.md
+!docs/GITHUB_WECHAT_MINIPROGRAM_DEPLOY.md
 !docs/examples/
 docs/examples/*
 !docs/examples/github-actions/

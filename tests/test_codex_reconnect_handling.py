@@ -84,11 +84,11 @@ def test_help_menu_card_contains_expected_topics():
     assert card["task_id"] == "menu@help@cx_bot"
     option_ids = [item["id"] for item in card["checkbox"]["option_list"]]
     assert option_ids == [
+        "quick_examples",
         "project_workspace",
         "git_identity",
         "github_repository",
         "deployment",
-        "quick_examples",
         "full_help",
     ]
 
@@ -102,6 +102,26 @@ def test_help_menu_reply_for_github_repository_topic():
     assert "default_github_owner" in reply
 
 
+def test_help_menu_reply_for_quick_examples_topic():
+    reply = CodexCliOrchestrator.build_help_menu_reply("quick_examples")
+
+    assert "新手上手" in reply
+    assert "`31`" in reply
+    assert "`32`" in reply
+    assert "`35`" in reply
+    assert "`36`" in reply
+    assert "`33` / `34`" in reply
+
+
+def test_help_menu_reply_for_deployment_topic_mentions_wechat_miniprogram():
+    reply = CodexCliOrchestrator.build_help_menu_reply("deployment")
+
+    assert "发布部署分三层" in reply
+    assert "35" in reply
+    assert "36" in reply
+    assert "体验版上传" in reply
+
+
 def test_help_topic_card_for_github_repository_topic():
     card = CodexCliOrchestrator.build_help_topic_card(
         "github_repository",
@@ -112,6 +132,19 @@ def test_help_topic_card_for_github_repository_topic():
     assert card["task_id"] == "menu@help@cx_bot@github_repository"
     assert "GitHub 仓库" in card["main_title"]["title"]
     assert "列仓、选仓、建仓、推送到 GitHub" in card["main_title"]["desc"]
+
+
+def test_is_control_command_recognizes_help_subtopic():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        assert orchestrator.is_control_command("帮助 1")
+        assert orchestrator.is_control_command("1 4")
 
 
 def test_message_dispatcher_extracts_card_selected_values():
@@ -350,33 +383,19 @@ def test_project_create_command_supports_new_modes():
 
 def test_project_help_mentions_default_project_flow():
     help_text = CodexCliOrchestrator._project_command_help()
-    assert "一级控制命令菜单" in help_text
+    assert "帮助中心" in help_text
     assert "二级普通对话" in help_text
     assert "default" in help_text
-    assert "6. 新建项目 <名称>" in help_text
-    assert "从仓库派生项目 <名称> <源Git地址>" in help_text
-    assert "创建GitHub仓库 <仓库名>" in help_text
-    assert "创建GitHub仓库并发布 <仓库名>" in help_text
-    assert "GitHub仓库列表 [关键词]" in help_text
-    assert "选择仓库 <序号>" in help_text
-    assert "Git身份状态" in help_text
-    assert "设置Git身份 <name> <email>" in help_text
-    assert "推送到GitHub [仓库名]" in help_text
-    assert "30. 部署帮助" in help_text
-    assert "31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]" in help_text
-    assert "32. 一键发布Worker <仓库名> <Worker名称> [入口文件]" in help_text
-    assert "33. 发布流水线状态" in help_text
-    assert "34. Cloudflare项目状态" in help_text
-    assert "准备GitHub仓库 <Git地址>" in help_text
-    assert "发布到新仓库 <新Git地址>" in help_text
-    assert "帮助" in help_text
-    assert help_text.index("27. 启用Worker部署") < help_text.index("28. 使用个人工作区")
-    assert help_text.index("28. 使用个人工作区") < help_text.index("29. 使用共享工作区")
-    assert help_text.index("29. 使用共享工作区") < help_text.index("30. 部署帮助")
-    assert help_text.index("30. 部署帮助") < help_text.index("31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]")
-    assert help_text.index("31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]") < help_text.index("32. 一键发布Worker <仓库名> <Worker名称> [入口文件]")
-    assert help_text.index("32. 一键发布Worker <仓库名> <Worker名称> [入口文件]") < help_text.index("33. 发布流水线状态")
-    assert help_text.index("33. 发布流水线状态") < help_text.index("34. Cloudflare项目状态")
+    assert "帮助 1" in help_text
+    assert "帮助 新手" in help_text
+    assert "帮助 6" in help_text
+    assert "帮助 全部" in help_text
+    assert "`6 项目名`" in help_text
+    assert "`11`" in help_text
+    assert "`19`" in help_text
+    assert "`31`" in help_text
+    assert "`32`" in help_text
+    assert "`33` / `34`" in help_text
 
 
 def test_parse_deployment_commands():
@@ -413,12 +432,24 @@ def test_parse_deployment_commands():
         assert request["pages_project_name"] == "hello-pages"
         assert request["build_dir"] == "dist"
 
+        request, usage = orchestrator._parse_deployment_command("启用Pages部署")
+        assert usage is None
+        assert request["action"] == "enable_pages"
+        assert request["pages_project_name"] == ""
+        assert request["build_dir"] == "dist"
+
         request, usage = orchestrator._parse_deployment_command(
             "启用Worker部署 hello-worker src/index.ts"
         )
         assert usage is None
         assert request["action"] == "enable_worker"
         assert request["worker_name"] == "hello-worker"
+        assert request["entry_file"] == "src/index.ts"
+
+        request, usage = orchestrator._parse_deployment_command("启用Worker部署")
+        assert usage is None
+        assert request["action"] == "enable_worker"
+        assert request["worker_name"] == ""
         assert request["entry_file"] == "src/index.ts"
 
         request, usage = orchestrator._parse_deployment_command(
@@ -430,6 +461,13 @@ def test_parse_deployment_commands():
         assert request["pages_project_name"] == "hello-pages"
         assert request["build_dir"] == "dist"
 
+        request, usage = orchestrator._parse_deployment_command("一键发布Pages")
+        assert usage is None
+        assert request["action"] == "publish_pages"
+        assert request["repository_name"] == ""
+        assert request["pages_project_name"] == ""
+        assert request["build_dir"] == "dist"
+
         request, usage = orchestrator._parse_deployment_command(
             "一键发布Worker hello-worker hello-worker src/index.ts"
         )
@@ -438,6 +476,76 @@ def test_parse_deployment_commands():
         assert request["repository_name"] == "hello-worker"
         assert request["worker_name"] == "hello-worker"
         assert request["entry_file"] == "src/index.ts"
+
+        request, usage = orchestrator._parse_deployment_command("一键发布Worker")
+        assert usage is None
+        assert request["action"] == "publish_worker"
+        assert request["repository_name"] == ""
+        assert request["worker_name"] == ""
+        assert request["entry_file"] == "src/index.ts"
+
+        request, usage = orchestrator._parse_deployment_command("启用小程序上传")
+        assert usage is None
+        assert request["action"] == "enable_wechat_miniprogram"
+        assert request["appid"] == ""
+        assert request["project_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command("启用小程序上传 wx1234567890ab")
+        assert usage is None
+        assert request["action"] == "enable_wechat_miniprogram"
+        assert request["appid"] == "wx1234567890ab"
+        assert request["project_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command(
+            "启用微信小程序上传 wx1234567890ab miniprogram"
+        )
+        assert usage is None
+        assert request["action"] == "enable_wechat_miniprogram"
+        assert request["appid"] == "wx1234567890ab"
+        assert request["project_path"] == "miniprogram"
+
+        request, usage = orchestrator._parse_deployment_command("启用小程序上传 miniprogram")
+        assert usage is None
+        assert request["action"] == "enable_wechat_miniprogram"
+        assert request["appid"] == ""
+        assert request["project_path"] == "miniprogram"
+
+        request, usage = orchestrator._parse_deployment_command("一键上传小程序")
+        assert usage is None
+        assert request["action"] == "publish_wechat_miniprogram"
+        assert request["repository_name"] == ""
+        assert request["appid"] == ""
+        assert request["project_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command("一键上传小程序 hello-mini")
+        assert usage is None
+        assert request["action"] == "publish_wechat_miniprogram"
+        assert request["repository_name"] == "hello-mini"
+        assert request["appid"] == ""
+        assert request["project_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command("一键发布小程序 wx1234567890ab")
+        assert usage is None
+        assert request["action"] == "publish_wechat_miniprogram"
+        assert request["repository_name"] == ""
+        assert request["appid"] == "wx1234567890ab"
+        assert request["project_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command(
+            "一键上传微信小程序 hello-mini wx1234567890ab miniprogram"
+        )
+        assert usage is None
+        assert request["action"] == "publish_wechat_miniprogram"
+        assert request["repository_name"] == "hello-mini"
+        assert request["appid"] == "wx1234567890ab"
+        assert request["project_path"] == "miniprogram"
+
+        request, usage = orchestrator._parse_deployment_command("一键上传小程序 ./miniprogram")
+        assert usage is None
+        assert request["action"] == "publish_wechat_miniprogram"
+        assert request["repository_name"] == ""
+        assert request["appid"] == ""
+        assert request["project_path"] == "./miniprogram"
 
 
 def test_orchestrator_reports_latest_pipeline_status():
@@ -698,8 +806,25 @@ def test_parse_git_identity_command_returns_richer_usage():
 
         assert request is None
         assert "Git 身份命令格式不完整" in usage
-        assert "11 <name> <email>" in usage
-        assert "kangaroo117@users.noreply.github.com" in usage
+        assert "完整用法：设置Git身份 <name> <email>" in usage
+
+
+def test_parse_git_identity_command_supports_default_owner_shortcut():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            default_github_owner="kangaroo117",
+        )
+
+        request, usage = orchestrator._parse_git_identity_command("设置Git身份")
+
+        assert usage is None
+        assert request["action"] == "set_git_identity"
+        assert request["name"] == "kangaroo117"
+        assert request["email"] == "kangaroo117@users.noreply.github.com"
 
 
 def test_parse_github_push_commands():
@@ -1277,7 +1402,7 @@ def test_orchestrator_supports_git_identity_commands_and_project_status():
         assert "已创建个人项目：demo" in create_reply
         assert "Git仓库：未初始化" in status_before
         assert "状态：未配置" in status_before
-        assert "可发送：设置Git身份 <name> <email>" in status_before
+        assert "可发送：11" in status_before
         assert "已设置当前工作区 Git 身份" in set_reply
         assert "Git 初始化：已初始化新仓库" in set_reply
         assert "user.name：kangaroo117" in set_reply
@@ -1724,6 +1849,59 @@ def test_scaffold_cloudflare_worker_writes_workflow_and_wrangler():
         assert wrangler_path.exists()
         assert 'name = "hello-worker"' in wrangler_content
         assert 'main = "src/worker.ts"' in wrangler_content
+
+
+def test_scaffold_wechat_miniprogram_writes_workflow_and_script():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        (workspace / "miniprogram").mkdir()
+
+        manager = ProjectDeploymentManager()
+        result = manager.scaffold_wechat_miniprogram_upload(
+            str(workspace),
+            appid="wx1234567890ab",
+            project_path="./miniprogram",
+            robot=2,
+        )
+
+        workflow_path = workspace / ".github" / "workflows" / "upload-wechat-miniprogram.yml"
+        script_path = workspace / ".github" / "scripts" / "upload-wechat-miniprogram.js"
+        workflow_content = workflow_path.read_text(encoding="utf-8")
+        script_content = script_path.read_text(encoding="utf-8")
+
+        assert result.deployment_type == "wechat_miniprogram"
+        assert result.appid == "wx1234567890ab"
+        assert result.project_path == "miniprogram"
+        assert result.robot == 2
+        assert workflow_path.exists()
+        assert script_path.exists()
+        assert 'WECHAT_MINIPROGRAM_APPID: "wx1234567890ab"' in workflow_content
+        assert 'WECHAT_MINIPROGRAM_PROJECT_PATH: "miniprogram"' in workflow_content
+        assert 'WECHAT_MINIPROGRAM_ROBOT: "2"' in workflow_content
+        assert "project.config.json not found: miniprogram/project.config.json" in workflow_content
+        assert 'const ci = require("miniprogram-ci");' in script_content
+        assert 'type: "miniProgram"' in script_content
+
+
+def test_project_deployment_summary_supports_wechat_miniprogram():
+    summary = ProjectDeploymentManager.deployment_summary(
+        {
+            "deployment_type": "wechat_miniprogram",
+            "github_remote_url": "git@github.com:kangaroo117/hello-mini.git",
+            "deployment_config": {
+                "appid": "wx1234567890ab",
+                "project_path": "miniprogram",
+                "robot": 3,
+            },
+        }
+    )
+
+    assert "微信小程序" in summary
+    assert "appid=wx1234567890ab" in summary
+    assert "path=miniprogram" in summary
+    assert "robot=3" in summary
+    assert "GitHub=git@github.com:kangaroo117/hello-mini.git" in summary
 
 
 def test_project_registry_update_project_supports_deployment_metadata():
