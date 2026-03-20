@@ -142,6 +142,7 @@ class OrchestratorFactory:
                 workspace_strategy=provider_config.get("workspace_strategy", ""),
                 default_workspace_init_mode=default_workspace_init_mode,
                 default_group_workspace_mode=provider_config.get("default_group_workspace_mode", "personal"),
+                default_github_owner=provider_config.get("default_github_owner", ""),
                 session_timeout_seconds=provider_config.get("session_timeout_seconds", 7200),
                 enable_project_workspace_mode=provider_config.get("enable_project_workspace_mode", True),
             )

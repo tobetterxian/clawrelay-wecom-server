@@ -123,6 +123,7 @@ bots:
   #     default_workspace_init_mode: "empty"  # 可选: empty | git_remote | legacy_copy
   #     workspace_strategy: "copy"            # 兼容旧配置，等价于 legacy_copy
   #     default_group_workspace_mode: "personal"  # 可选: personal | shared
+  #     default_github_owner: "${DEFAULT_GITHUB_OWNER:-}"  # 可选：企业微信对话里的 GitHub 列仓/建仓/推送统一使用该账号
   #     session_timeout_seconds: 7200
   #     enable_project_workspace_mode: true
   #     # add_dirs:

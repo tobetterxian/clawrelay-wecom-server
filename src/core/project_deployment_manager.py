@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -73,6 +74,27 @@ class GitIdentityResult:
     repo_exists: bool = False
     repo_initialized: bool = False
     is_configured: bool = False
+
+
+@dataclass
+class GitRemoteProbeResult:
+    remote_url: str
+    exists: bool = False
+    error_kind: str = ""
+    error_message: str = ""
+
+
+@dataclass
+class GitPushResult:
+    workspace_path: str
+    remote_name: str
+    remote_url: str
+    branch_name: str
+    repo_initialized: bool = False
+    had_changes: bool = False
+    commit_created: bool = False
+    commit_message: str = ""
+    push_output: str = ""
 
 
 @dataclass
@@ -182,7 +204,7 @@ class ProjectDeploymentManager:
         upstream_remote_url: str = "",
     ) -> GitRemoteSyncResult:
         root = self._resolve_workspace(workspace_path)
-        if not (root / ".git").exists():
+        if not self._is_git_repository(root):
             raise RuntimeError("当前工作区还不是 Git 仓库")
 
         normalized_upstream_url = str(upstream_remote_url or "").strip()
@@ -308,17 +330,10 @@ class ProjectDeploymentManager:
 
     def get_git_remote(self, workspace_path: str | Path, remote_name: str) -> str:
         root = self._resolve_workspace(workspace_path)
-        if not (root / ".git").exists():
+        if not self._is_git_repository(root):
             return ""
-        try:
-            completed = subprocess.run(
-                ["git", "remote", "get-url", remote_name],
-                cwd=str(root),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
+        completed = self._run_git_process(root, "remote", "get-url", remote_name)
+        if completed is None:
             return ""
         output = (completed.stdout or completed.stderr or "").strip()
         if completed.returncode != 0:
@@ -327,18 +342,11 @@ class ProjectDeploymentManager:
 
     def list_git_remotes(self, workspace_path: str | Path) -> Dict[str, str]:
         root = self._resolve_workspace(workspace_path)
-        if not (root / ".git").exists():
+        if not self._is_git_repository(root):
             return {}
 
-        try:
-            completed = subprocess.run(
-                ["git", "remote"],
-                cwd=str(root),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
+        completed = self._run_git_process(root, "remote")
+        if completed is None:
             return {}
 
         if completed.returncode != 0:
@@ -356,7 +364,7 @@ class ProjectDeploymentManager:
 
     def get_git_identity(self, workspace_path: str | Path) -> GitIdentityResult:
         root = self._resolve_workspace(workspace_path)
-        repo_exists = (root / ".git").exists()
+        repo_exists = self._is_git_repository(root)
         if not repo_exists:
             return GitIdentityResult(
                 workspace_path=str(root),
@@ -396,6 +404,88 @@ class ProjectDeploymentManager:
         result.repo_initialized = repo_initialized
         return result
 
+    def probe_git_remote(self, remote_url: str) -> GitRemoteProbeResult:
+        normalized_remote_url = str(remote_url or "").strip()
+        if not normalized_remote_url:
+            return GitRemoteProbeResult(
+                remote_url="",
+                exists=False,
+                error_kind="empty_remote",
+                error_message="远程仓库地址不能为空",
+            )
+
+        completed = self._run_git_process(self.repo_root, "ls-remote", normalized_remote_url, "HEAD")
+        if completed is None:
+            return GitRemoteProbeResult(
+                remote_url=normalized_remote_url,
+                exists=False,
+                error_kind="git_not_found",
+                error_message="未找到 git 命令",
+            )
+
+        output = (completed.stdout or completed.stderr or "").strip()
+        if completed.returncode == 0:
+            return GitRemoteProbeResult(
+                remote_url=normalized_remote_url,
+                exists=True,
+            )
+
+        lowered = output.lower()
+        if "repository not found" in lowered:
+            error_kind = "repository_not_found"
+        elif "could not resolve host" in lowered or "name or service not known" in lowered:
+            error_kind = "network_error"
+        elif "permission denied" in lowered or "access rights" in lowered or "authentication failed" in lowered:
+            error_kind = "auth_failed"
+        else:
+            error_kind = "unknown_error"
+
+        return GitRemoteProbeResult(
+            remote_url=normalized_remote_url,
+            exists=False,
+            error_kind=error_kind,
+            error_message=output or f"git ls-remote {normalized_remote_url} failed",
+        )
+
+    def commit_and_push_current_branch(
+        self,
+        workspace_path: str | Path,
+        commit_message: str,
+        remote_name: str = "origin",
+    ) -> GitPushResult:
+        root = self._resolve_workspace(workspace_path)
+        normalized_remote_name = str(remote_name or "origin").strip() or "origin"
+        normalized_commit_message = str(commit_message or "").strip() or "chore: sync workspace changes"
+
+        repo_initialized = self._ensure_git_repository(root)
+        remote_url = self.get_git_remote(root, normalized_remote_name)
+        if not remote_url:
+            raise RuntimeError(f"当前工作区未配置远程 {normalized_remote_name}")
+
+        branch_name = self._current_branch(root) or "main"
+        had_changes = self._has_uncommitted_changes(root)
+        commit_created = False
+        if had_changes:
+            self._run_git(root, "add", "-A")
+            self._run_git(root, "commit", "-m", normalized_commit_message)
+            commit_created = True
+
+        if not self._has_head_commit(root):
+            raise RuntimeError("当前工作区还没有可推送的提交，请先创建或修改文件后再推送")
+
+        push_output = self._run_git(root, "push", "-u", normalized_remote_name, branch_name)
+        return GitPushResult(
+            workspace_path=str(root),
+            remote_name=normalized_remote_name,
+            remote_url=remote_url,
+            branch_name=branch_name,
+            repo_initialized=repo_initialized,
+            had_changes=had_changes,
+            commit_created=commit_created,
+            commit_message=normalized_commit_message if commit_created else "",
+            push_output=push_output,
+        )
+
     @staticmethod
     def deployment_summary(project: dict) -> str:
         deployment_type = str(project.get("deployment_type") or "").strip()
@@ -433,10 +523,20 @@ class ProjectDeploymentManager:
         return root
 
     def _ensure_git_repository(self, root: Path) -> bool:
-        git_dir = root / ".git"
-        if git_dir.exists():
+        if self._is_git_repository(root):
             return False
-        self._run_git(root, "init")
+        if self._is_bare_git_repository(root):
+            self._repair_bare_repository(root)
+            if self._is_git_repository(root):
+                return False
+
+        self._run_git(root, "-c", "init.bare=false", "init")
+        if self._is_bare_git_repository(root):
+            self._repair_bare_repository(root)
+        if not self._is_git_repository(root):
+            raise RuntimeError(
+                f"Git 初始化后仍无法识别当前工作区：{root}"
+            )
         try:
             self._run_git(root, "symbolic-ref", "HEAD", "refs/heads/main")
         except RuntimeError:
@@ -459,16 +559,9 @@ class ProjectDeploymentManager:
         return FileWriteResult(relative_path=str(path.relative_to(workspace_root)), action=action)
 
     def _run_git(self, cwd: Path, *args: str) -> str:
-        try:
-            completed = subprocess.run(
-                ["git", *args],
-                cwd=str(cwd),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(f"未找到 git 命令: {exc}") from exc
+        completed = self._run_git_process(cwd, *args)
+        if completed is None:
+            raise RuntimeError("未找到 git 命令")
 
         output = (completed.stdout or completed.stderr or "").strip()
         if completed.returncode != 0:
@@ -481,18 +574,173 @@ class ProjectDeploymentManager:
         except RuntimeError:
             return ""
 
+    def _has_head_commit(self, cwd: Path) -> bool:
+        completed = self._run_git_process(cwd, "rev-parse", "--verify", "HEAD")
+        if completed is None:
+            return False
+        return completed.returncode == 0
+
+    def _has_uncommitted_changes(self, cwd: Path) -> bool:
+        completed = self._run_git_process(cwd, "status", "--porcelain")
+        if completed is None:
+            return False
+        return bool((completed.stdout or "").strip())
+
     def _read_git_config(self, cwd: Path, key: str) -> str:
-        try:
-            completed = subprocess.run(
-                ["git", "config", "--local", "--get", key],
-                cwd=str(cwd),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
+        completed = self._run_git_process(cwd, "config", "--local", "--get", key)
+        if completed is None:
             return ""
 
         if completed.returncode != 0:
             return ""
         return (completed.stdout or "").strip()
+
+    def _is_git_repository(self, cwd: Path) -> bool:
+        completed = self._run_git_process(cwd, "rev-parse", "--is-inside-work-tree")
+        if completed is None:
+            return False
+        return completed.returncode == 0 and (completed.stdout or "").strip().lower() == "true"
+
+    def _is_bare_git_repository(self, cwd: Path) -> bool:
+        completed = self._run_git_process(cwd, "rev-parse", "--is-bare-repository")
+        if completed is None:
+            return False
+        return completed.returncode == 0 and (completed.stdout or "").strip().lower() == "true"
+
+    def _repair_bare_repository(self, root: Path) -> None:
+        git_dir = root / ".git"
+        if git_dir.exists() and git_dir.is_dir():
+            self._run_git(root, "config", "--bool", "core.bare", "false")
+            return
+
+        git_metadata_names = (
+            "HEAD",
+            "branches",
+            "config",
+            "description",
+            "hooks",
+            "info",
+            "objects",
+            "refs",
+            "packed-refs",
+            "logs",
+            "index",
+            "shallow",
+            "commondir",
+            "gitdir",
+        )
+        entries_to_move = [root / name for name in git_metadata_names if (root / name).exists()]
+        if not entries_to_move:
+            return
+
+        git_dir.mkdir(parents=True, exist_ok=True)
+        for entry in entries_to_move:
+            target = git_dir / entry.name
+            if target.exists():
+                continue
+            entry.replace(target)
+
+        self._run_git(root, "config", "--bool", "core.bare", "false")
+
+    @staticmethod
+    def _git_env() -> Dict[str, str]:
+        env = os.environ.copy()
+        for key in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_PREFIX",
+        ):
+            env.pop(key, None)
+        return env
+
+    def _git_command(self, cwd: Path, *args: str) -> List[str]:
+        command = ["git"]
+        safe_directory = self._safe_directory_value(cwd)
+        if safe_directory:
+            command.extend(["-c", f"safe.directory={safe_directory}"])
+        command.extend(list(args))
+        return command
+
+    def _run_git_process(self, cwd: Path, *args: str):
+        try:
+            completed = subprocess.run(
+                self._git_command(cwd, *args),
+                cwd=str(cwd),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            )
+        except FileNotFoundError:
+            return None
+
+        if completed.returncode == 0:
+            return completed
+
+        output = (completed.stdout or completed.stderr or "").strip().lower()
+        if "detected dubious ownership" not in output:
+            return completed
+
+        self._ensure_global_safe_directory(cwd)
+        try:
+            return subprocess.run(
+                self._git_command(cwd, *args),
+                cwd=str(cwd),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            )
+        except FileNotFoundError:
+            return None
+
+    def _ensure_global_safe_directory(self, cwd: Path) -> None:
+        safe_directory = self._safe_directory_value(cwd)
+        if not safe_directory:
+            return
+        if self._is_global_safe_directory_registered(safe_directory):
+            return
+        try:
+            subprocess.run(
+                ["git", "config", "--global", "--add", "safe.directory", safe_directory],
+                cwd=str(self.repo_root),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            )
+        except FileNotFoundError:
+            return
+
+    def _is_global_safe_directory_registered(self, safe_directory: str) -> bool:
+        try:
+            completed = subprocess.run(
+                ["git", "config", "--global", "--get-all", "safe.directory"],
+                cwd=str(self.repo_root),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._git_env(),
+            )
+        except FileNotFoundError:
+            return False
+
+        if completed.returncode != 0:
+            return False
+        values = [
+            str(line or "").strip().rstrip("/").lower()
+            for line in (completed.stdout or "").splitlines()
+            if str(line or "").strip()
+        ]
+        return safe_directory.rstrip("/").lower() in values
+
+    @staticmethod
+    def _safe_directory_value(cwd: Path) -> str:
+        try:
+            return cwd.resolve().as_posix()
+        except OSError:
+            return str(cwd)

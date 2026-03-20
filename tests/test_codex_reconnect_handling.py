@@ -1,14 +1,18 @@
 import logging
 import subprocess
 import asyncio
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from config.bot_config import BotConfig, BotConfigManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.github_repository_manager import GitHubRepositoryInfo, GitHubRepositoryManager
 from src.core.json_state_store import JsonStateStore
+from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.project_deployment_manager import ProjectDeploymentManager
 from src.core.project_registry import ProjectRegistry
 from src.core.workspace_init_modes import (
@@ -56,6 +60,11 @@ def test_codex_cli_uses_shared_home_directory():
         expected_home = working_dir / ".codex_data" / "codex-home" / "cx_bot"
         assert Path(orchestrator.codex_home) == expected_home.resolve()
         assert orchestrator.adapter.env_vars["HOME"] == str(expected_home.resolve())
+
+
+def test_display_path_wraps_windows_paths_for_markdown_safe_output():
+    path_text = r"C:\next\.codex_data\projects\demo"
+    assert CodexCliOrchestrator._display_path(path_text) == f"`{path_text}`"
 
 
 def test_workspace_copy_ignores_codex_directory():
@@ -112,8 +121,10 @@ def test_default_personal_project_notice_contains_usage_guidance():
         assert "默认个人项目" in runtime_context["initial_notice"]
         assert runtime_context["initial_notice"].strip() == "🆕 已自动创建默认个人项目：default"
         assert "首次使用说明" in runtime_context["first_reply_guidance"]
-        assert "新建项目 <名称>" in runtime_context["first_reply_guidance"]
-        assert "项目帮助 / 帮助" in runtime_context["first_reply_guidance"]
+        assert "两级体系" in runtime_context["first_reply_guidance"]
+        assert "6 hello-world" in runtime_context["first_reply_guidance"]
+        assert "12" in runtime_context["first_reply_guidance"]
+        assert "1" in runtime_context["first_reply_guidance"]
 
 
 def test_workspace_copy_skips_windows_reserved_name():
@@ -193,8 +204,10 @@ def test_project_create_command_supports_new_modes():
 
 def test_project_help_mentions_default_project_flow():
     help_text = CodexCliOrchestrator._project_command_help()
-    assert "默认个人项目 default" in help_text
-    assert "新建项目 <名称>" in help_text
+    assert "一级控制命令菜单" in help_text
+    assert "二级普通对话" in help_text
+    assert "default" in help_text
+    assert "6. 新建项目 <名称>" in help_text
     assert "从仓库派生项目 <名称> <源Git地址>" in help_text
     assert "创建GitHub仓库 <仓库名>" in help_text
     assert "创建GitHub仓库并发布 <仓库名>" in help_text
@@ -202,10 +215,14 @@ def test_project_help_mentions_default_project_flow():
     assert "选择仓库 <序号>" in help_text
     assert "Git身份状态" in help_text
     assert "设置Git身份 <name> <email>" in help_text
-    assert "部署帮助" in help_text
+    assert "推送到GitHub [仓库名]" in help_text
+    assert "30. 部署帮助" in help_text
     assert "准备GitHub仓库 <Git地址>" in help_text
     assert "发布到新仓库 <新Git地址>" in help_text
     assert "帮助" in help_text
+    assert help_text.index("27. 启用Worker部署") < help_text.index("28. 使用个人工作区")
+    assert help_text.index("28. 使用个人工作区") < help_text.index("29. 使用共享工作区")
+    assert help_text.index("29. 使用共享工作区") < help_text.index("30. 部署帮助")
 
 
 def test_parse_deployment_commands():
@@ -321,6 +338,44 @@ def test_parse_git_identity_commands():
         assert request["action"] == "set_git_identity"
         assert request["name"] == "Kangaroo 117"
         assert request["email"] == "kangaroo117@users.noreply.github.com"
+
+
+def test_parse_git_identity_command_returns_richer_usage():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        request, usage = orchestrator._parse_git_identity_command("设置Git身份 onlyname")
+
+        assert request is None
+        assert "Git 身份命令格式不完整" in usage
+        assert "11 <name> <email>" in usage
+        assert "kangaroo117@users.noreply.github.com" in usage
+
+
+def test_parse_github_push_commands():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        request, usage = orchestrator._parse_github_push_command("推送到GitHub hello-world")
+        assert usage is None
+        assert request["action"] == "push_to_github"
+        assert request["name"] == "hello-world"
+        assert request["private"] is True
+
+        request, usage = orchestrator._parse_github_push_command("推送到GitHub公开 hello-world")
+        assert usage is None
+        assert request["name"] == "hello-world"
+        assert request["private"] is False
 
 
 def test_default_project_usage_hint_detects_named_project_request():
@@ -482,6 +537,118 @@ def test_project_deployment_manager_sets_git_identity_for_workspace():
         assert _git_output("config", "--local", "--get", "user.email", cwd=workspace) == "kangaroo117@users.noreply.github.com"
 
 
+def test_set_git_identity_ignores_global_git_env():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        original_git_dir = os.environ.get("GIT_DIR")
+        original_git_work_tree = os.environ.get("GIT_WORK_TREE")
+        try:
+            os.environ["GIT_DIR"] = str(Path(tmpdir) / "bogus-git-dir")
+            os.environ["GIT_WORK_TREE"] = str(Path(tmpdir) / "bogus-work-tree")
+
+            result = manager.set_git_identity(
+                str(workspace),
+                "kangaroo117",
+                "kangaroo117@users.noreply.github.com",
+            )
+        finally:
+            if original_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = original_git_dir
+            if original_git_work_tree is None:
+                os.environ.pop("GIT_WORK_TREE", None)
+            else:
+                os.environ["GIT_WORK_TREE"] = original_git_work_tree
+
+        assert result.is_configured is True
+        assert result.repo_exists is True
+
+
+def test_set_git_identity_repairs_bare_repository():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        _run_git("init", "--bare", cwd=workspace)
+
+        manager = ProjectDeploymentManager()
+        result = manager.set_git_identity(
+            str(workspace),
+            "kangaroo117",
+            "kangaroo117@users.noreply.github.com",
+        )
+
+        assert result.is_configured is True
+        assert result.repo_exists is True
+        assert (workspace / ".git").exists()
+        assert _git_output("config", "--local", "--get", "user.name", cwd=workspace) == "kangaroo117"
+
+
+def test_git_command_includes_safe_directory():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        command = manager._git_command(workspace, "status", "--porcelain")
+
+        assert command[0] == "git"
+        assert command[1] == "-c"
+        assert command[2].startswith("safe.directory=")
+        assert workspace.resolve().as_posix() in command[2]
+        assert command[-2:] == ["status", "--porcelain"]
+
+
+def test_run_git_process_auto_registers_safe_directory_on_dubious_ownership():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager()
+        safe_directory = workspace.resolve().as_posix()
+        original_run = subprocess.run
+        actual_git_calls = {"count": 0}
+        add_safe_directory_called = {"value": False}
+
+        class _Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(cmd, cwd=None, check=False, capture_output=False, text=False, env=None, input=None):
+            if cmd == ["git", "config", "--global", "--get-all", "safe.directory"]:
+                return _Result(returncode=1, stdout="", stderr="")
+            if cmd == ["git", "config", "--global", "--add", "safe.directory", safe_directory]:
+                add_safe_directory_called["value"] = True
+                return _Result(returncode=0, stdout="", stderr="")
+            if cmd[:3] == ["git", "-c", f"safe.directory={safe_directory}"] and cmd[-2:] == ["status", "--porcelain"]:
+                actual_git_calls["count"] += 1
+                if actual_git_calls["count"] == 1:
+                    return _Result(
+                        returncode=128,
+                        stdout="",
+                        stderr="fatal: detected dubious ownership in repository at 'C:/repo'",
+                    )
+                return _Result(returncode=0, stdout="", stderr="")
+            return _Result(returncode=0, stdout="", stderr="")
+
+        try:
+            subprocess.run = fake_run
+            completed = manager._run_git_process(workspace, "status", "--porcelain")
+        finally:
+            subprocess.run = original_run
+
+        assert completed is not None
+        assert completed.returncode == 0
+        assert actual_git_calls["count"] == 2
+        assert add_safe_directory_called["value"] is True
+
+
 def test_sync_upstream_fetches_remote_updates():
     with TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -587,7 +754,7 @@ def test_orchestrator_lists_selects_and_derives_from_github_repository():
             bot_key="cx_bot",
             working_dir=str(working_dir),
         )
-        orchestrator.github_repository_manager.list_user_repositories = lambda query="", limit=10: [
+        orchestrator.github_repository_manager.list_user_repositories = lambda query="", limit=10, owner_only=False: [
             GitHubRepositoryInfo(
                 full_name="demo/source",
                 name="source",
@@ -773,6 +940,392 @@ def test_orchestrator_supports_git_identity_commands_and_project_status():
         assert "状态：已配置" in status_after
         assert "user.name：kangaroo117" in status_after
         assert "Git身份：kangaroo117 <kangaroo117@users.noreply.github.com>" in project_reply
+
+
+def test_push_to_github_without_repo_name_requires_named_project():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            await orchestrator.handle_control_command(
+                "alice",
+                "设置Git身份 kangaroo117 kangaroo117@users.noreply.github.com",
+                session_key="alice",
+            )
+            return await orchestrator.handle_control_command(
+                "alice",
+                "推送到GitHub",
+                session_key="alice",
+            )
+
+        reply = asyncio.run(run_flow())
+
+        assert "当前项目还没有合适的 GitHub 仓库名" in reply
+        assert "推送到GitHub <仓库名>" in reply
+
+
+def test_orchestrator_push_to_github_creates_remote_and_pushes():
+    with TemporaryDirectory() as tmpdir:
+        remote_repo = Path(tmpdir) / "remote.git"
+        remote_repo.mkdir()
+        _run_git("init", "--bare", cwd=remote_repo)
+
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator.github_repository_manager.create_user_repository = lambda name, private=True: GitHubRepositoryInfo(
+            full_name=f"kangaroo117/{name}",
+            name=name,
+            owner="kangaroo117",
+            private=private,
+            default_branch="main",
+            updated_at="2026-03-19T12:00:00Z",
+            description="",
+            clone_url=str(remote_repo),
+            ssh_url="",
+            html_url=f"https://github.com/kangaroo117/{name}",
+        )
+        original_alias_checker = orchestrator._ssh_host_alias_configured
+        orchestrator._ssh_host_alias_configured = lambda alias: False
+
+        try:
+            async def run_flow():
+                create_reply = await orchestrator.handle_control_command(
+                    "alice",
+                    "新建项目 hello-world",
+                    session_key="alice",
+                )
+                runtime_context, _ = orchestrator._ensure_single_runtime_context("alice", "alice")
+                workspace = Path(runtime_context["working_dir"])
+                (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+                await orchestrator.handle_control_command(
+                    "alice",
+                    "设置Git身份 kangaroo117 kangaroo117@users.noreply.github.com",
+                    session_key="alice",
+                )
+                push_reply = await orchestrator.handle_control_command(
+                    "alice",
+                    "推送到GitHub公开",
+                    session_key="alice",
+                )
+                return create_reply, push_reply, workspace
+
+            create_reply, push_reply, workspace = asyncio.run(run_flow())
+        finally:
+            orchestrator._ssh_host_alias_configured = original_alias_checker
+
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote_repo), "rev-parse", "--verify", "refs/heads/main"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert "已创建个人项目：hello-world" in create_reply
+        assert "已提交并推送当前项目到 GitHub" in push_reply
+        assert "自动创建仓库：kangaroo117/hello-world" in push_reply
+        assert "origin：" in push_reply
+        assert result.returncode == 0
+        assert "README.md" in _git_output("ls-tree", "--name-only", "HEAD", cwd=workspace)
+
+
+def test_push_intent_preflight_suggests_push_command():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            await orchestrator.handle_control_command(
+                "alice",
+                "新建项目 hello-world",
+                session_key="alice",
+            )
+            await orchestrator.handle_control_command(
+                "alice",
+                "设置Git身份 kangaroo117 kangaroo117@users.noreply.github.com",
+                session_key="alice",
+            )
+            return orchestrator._maybe_handle_push_to_github_intent(
+                "alice",
+                "请帮我推送到 github",
+                "alice",
+                {},
+            )
+
+        reply = asyncio.run(run_flow())
+
+        assert "看起来你是想把当前项目推送到 GitHub" in reply
+        assert "一级控制命令" in reply
+        assert "19 hello-world" in reply
+
+
+def test_numeric_shortcuts_execute_control_commands():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            help_reply = await orchestrator.handle_control_command(
+                "alice",
+                "1",
+                session_key="alice",
+            )
+            create_reply = await orchestrator.handle_control_command(
+                "alice",
+                "6 hello-world",
+                session_key="alice",
+            )
+            git_reply = await orchestrator.handle_control_command(
+                "alice",
+                "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                session_key="alice",
+            )
+            return help_reply, create_reply, git_reply
+
+        help_reply, create_reply, git_reply = asyncio.run(run_flow())
+
+        assert orchestrator.is_control_command("1") is True
+        assert orchestrator.is_control_command("6 hello-world") is True
+        assert "一级控制命令菜单" in help_reply
+        assert "已创建个人项目：hello-world" in create_reply
+        assert "已设置当前工作区 Git 身份" in git_reply
+
+
+def test_numeric_shortcuts_do_not_capture_regular_dialogue():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        assert orchestrator.is_control_command("1 + 1 = ?") is False
+        assert orchestrator._normalize_control_command_input("1 + 1 = ?") == "1 + 1 = ?"
+
+
+def test_numeric_shortcuts_support_push_command_arguments():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        normalized = orchestrator._normalize_control_command_input("19 hello-world")
+        request, usage = orchestrator._parse_github_push_command(normalized)
+
+        assert usage is None
+        assert normalized == "推送到GitHub hello-world"
+        assert request["action"] == "push_to_github"
+        assert request["name"] == "hello-world"
+
+
+def test_list_github_repositories_uses_configured_owner():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            default_github_owner="kangaroo117",
+        )
+        orchestrator.github_repository_manager.get_current_user_login = lambda: "kangaroo117"
+        orchestrator.github_repository_manager.list_user_repositories = (
+            lambda query="", limit=10, owner_only=False: [
+                GitHubRepositoryInfo(
+                    full_name="kangaroo117/hello-world",
+                    name="hello-world",
+                    owner="kangaroo117",
+                    private=False,
+                    default_branch="main",
+                    updated_at="2026-03-19T12:00:00Z",
+                    description="my repo",
+                    clone_url="https://github.com/kangaroo117/hello-world.git",
+                    ssh_url="git@github.com:kangaroo117/hello-world.git",
+                    html_url="https://github.com/kangaroo117/hello-world",
+                ),
+                GitHubRepositoryInfo(
+                    full_name="other/demo",
+                    name="demo",
+                    owner="other",
+                    private=False,
+                    default_branch="main",
+                    updated_at="2026-03-19T11:00:00Z",
+                    description="other repo",
+                    clone_url="https://github.com/other/demo.git",
+                    ssh_url="git@github.com:other/demo.git",
+                    html_url="https://github.com/other/demo",
+                ),
+            ]
+        )
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                "alice",
+                "12",
+                session_key="alice",
+            )
+        )
+
+        assert "GitHub 仓库列表（账号 kangaroo117）" in reply
+        assert "kangaroo117/hello-world" in reply
+        assert "other/demo" not in reply
+
+
+def test_create_github_repository_rejects_configured_owner_mismatch():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            default_github_owner="kangaroo117",
+        )
+        orchestrator.github_repository_manager.get_current_user_login = lambda: "someone-else"
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                "alice",
+                "16 hello-repo",
+                session_key="alice",
+            )
+        )
+
+        assert "创建 GitHub 仓库失败" in reply
+        assert "GITHUB_TOKEN 当前账号为 someone-else" in reply
+
+
+def test_github_repository_manager_formats_pat_permission_error_for_listing():
+    manager = GitHubRepositoryManager(env_vars={"GITHUB_TOKEN": "token"})
+    error = HTTPError(
+        url="https://api.github.com/user/repos",
+        code=403,
+        msg="Forbidden",
+        hdrs={"X-Accepted-GitHub-Permissions": "metadata=read"},
+        fp=BytesIO(
+            b'{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/repos/repos#list-repositories-for-the-authenticated-user"}'
+        ),
+    )
+
+    with patch("src.core.github_repository_manager.urlopen", side_effect=error):
+        try:
+            manager.list_user_repositories()
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as exc:
+            message = str(exc)
+
+    assert "GitHub Token 权限不足" in message
+    assert "列出当前账号仓库" in message
+    assert "metadata=read" in message
+    assert "fine-grained PAT" in message
+
+
+def test_github_repository_manager_formats_pat_permission_error_for_creation():
+    manager = GitHubRepositoryManager(env_vars={"GITHUB_TOKEN": "token"})
+    error = HTTPError(
+        url="https://api.github.com/user/repos",
+        code=403,
+        msg="Forbidden",
+        hdrs={"X-Accepted-GitHub-Permissions": "administration=write,metadata=read"},
+        fp=BytesIO(
+            b'{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/repos/repos#create-a-repository-for-the-authenticated-user"}'
+        ),
+    )
+
+    with patch("src.core.github_repository_manager.urlopen", side_effect=error):
+        try:
+            manager.create_user_repository("hello-world")
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as exc:
+            message = str(exc)
+
+    assert "GitHub Token 权限不足" in message
+    assert "创建当前账号仓库" in message
+    assert "All repositories" in message
+    assert "administration=write" in message
+    assert "SSH 推送" in message
+
+
+def test_push_to_github_rebinds_to_configured_owner():
+    with TemporaryDirectory() as tmpdir:
+        remote_repo = Path(tmpdir) / "remote.git"
+        remote_repo.mkdir()
+        _run_git("init", "--bare", cwd=remote_repo)
+
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            default_github_owner="kangaroo117",
+        )
+        orchestrator.github_repository_manager.get_current_user_login = lambda: "kangaroo117"
+        orchestrator.github_repository_manager.create_user_repository = lambda name, private=True: GitHubRepositoryInfo(
+            full_name=f"kangaroo117/{name}",
+            name=name,
+            owner="kangaroo117",
+            private=private,
+            default_branch="main",
+            updated_at="2026-03-19T12:00:00Z",
+            description="",
+            clone_url=str(remote_repo),
+            ssh_url="",
+            html_url=f"https://github.com/kangaroo117/{name}",
+        )
+        original_alias_checker = orchestrator._ssh_host_alias_configured
+        orchestrator._ssh_host_alias_configured = lambda alias: False
+
+        try:
+            async def run_flow():
+                await orchestrator.handle_control_command(
+                    "alice",
+                    "6 hello-world",
+                    session_key="alice",
+                )
+                runtime_context, _ = orchestrator._ensure_single_runtime_context("alice", "alice")
+                workspace = Path(runtime_context["working_dir"])
+                (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+                await orchestrator.handle_control_command(
+                    "alice",
+                    "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                    session_key="alice",
+                )
+                await orchestrator.handle_control_command(
+                    "alice",
+                    "23 git@github.com:other/hello-world.git",
+                    session_key="alice",
+                )
+                return await orchestrator.handle_control_command(
+                    "alice",
+                    "19",
+                    session_key="alice",
+                )
+
+            push_reply = asyncio.run(run_flow())
+        finally:
+            orchestrator._ssh_host_alias_configured = original_alias_checker
+
+        assert "已提交并推送当前项目到 GitHub" in push_reply
+        assert "自动创建仓库：kangaroo117/hello-world" in push_reply
+        assert "检测到当前远程账号为 other，已切换为统一 GitHub 账号 kangaroo117" in push_reply
 
 
 def test_scaffold_cloudflare_pages_writes_workflow():
@@ -998,6 +1551,49 @@ def test_codex_docker_yaml_examples_parse():
         with open(relative_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         assert data is not None
+
+
+def test_factory_passes_default_github_owner():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "workspace"
+        working_dir.mkdir()
+        bot_config = BotConfig(
+            bot_key="codex_bot",
+            bot_id="bot-1",
+            secret="secret-1",
+            bot_type="codex_cli",
+            working_dir=str(working_dir),
+            provider_config={
+                "default_github_owner": "kangaroo117",
+            },
+        )
+
+        orchestrator = OrchestratorFactory.create(bot_config)
+
+        assert isinstance(orchestrator, CodexCliOrchestrator)
+        assert orchestrator.default_github_owner == "kangaroo117"
+
+
+def test_runtime_checks_pass_default_github_owner():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "workspace"
+        working_dir.mkdir()
+
+        bot_config = BotConfig(
+            bot_key="codex_bot",
+            bot_id="bot-1",
+            secret="secret-1",
+            bot_type="codex_cli",
+            working_dir=str(working_dir),
+            provider_config={
+                "default_github_owner": "kangaroo117",
+            },
+        )
+
+        orchestrator = run_codex_cli_startup_check(bot_config).orchestrator
+
+        assert isinstance(orchestrator, CodexCliOrchestrator)
+        assert orchestrator.default_github_owner == "kangaroo117"
 
 
 def test_codex_cli_startup_check_reports_missing_executable():

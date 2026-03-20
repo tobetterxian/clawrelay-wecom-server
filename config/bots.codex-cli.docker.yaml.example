@@ -22,5 +22,6 @@ bots:
       codex_home: "${CODEX_HOME_BASE:-/data/codex-home}/codex_cli_bot"
       default_workspace_init_mode: "empty"
       default_group_workspace_mode: "personal"
+      default_github_owner: "${DEFAULT_GITHUB_OWNER:-}"
       session_timeout_seconds: 7200
       enable_project_workspace_mode: true

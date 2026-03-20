@@ -13,7 +13,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -47,17 +47,27 @@ class GitHubRepositoryManager:
         self.env_vars = dict(env_vars or {})
         self.gh_executable = gh_executable
 
+    def get_current_user_login(self) -> str:
+        data = self._request_json(endpoint="/user", method="GET")
+        if not isinstance(data, dict):
+            raise RuntimeError("GitHub API 返回格式异常")
+        login = str(data.get("login") or "").strip()
+        if not login:
+            raise RuntimeError("无法识别当前 GitHub 账号")
+        return login
+
     def list_user_repositories(
         self,
         query: str = "",
         limit: int = DEFAULT_GITHUB_LIST_LIMIT,
+        owner_only: bool = False,
     ) -> List[GitHubRepositoryInfo]:
         repositories = self._request_repositories(
             endpoint="/user/repos",
             query_params={
                 "sort": "updated",
                 "per_page": str(max(1, limit)),
-                "affiliation": "owner,organization_member,collaborator",
+                "affiliation": "owner" if owner_only else "owner,organization_member,collaborator",
             },
         )
         return self._filter_and_normalize_repositories(repositories, query=query, limit=limit)
@@ -249,7 +259,16 @@ class GitHubRepositoryManager:
                 data = json.loads(response_text)
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-            raise RuntimeError(f"GitHub API 请求失败（HTTP {exc.code}）：{body or exc.reason}") from exc
+            raise RuntimeError(
+                self._format_http_error(
+                    endpoint=endpoint,
+                    method=method,
+                    status_code=int(exc.code),
+                    body=body,
+                    reason=str(exc.reason or "").strip(),
+                    headers=getattr(exc, "headers", None),
+                )
+            ) from exc
         except URLError as exc:
             raise RuntimeError(f"GitHub API 网络请求失败：{exc}") from exc
 
@@ -303,3 +322,176 @@ class GitHubRepositoryManager:
 
     def _gh_available(self) -> bool:
         return shutil.which(self.gh_executable) is not None
+
+    def _format_http_error(
+        self,
+        endpoint: str,
+        method: str,
+        status_code: int,
+        body: str,
+        reason: str,
+        headers=None,
+    ) -> str:
+        operation = self._describe_api_operation(endpoint, method)
+        message_text, documentation_url = self._parse_error_body(body)
+        normalized_message = str(message_text or reason or body or "unknown error").strip()
+        accepted_permissions = self._extract_header_value(headers, "X-Accepted-GitHub-Permissions")
+
+        if self._is_pat_permission_error(status_code, normalized_message):
+            return self._format_pat_permission_error(
+                endpoint=endpoint,
+                method=method,
+                operation=operation,
+                status_code=status_code,
+                message_text=normalized_message,
+                accepted_permissions=accepted_permissions,
+            )
+
+        if status_code == 401 and normalized_message.lower() == "bad credentials":
+            return "GitHub 凭证无效或已过期，请检查 GITHUB_TOKEN / GH_TOKEN 是否正确"
+
+        if documentation_url:
+            normalized_message = f"{normalized_message}（文档：{documentation_url}）"
+        return f"GitHub API 请求失败（HTTP {status_code}，{operation}）：{normalized_message}"
+
+    @staticmethod
+    def _parse_error_body(body: str) -> Tuple[str, str]:
+        content = str(body or "").strip()
+        if not content:
+            return "", ""
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return content, ""
+
+        if not isinstance(payload, dict):
+            return content, ""
+
+        parts: List[str] = []
+        message = str(payload.get("message") or "").strip()
+        if message:
+            parts.append(message)
+
+        error_items = payload.get("errors")
+        if isinstance(error_items, list):
+            normalized_errors: List[str] = []
+            for item in error_items:
+                if isinstance(item, dict):
+                    error_text = " ".join(
+                        str(value).strip()
+                        for value in (
+                            item.get("resource"),
+                            item.get("field"),
+                            item.get("code"),
+                            item.get("message"),
+                        )
+                        if str(value or "").strip()
+                    )
+                    if not error_text:
+                        error_text = json.dumps(item, ensure_ascii=False)
+                else:
+                    error_text = str(item or "").strip()
+                if error_text:
+                    normalized_errors.append(error_text)
+            if normalized_errors:
+                parts.append("；".join(normalized_errors))
+
+        documentation_url = str(payload.get("documentation_url") or "").strip()
+        return "；".join(part for part in parts if part).strip(), documentation_url
+
+    @staticmethod
+    def _describe_api_operation(endpoint: str, method: str) -> str:
+        normalized_endpoint = str(endpoint or "").strip()
+        normalized_method = str(method or "GET").strip().upper()
+        if normalized_endpoint == "/user":
+            return "校验当前 GitHub 账号"
+        if normalized_endpoint == "/user/repos" and normalized_method == "GET":
+            return "列出当前账号仓库"
+        if normalized_endpoint == "/user/repos" and normalized_method == "POST":
+            return "创建当前账号仓库"
+        if normalized_endpoint.startswith("/orgs/") and normalized_endpoint.endswith("/repos"):
+            org = normalized_endpoint.split("/")[2]
+            if normalized_method == "GET":
+                return f"列出组织 {org} 仓库"
+            if normalized_method == "POST":
+                return f"创建组织 {org} 仓库"
+        return f"{normalized_method} {normalized_endpoint}"
+
+    @staticmethod
+    def _extract_header_value(headers, key: str) -> str:
+        if headers is None:
+            return ""
+        if hasattr(headers, "get"):
+            value = headers.get(key) or headers.get(key.lower()) or headers.get(key.upper())
+            return str(value or "").strip()
+        if isinstance(headers, dict):
+            for header_key, value in headers.items():
+                if str(header_key or "").lower() == key.lower():
+                    return str(value or "").strip()
+        return ""
+
+    @staticmethod
+    def _is_pat_permission_error(status_code: int, message_text: str) -> bool:
+        if int(status_code) not in (403, 404):
+            return False
+        return "resource not accessible by personal access token" in str(message_text or "").lower()
+
+    def _format_pat_permission_error(
+        self,
+        endpoint: str,
+        method: str,
+        operation: str,
+        status_code: int,
+        message_text: str,
+        accepted_permissions: str,
+    ) -> str:
+        normalized_endpoint = str(endpoint or "").strip()
+        normalized_method = str(method or "GET").strip().upper()
+        lines = [
+            f"GitHub Token 权限不足，无法{operation}（HTTP {status_code}）",
+            "当前大概率在使用 fine-grained PAT，但该接口所需权限未授予，或令牌只允许访问部分仓库。",
+            "请更新机器人配置中的 GITHUB_TOKEN / GH_TOKEN 后重试。",
+        ]
+        if accepted_permissions:
+            lines.append(f"GitHub 返回的接口权限提示：{accepted_permissions}")
+
+        if normalized_endpoint == "/user":
+            lines.extend(
+                [
+                    "请检查：",
+                    "- 当前 Token 是否属于你要操作的 GitHub 账号",
+                    "- Token 是否已过期、被撤销，或未完成必要授权",
+                ]
+            )
+        elif normalized_endpoint == "/user/repos" and normalized_method == "GET":
+            lines.extend(
+                [
+                    "请检查：",
+                    "- Resource owner 是否选择了目标 GitHub 账号",
+                    "- Repository permissions 至少包含仓库元数据读取权限",
+                    "- 如果后续还要自动创建新仓库，建议同时补齐仓库管理写权限",
+                    "- 若使用 classic PAT，通常至少需要 `repo` scope",
+                ]
+            )
+        elif normalized_endpoint == "/user/repos" and normalized_method == "POST":
+            lines.extend(
+                [
+                    "请检查：",
+                    "- Resource owner 是否选择了目标 GitHub 账号",
+                    "- Repository access 是否允许创建新仓库；更稳妥的配置是 `All repositories`",
+                    "- Repository permissions 是否包含仓库管理写权限",
+                    "- 若使用 classic PAT，通常至少需要 `repo` scope",
+                    "- 如果暂时不想重配 Token，也可以先在 GitHub 手动创建空仓库，再让机器人走 SSH 推送",
+                ]
+            )
+        elif normalized_endpoint.startswith("/orgs/") and normalized_endpoint.endswith("/repos"):
+            lines.extend(
+                [
+                    "请检查：",
+                    "- Token 的 Resource owner 是否就是该组织，或该账号对组织有足够权限",
+                    "- Organization / Repository 权限是否已授予创建或读取组织仓库所需权限",
+                ]
+            )
+
+        lines.append(f"GitHub 原始提示：{message_text}")
+        return "\n".join(lines)

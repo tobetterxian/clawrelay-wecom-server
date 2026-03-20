@@ -63,6 +63,61 @@ DEFAULT_PROJECT_REQUEST_RE = re.compile(
     r"(新建|创建|搭建|做(?:一个|个)?|开发|实现|生成).{0,24}项目",
     re.IGNORECASE,
 )
+CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
+    {"id": "1", "command": "项目帮助", "display": "项目帮助", "accepts_args": False},
+    {"id": "2", "command": "项目列表", "display": "项目列表", "accepts_args": False},
+    {"id": "3", "command": "当前项目", "display": "当前项目", "accepts_args": False},
+    {"id": "4", "command": "当前工作区", "display": "当前工作区", "accepts_args": False},
+    {"id": "5", "command": "工作区列表", "display": "工作区列表", "accepts_args": False},
+    {"id": "6", "command": "新建项目", "display": "新建项目 <名称>", "accepts_args": True},
+    {"id": "7", "command": "新建仓库项目", "display": "新建仓库项目 <名称> <Git地址>", "accepts_args": True},
+    {"id": "8", "command": "从仓库派生项目", "display": "从仓库派生项目 <名称> <源Git地址>", "accepts_args": True},
+    {"id": "9", "command": "进入项目", "display": "进入项目 <名称或ID>", "accepts_args": True},
+    {"id": "10", "command": "Git身份状态", "display": "Git身份状态", "accepts_args": False},
+    {"id": "11", "command": "设置Git身份", "display": "设置Git身份 <name> <email>", "accepts_args": True},
+    {"id": "12", "command": "GitHub仓库列表", "display": "GitHub仓库列表 [关键词]", "accepts_args": True},
+    {"id": "13", "command": "当前选中仓库", "display": "当前选中仓库", "accepts_args": False},
+    {"id": "14", "command": "选择仓库", "display": "选择仓库 <序号>", "accepts_args": True},
+    {"id": "15", "command": "从选中仓库派生项目", "display": "从选中仓库派生项目 <名称>", "accepts_args": True},
+    {"id": "16", "command": "创建GitHub仓库", "display": "创建GitHub仓库 <仓库名>", "accepts_args": True},
+    {"id": "17", "command": "创建GitHub公开仓库", "display": "创建GitHub公开仓库 <仓库名>", "accepts_args": True},
+    {"id": "18", "command": "创建GitHub仓库并发布", "display": "创建GitHub仓库并发布 <仓库名>", "accepts_args": True},
+    {"id": "19", "command": "推送到GitHub", "display": "推送到GitHub [仓库名]", "accepts_args": True},
+    {"id": "20", "command": "推送到GitHub公开", "display": "推送到GitHub公开 [仓库名]", "accepts_args": True},
+    {"id": "21", "command": "远程状态", "display": "远程状态", "accepts_args": False},
+    {"id": "22", "command": "部署状态", "display": "部署状态", "accepts_args": False},
+    {"id": "23", "command": "准备GitHub仓库", "display": "准备GitHub仓库 <Git地址>", "accepts_args": True},
+    {"id": "24", "command": "发布到新仓库", "display": "发布到新仓库 <新Git地址>", "accepts_args": True},
+    {"id": "25", "command": "同步上游", "display": "同步上游 [Git地址]", "accepts_args": True},
+    {"id": "26", "command": "启用Pages部署", "display": "启用Pages部署 <Pages项目名> [构建目录]", "accepts_args": True},
+    {"id": "27", "command": "启用Worker部署", "display": "启用Worker部署 <Worker名称> [入口文件]", "accepts_args": True},
+    {"id": "28", "command": "使用个人工作区", "display": "使用个人工作区", "accepts_args": False},
+    {"id": "29", "command": "使用共享工作区", "display": "使用共享工作区", "accepts_args": False},
+    {"id": "30", "command": "部署帮助", "display": "部署帮助", "accepts_args": False},
+)
+CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in CONTROL_COMMAND_SHORTCUTS}
+CONTROL_COMMAND_SHORTCUT_EXACT_RE = re.compile(r"^\s*(\d{1,2})[.、:：)]?\s*$")
+CONTROL_COMMAND_SHORTCUT_WITH_ARGS_RE = re.compile(r"^\s*(\d{1,2})(?:[.、:：)]|\s)+(.+?)\s*$")
+CONTROL_COMMAND_ORDER: Tuple[str, ...] = tuple(
+    str(index) for index in range(1, len(CONTROL_COMMAND_SHORTCUTS) + 1)
+)
+DEPLOYMENT_COMMAND_ORDER: Tuple[str, ...] = (
+    "10",
+    "11",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "30",
+)
 
 OnInteractionRequest = Optional[Callable[[dict], Awaitable[None]]]
 
@@ -103,11 +158,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
         workspace_strategy: str = "",
         default_workspace_init_mode: str = DEFAULT_WORKSPACE_INIT_MODE,
         default_group_workspace_mode: str = "personal",
+        default_github_owner: str = "",
         session_timeout_seconds: int = 7200,
         enable_project_workspace_mode: bool = True,
     ):
         self.bot_key = bot_key
         self.system_prompt = system_prompt or ""
+        self.default_github_owner = str(default_github_owner or "").strip()
         self.base_working_dir = str(Path(working_dir).expanduser().resolve())
         self.workspace_root = str(
             Path(workspace_root).expanduser().resolve()
@@ -170,7 +227,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         self._github_repository_selections: Dict[str, dict] = {}
 
         logger.info(
-            "[CodexCLI] 编排器初始化完成: bot_key=%s, working_dir=%s, workspace_root=%s, codex_home=%s, upload_root=%s, project_mode=%s, default_workspace_init_mode=%s",
+            "[CodexCLI] 编排器初始化完成: bot_key=%s, working_dir=%s, workspace_root=%s, codex_home=%s, upload_root=%s, project_mode=%s, default_workspace_init_mode=%s, default_github_owner=%s",
             self.bot_key,
             self.base_working_dir,
             self.workspace_root,
@@ -178,6 +235,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             self.upload_root,
             self.enable_project_workspace_mode,
             self.default_workspace_init_mode,
+            self.default_github_owner or "-",
         )
 
     def get_runtime_session_key(
@@ -211,7 +269,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not self.enable_project_workspace_mode:
             return None
 
-        command = (content or "").strip()
+        command = self._normalize_control_command_input(content)
         if not command:
             return None
 
@@ -249,6 +307,17 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 log_context=log_context,
                 name=git_identity_request["name"],
                 email=git_identity_request["email"],
+            )
+        github_push_request, usage_message = self._parse_github_push_command(command)
+        if usage_message:
+            return usage_message
+        if github_push_request:
+            return self._handle_push_to_github_command(
+                user_id=user_id,
+                session_key=session_key,
+                log_context=log_context,
+                repository_name=github_push_request.get("name", ""),
+                private=github_push_request.get("private", True),
             )
         github_request, usage_message = self._parse_github_repository_command(command)
         if usage_message:
@@ -370,7 +439,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         return None
 
     def is_control_command(self, content: str) -> bool:
-        command = (content or "").strip()
+        command = self._normalize_control_command_input(content)
         if not command:
             return False
         if command in {
@@ -398,12 +467,16 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "工作区列表",
             "使用个人工作区",
             "使用共享工作区",
+            "部署帮助",
         }:
             return True
         if command.startswith("进入项目"):
             return True
         git_identity_request, usage_message = self._parse_git_identity_command(command)
         if git_identity_request or usage_message:
+            return True
+        github_push_request, usage_message = self._parse_github_push_command(command)
+        if github_push_request or usage_message:
             return True
         github_request, usage_message = self._parse_github_repository_command(command)
         if github_request or usage_message:
@@ -424,6 +497,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
         on_stream_delta: OnStreamDelta = None,
         on_interaction_request: OnInteractionRequest = None,
     ) -> str:
+        preflight_reply = self._maybe_handle_push_to_github_intent(
+            user_id=user_id,
+            message=message,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        if preflight_reply:
+            return await self._return_early_reply(preflight_reply, on_stream_delta)
         inputs = [{"type": "text", "text": self._sanitize_user_input(message)}]
         return await self._run_codex_turn(
             user_id=user_id,
@@ -580,7 +661,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         thinking_lines = ["🤖 Codex 正在处理..."]
         if runtime_context.get("project"):
             thinking_lines.append(f"📁 项目：{runtime_context['project'].get('name')}")
-        thinking_lines.append(f"📂 工作区：{runtime_context['working_dir']}")
+        thinking_lines.append(f"📂 工作区：{self._display_path(runtime_context['working_dir'])}")
         if runtime_context.get("initial_notice"):
             thinking_lines.append(runtime_context["initial_notice"])
         else:
@@ -1080,14 +1161,22 @@ class CodexCliOrchestrator(BaseOrchestrator):
         query: str = "",
     ) -> str:
         try:
+            owner = self._resolve_default_github_owner(validate_token=bool(self.default_github_owner))
             repositories = self.github_repository_manager.list_user_repositories(
                 query=query,
                 limit=DEFAULT_GITHUB_REPOSITORY_LIST_LIMIT,
+                owner_only=bool(owner),
             )
+            if owner:
+                repositories = [
+                    repository
+                    for repository in repositories
+                    if str(repository.owner or "").strip().lower() == owner.lower()
+                ]
         except Exception as exc:
             return f"获取 GitHub 仓库列表失败：{exc}"
 
-        scope_text = "当前账号"
+        scope_text = f"账号 {owner}" if owner else "当前账号"
         self._remember_github_repository_list(user_id, session_key, log_context, repositories, scope_text)
         return self._build_github_repository_list_reply(scope_text, repositories, query=query)
 
@@ -1153,10 +1242,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
         publish_after_create: bool = False,
     ) -> str:
         try:
+            expected_owner = self._resolve_default_github_owner(validate_token=bool(self.default_github_owner))
             repository = self.github_repository_manager.create_user_repository(
                 name=name,
                 private=private,
             )
+            if expected_owner and str(repository.owner or "").strip().lower() != expected_owner.lower():
+                return (
+                    "创建 GitHub 仓库后检测到账号与配置不一致。\n"
+                    f"配置账号：{expected_owner}\n"
+                    f"实际创建到：{repository.owner or '-'}\n"
+                    "请检查 GITHUB_TOKEN 是否属于配置的统一 GitHub 账号。"
+                )
         except Exception as exc:
             return f"创建 GitHub 仓库失败：{exc}"
 
@@ -1329,7 +1426,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 f"已进入群项目：{project['name']}\n"
                 f"模式：{'共享工作区' if mode == MODE_SHARED else '个人工作区'}\n"
-                f"当前工作区：{workspace['path']}"
+                f"当前工作区：{self._display_path(workspace['path'])}"
             )
 
         target_session = session_key or user_id
@@ -1344,7 +1441,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             workspace["workspace_id"],
             MODE_PERSONAL,
         )
-        return f"已进入项目：{project['name']}\n当前工作区：{workspace['path']}"
+        return f"已进入项目：{project['name']}\n当前工作区：{self._display_path(workspace['path'])}"
 
     def _handle_current_project_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
         runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
@@ -1352,7 +1449,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return early_reply
         project = runtime_context.get("project")
         if not project:
-            return f"当前工作目录：{runtime_context['working_dir']}"
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
         deployment_summary = self.project_deployment_manager.deployment_summary(project)
         lines = [
             f"当前项目：{project['name']}",
@@ -1372,11 +1469,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         project = runtime_context.get("project")
         if not project:
-            return f"当前工作目录：{runtime_context['working_dir']}"
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
 
         lines = [
             f"当前项目：{project['name']}",
-            f"工作区：{runtime_context['working_dir']}",
+            f"工作区：{self._display_path(runtime_context['working_dir'])}",
         ]
         lines.extend(self._build_remote_status_lines(project, runtime_context["working_dir"]))
         lines.extend(self._build_git_identity_brief_lines(runtime_context["working_dir"]))
@@ -1405,7 +1502,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "当前工作区 Git 身份",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"Git仓库：{'已初始化' if git_identity.repo_exists else '未初始化'}",
             f"user.name：{git_identity.user_name or '(未配置)'}",
             f"user.email：{git_identity.user_email or '(未配置)'}",
@@ -1436,17 +1533,291 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 user_email=email,
             )
         except Exception as exc:
+            message = str(exc or "").strip()
+            if "inside a git repository" in message or "无法识别当前工作区" in message:
+                return (
+                    "设置 Git 身份失败：当前工作区的 Git 仓库初始化异常。\n"
+                    f"项目：{(project or {}).get('name', '-')}\n"
+                    f"工作区：{self._display_path(workspace_path)}\n"
+                    f"错误：{message}\n"
+                    "可先发送：4 查看当前工作区，或重新进入项目后再执行 11 <name> <email>"
+                )
             return f"设置 Git 身份失败：{exc}"
 
         lines = [
             "已设置当前工作区 Git 身份",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"Git 初始化：{'已初始化新仓库' if git_identity.repo_initialized else '沿用现有仓库'}",
             f"user.name：{git_identity.user_name or '(未配置)'}",
             f"user.email：{git_identity.user_email or '(未配置)'}",
             "说明：后续 commit/push 流程会优先使用当前仓库本地 Git 身份，不应再根据企业微信显示名猜测",
         ]
+        return "\n".join(lines)
+
+    def _handle_push_to_github_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+        repository_name: str = "",
+        private: bool = True,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        git_identity = self.project_deployment_manager.get_git_identity(workspace_path)
+        configured_owner = self._configured_github_owner()
+        configured_owner_validated = False
+
+        def ensure_configured_owner_token() -> Optional[str]:
+            nonlocal configured_owner_validated
+            if not configured_owner:
+                return None
+            if configured_owner_validated:
+                return None
+            try:
+                self._resolve_default_github_owner(validate_token=True)
+            except Exception as exc:
+                return str(exc)
+            configured_owner_validated = True
+            return None
+
+        if not git_identity.is_configured:
+            return (
+                "当前工作区还没有配置 Git 身份，暂不执行 GitHub 推送。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "请先发送：11 <name> <email>\n"
+                "例如：11 kangaroo117 kangaroo117@users.noreply.github.com"
+            )
+
+        desired_repo_name = self._resolve_push_repository_name(
+            project=project,
+            repository_name=repository_name,
+            workspace_path=workspace_path,
+        )
+        if not desired_repo_name:
+            return (
+                "当前项目还没有合适的 GitHub 仓库名，暂不自动推送。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                "请发送：19 <仓库名>\n"
+                "或：18 <仓库名>"
+            )
+
+        current_publish_url = (
+            self._project_publish_remote_url(project)
+            or self.project_deployment_manager.get_git_origin(workspace_path)
+        )
+        if current_publish_url and not self._parse_github_remote(current_publish_url):
+            current_publish_url = ""
+        bound_remote_url = ""
+        binding_notes: List[str] = []
+        created_repository: Optional[GitHubRepositoryInfo] = None
+        current_origin_url = self.project_deployment_manager.get_git_origin(workspace_path)
+        preferred_remote_url = ""
+
+        parsed_current_remote = self._parse_github_remote(current_publish_url)
+        if configured_owner:
+            if parsed_current_remote:
+                current_owner, current_repo_name = parsed_current_remote
+                desired_repo_name = (
+                    self._normalize_github_repository_name(repository_name)
+                    or self._normalize_github_repository_name(current_repo_name)
+                    or desired_repo_name
+                )
+                preferred_remote_url = self._preferred_github_remote_url(
+                    configured_owner,
+                    desired_repo_name,
+                )
+                if current_owner.lower() != configured_owner.lower():
+                    current_publish_url = ""
+                    binding_notes.append(
+                        f"检测到当前远程账号为 {current_owner}，已切换为统一 GitHub 账号 {configured_owner}"
+                    )
+            else:
+                preferred_remote_url = self._preferred_github_remote_url(
+                    configured_owner,
+                    desired_repo_name,
+                )
+        elif current_publish_url:
+            preferred_remote_url = self._preferred_publish_remote_url_from_existing_remote(current_publish_url)
+
+        probe_target = preferred_remote_url or current_publish_url
+        if probe_target:
+            probe = self.project_deployment_manager.probe_git_remote(probe_target)
+            if probe.exists:
+                bound_remote_url = probe_target
+                current_project_publish_url = self._project_publish_remote_url(project)
+                if (
+                    current_origin_url != probe_target
+                    or current_project_publish_url != probe_target
+                ):
+                    publish_result = self.project_deployment_manager.publish_to_new_remote(
+                        workspace_path=workspace_path,
+                        publish_remote_url=probe_target,
+                        upstream_remote_url=str((project or {}).get("upstream_remote_url") or "").strip()
+                        or self._project_source_remote_url(project),
+                    )
+                    bound_remote_url = publish_result.origin_url
+                    if preferred_remote_url and current_publish_url and preferred_remote_url != current_publish_url:
+                        binding_notes.append("已自动切换为可推送的 SSH 发布地址")
+                    elif not current_origin_url:
+                        binding_notes.append("已绑定现有 GitHub 仓库为 origin")
+                    else:
+                        binding_notes.append("已更新当前项目的 GitHub 发布地址")
+                    if project:
+                        self._update_project_remote_metadata(
+                            project,
+                            publish_remote_url=publish_result.origin_url,
+                            upstream_remote_url=publish_result.upstream_url,
+                        )
+                elif project and current_project_publish_url != probe_target:
+                    self._update_project_remote_metadata(
+                        project,
+                        publish_remote_url=probe_target,
+                        upstream_remote_url=str((project or {}).get("upstream_remote_url") or "").strip()
+                        or self._project_source_remote_url(project),
+                    )
+            elif probe.error_kind == "repository_not_found":
+                validation_error = ensure_configured_owner_token()
+                if validation_error:
+                    return (
+                        "检测到当前 GitHub 远程仓库不存在，但统一 GitHub 账号校验失败，无法自动创建仓库。\n"
+                        f"目标仓库名：{desired_repo_name}\n"
+                        f"错误：{validation_error}\n"
+                        "你也可以先在 GitHub 手动创建空仓库，再发送：19"
+                    )
+                try:
+                    created_repository = self.github_repository_manager.create_user_repository(
+                        name=desired_repo_name,
+                        private=private,
+                    )
+                except Exception as exc:
+                    return (
+                        "检测到当前 GitHub 远程仓库不存在，尝试自动创建时失败。\n"
+                        f"目标仓库名：{desired_repo_name}\n"
+                        f"错误：{exc}\n"
+                        "你也可以手动发送：18 <仓库名>"
+                    )
+                if configured_owner and str(created_repository.owner or "").strip().lower() != configured_owner.lower():
+                    return (
+                        "自动创建 GitHub 仓库后检测到账号与统一配置不一致。\n"
+                        f"配置账号：{configured_owner}\n"
+                        f"实际创建到：{created_repository.owner or '-'}\n"
+                        "请检查 GITHUB_TOKEN 是否属于配置的统一 GitHub 账号。"
+                    )
+                bound_remote_url = self._preferred_repository_publish_url(created_repository)
+                publish_result = self.project_deployment_manager.publish_to_new_remote(
+                    workspace_path=workspace_path,
+                    publish_remote_url=bound_remote_url,
+                    upstream_remote_url=str((project or {}).get("upstream_remote_url") or "").strip()
+                    or self._project_source_remote_url(project),
+                )
+                bound_remote_url = publish_result.origin_url
+                binding_notes.append("检测到目标仓库不存在，已自动创建 GitHub 仓库并绑定 origin")
+                if project:
+                    self._update_project_remote_metadata(
+                        project,
+                        publish_remote_url=publish_result.origin_url,
+                        upstream_remote_url=publish_result.upstream_url,
+                    )
+                self._remember_github_repository_list(
+                    user_id,
+                    session_key,
+                    log_context,
+                    [created_repository],
+                    "刚自动创建用于推送的仓库",
+                )
+            else:
+                return (
+                    "检测当前 GitHub 远程仓库失败，暂不自动推送。\n"
+                    f"目标远程：{probe_target}\n"
+                    f"检查结果：{self._format_git_remote_probe_error(probe.error_kind, probe.error_message)}\n"
+                    f"可改用：推送到GitHub {'公开 ' if not private else ''}{desired_repo_name}".rstrip()
+                )
+        else:
+            validation_error = ensure_configured_owner_token()
+            if validation_error:
+                return (
+                    "当前项目尚未绑定 GitHub 远程，且统一 GitHub 账号校验失败，无法自动创建仓库。\n"
+                    f"目标仓库名：{desired_repo_name}\n"
+                    f"错误：{validation_error}\n"
+                    "你也可以先在 GitHub 手动创建空仓库，再发送：23 <Git地址> 或 24 <Git地址>"
+                )
+            try:
+                created_repository = self.github_repository_manager.create_user_repository(
+                    name=desired_repo_name,
+                    private=private,
+                )
+            except Exception as exc:
+                return f"自动创建 GitHub 仓库失败：{exc}"
+            if configured_owner and str(created_repository.owner or "").strip().lower() != configured_owner.lower():
+                return (
+                    "自动创建 GitHub 仓库后检测到账号与统一配置不一致。\n"
+                    f"配置账号：{configured_owner}\n"
+                    f"实际创建到：{created_repository.owner or '-'}\n"
+                    "请检查 GITHUB_TOKEN 是否属于配置的统一 GitHub 账号。"
+                )
+            bound_remote_url = self._preferred_repository_publish_url(created_repository)
+            publish_result = self.project_deployment_manager.publish_to_new_remote(
+                workspace_path=workspace_path,
+                publish_remote_url=bound_remote_url,
+                upstream_remote_url=str((project or {}).get("upstream_remote_url") or "").strip()
+                or self._project_source_remote_url(project),
+            )
+            bound_remote_url = publish_result.origin_url
+            binding_notes.append("当前项目尚未配置 GitHub 远程，已自动创建仓库并绑定 origin")
+            if project:
+                self._update_project_remote_metadata(
+                    project,
+                    publish_remote_url=publish_result.origin_url,
+                    upstream_remote_url=publish_result.upstream_url,
+                )
+            self._remember_github_repository_list(
+                user_id,
+                session_key,
+                log_context,
+                [created_repository],
+                "刚自动创建用于推送的仓库",
+            )
+
+        try:
+            push_result = self.project_deployment_manager.commit_and_push_current_branch(
+                workspace_path=workspace_path,
+                commit_message=self._default_git_push_commit_message(project, desired_repo_name),
+                remote_name="origin",
+            )
+        except Exception as exc:
+            return (
+                "GitHub 远程已就绪，但自动提交/推送失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"origin：{bound_remote_url or current_publish_url or '(未配置)'}\n"
+                f"错误：{exc}\n"
+                "可先检查当前文件是否有变更，或让机器人继续帮你修复后再推送。"
+            )
+
+        lines = [
+            "已提交并推送当前项目到 GitHub",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+        ]
+        if created_repository:
+            lines.append(f"自动创建仓库：{created_repository.full_name}")
+        if binding_notes:
+            lines.append(f"远程处理：{'；'.join(binding_notes)}")
+        lines.append(f"origin：{push_result.remote_url}")
+        lines.append(f"分支：{push_result.branch_name}")
+        lines.append(f"Git身份：{self._format_git_identity_summary(git_identity)}")
+        if push_result.commit_created:
+            lines.append(f"提交：已创建新提交（{push_result.commit_message}）")
+        elif push_result.had_changes:
+            lines.append("提交：已处理变更并完成推送")
+        else:
+            lines.append("提交：没有新的工作区改动，已直接推送现有提交")
         return "\n".join(lines)
 
     def _build_github_repository_list_reply(
@@ -1517,14 +1888,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         project = runtime_context.get("project")
         if not project:
-            return f"当前工作目录：{runtime_context['working_dir']}"
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
 
         workspace_path = runtime_context["working_dir"]
         deployment_summary = self.project_deployment_manager.deployment_summary(project)
 
         lines = [
             f"当前项目：{project['name']}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"部署状态：{deployment_summary}",
         ]
         lines.extend(self._build_remote_status_lines(project, workspace_path))
@@ -1573,7 +1944,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "已为当前工作区准备 GitHub 仓库",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"origin：{result.origin_url}",
             f"Git 初始化：{'已初始化新仓库' if result.repo_initialized else '沿用现有仓库'}",
             f"origin 处理：{origin_action_text}",
@@ -1629,7 +2000,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "已将当前项目发布到新的 Git 仓库",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"新 origin：{result.origin_url}",
             f"origin 处理：{origin_action_text}",
             f"upstream 处理：{upstream_action_text}",
@@ -1681,7 +2052,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "已同步上游远程仓库元数据",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"远程：{result.remote_name}",
             f"地址：{result.remote_url}",
             f"结果：{fetch_action_text}",
@@ -1730,7 +2101,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "已为当前工作区写入 Cloudflare Pages 部署脚手架",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"Pages 项目名：{result.pages_project_name}",
             f"构建目录：{result.build_dir}",
             f"工作流：{result.workflow_path}",
@@ -1784,7 +2155,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = [
             "已为当前工作区写入 Cloudflare Worker 部署脚手架",
             f"项目：{(project or {}).get('name', '-')}",
-            f"工作区：{workspace_path}",
+            f"工作区：{self._display_path(workspace_path)}",
             f"Worker 名称：{result.worker_name}",
             f"入口文件：{result.entry_file}",
             f"兼容日期：{result.compatibility_date}",
@@ -1806,12 +2177,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return early_reply
         workspace = runtime_context.get("workspace")
         if not workspace:
-            return f"当前工作目录：{runtime_context['working_dir']}"
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
         mode_text = "共享工作区" if runtime_context.get("mode") == MODE_SHARED else "个人工作区"
         return (
             f"当前工作区：{workspace['workspace_id']}\n"
             f"模式：{mode_text}\n"
-            f"路径：{workspace['path']}"
+            f"路径：{self._display_path(workspace['path'])}"
         )
 
     def _handle_list_workspaces_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
@@ -1852,7 +2223,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "",
             MODE_PERSONAL,
         )
-        return f"已切换为个人工作区模式。\n当前工作区：{workspace['path']}"
+        return f"已切换为个人工作区模式。\n当前工作区：{self._display_path(workspace['path'])}"
 
     def _handle_use_shared_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
         log_context = log_context or {}
@@ -1874,7 +2245,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             workspace["workspace_id"],
             MODE_SHARED,
         )
-        return f"已切换为共享工作区模式。\n当前工作区：{workspace['path']}"
+        return f"已切换为共享工作区模式。\n当前工作区：{self._display_path(workspace['path'])}"
 
     async def _return_early_reply(self, reply: str, on_stream_delta: OnStreamDelta) -> str:
         if on_stream_delta:
@@ -1899,11 +2270,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _build_first_use_help_text(project_name: str) -> str:
         return (
             f"🆕 首次使用说明：已自动进入默认个人项目 `{project_name}`\n"
-            "💡 你现在可以直接继续发开发需求\n"
-            "🏷️ 若想指定项目名，请先发送：新建项目 <名称>\n"
-            "📦 若想从已有 GitHub 仓库挑一个开始，可发送：GitHub仓库列表\n"
-            "例如：新建项目 hello-world\n"
-            "📘 可发送：项目帮助 / 帮助 / 部署帮助"
+            "💡 现在支持两级体系：一级控制命令，二级普通对话\n"
+            "🔢 一级控制命令统一带序号，可输入全称，也可直接输入序号\n"
+            "🏷️ 想指定项目名：发送 `6 hello-world` 或 `新建项目 hello-world`\n"
+            "📦 想从 GitHub 账号仓库里挑一个开始：发送 `12` 或 `GitHub仓库列表`\n"
+            "🚀 想发布到 GitHub：发送 `19 <仓库名>`；想看部署命令：发送 `30`\n"
+            "📘 输入 `1` 查看完整一级命令菜单"
         )
 
     @classmethod
@@ -1937,6 +2309,84 @@ class CodexCliOrchestrator(BaseOrchestrator):
         return "项目" in text and any(
             keyword in normalized
             for keyword in ("hello world", "helloworld", "project ")
+        )
+
+    def _maybe_handle_push_to_github_intent(
+        self,
+        user_id: str,
+        message: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        content = str(message or "").strip()
+        if not self._looks_like_push_to_github_request(content):
+            return ""
+
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        git_identity = self.project_deployment_manager.get_git_identity(workspace_path)
+        if not git_identity.is_configured:
+            return (
+                "看起来你是想把当前项目推送到 GitHub。\n"
+                "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
+                "但当前工作区还没有配置 Git 身份。\n"
+                "请先发送：11 <name> <email>\n"
+                "然后再发送：19 [仓库名]"
+            )
+
+        repo_name = self._resolve_push_repository_name(project, "", workspace_path)
+        current_publish_url = (
+            self._project_publish_remote_url(project)
+            or self.project_deployment_manager.get_git_origin(workspace_path)
+        )
+        if current_publish_url and not self._parse_github_remote(current_publish_url):
+            current_publish_url = ""
+        if not current_publish_url:
+            if repo_name:
+                return (
+                    "看起来你是想把当前项目推送到 GitHub。\n"
+                    "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
+                    "当前还没有配置远程仓库。\n"
+                    f"可直接发送：19 {repo_name}\n"
+                    f"或：20 {repo_name}"
+                )
+            return (
+                "看起来你是想把当前项目推送到 GitHub。\n"
+                "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
+                "当前还没有配置远程仓库，且项目名还不适合作为仓库名。\n"
+                "请直接发送：19 <仓库名>\n"
+                "例如：19 hello-world"
+            )
+
+        preferred_remote_url = self._preferred_publish_remote_url_from_existing_remote(current_publish_url)
+        probe = self.project_deployment_manager.probe_git_remote(preferred_remote_url or current_publish_url)
+        if probe.exists:
+            return ""
+        if probe.error_kind == "repository_not_found":
+            suggested_name = repo_name
+            if suggested_name:
+                return (
+                    "看起来你是想把当前项目推送到 GitHub。\n"
+                    "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
+                    "但当前 origin 对应的 GitHub 仓库还不存在。\n"
+                    f"可直接发送：19 {suggested_name}\n"
+                    f"或：20 {suggested_name}"
+                )
+        return ""
+
+    @staticmethod
+    def _looks_like_push_to_github_request(content: str) -> bool:
+        text = str(content or "").strip().lower()
+        if not text:
+            return False
+        push_keywords = ("推送", "push", "提交并推送", "发布")
+        github_keywords = ("github", "git hub")
+        return any(keyword in text for keyword in push_keywords) and any(
+            keyword in text for keyword in github_keywords
         )
 
     def _build_remote_status_lines(self, project: dict, workspace_path: str) -> List[str]:
@@ -1977,6 +2427,25 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return github_remote_url
         return ""
 
+    def _update_project_remote_metadata(
+        self,
+        project: dict,
+        publish_remote_url: str,
+        upstream_remote_url: str = "",
+    ) -> None:
+        if not project:
+            return
+        source_remote_url = self._project_source_remote_url(project)
+        normalized_publish_url = str(publish_remote_url or "").strip()
+        normalized_upstream_url = str(upstream_remote_url or "").strip()
+        self.project_registry.update_project(
+            project["project_id"],
+            github_remote_url=normalized_publish_url,
+            publish_git_remote_url=normalized_publish_url,
+            upstream_remote_url=normalized_upstream_url or str(project.get("upstream_remote_url") or "").strip(),
+            source_git_remote_url=source_remote_url or normalized_upstream_url,
+        )
+
     def _build_git_identity_brief_lines(
         self,
         workspace_path: str,
@@ -2002,6 +2471,104 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if git_identity.repo_exists:
             return "(未配置)"
         return "(当前工作区还不是 Git 仓库)"
+
+    def _configured_github_owner(self) -> str:
+        return str(self.default_github_owner or "").strip()
+
+    def _resolve_default_github_owner(self, validate_token: bool = False) -> str:
+        configured_owner = self._configured_github_owner()
+        if not validate_token:
+            return configured_owner
+
+        actual_login = self.github_repository_manager.get_current_user_login()
+        if configured_owner and actual_login.lower() != configured_owner.lower():
+            raise RuntimeError(
+                f"GITHUB_TOKEN 当前账号为 {actual_login}，但配置的统一 GitHub 账号为 {configured_owner}"
+            )
+        return configured_owner or actual_login
+
+    def _resolve_push_repository_name(
+        self,
+        project: dict,
+        repository_name: str,
+        workspace_path: str,
+    ) -> str:
+        explicit_name = self._normalize_github_repository_name(repository_name)
+        if explicit_name:
+            return explicit_name
+
+        current_remote = (
+            self._project_publish_remote_url(project)
+            or self.project_deployment_manager.get_git_origin(workspace_path)
+        )
+        parsed_remote = self._parse_github_remote(current_remote)
+        if parsed_remote:
+            _, repo_name = parsed_remote
+            return self._normalize_github_repository_name(repo_name)
+
+        project_name = str((project or {}).get("name") or "").strip()
+        if project_name.lower() == DEFAULT_PERSONAL_PROJECT_NAME:
+            return ""
+        return self._normalize_github_repository_name(project_name)
+
+    @staticmethod
+    def _normalize_github_repository_name(value: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-_.")
+        return normalized[:100]
+
+    def _preferred_publish_remote_url_from_existing_remote(self, remote_url: str) -> str:
+        parsed_remote = self._parse_github_remote(remote_url)
+        if not parsed_remote:
+            return str(remote_url or "").strip()
+        owner, repo_name = parsed_remote
+        return self._preferred_github_remote_url(owner, repo_name)
+
+    def _preferred_github_remote_url(self, owner: str, repo_name: str) -> str:
+        normalized_owner = str(owner or "").strip()
+        normalized_repo_name = self._normalize_github_repository_name(repo_name)
+        if not normalized_owner or not normalized_repo_name:
+            return ""
+        alias_host = self._github_owner_alias_host(normalized_owner)
+        if alias_host and self._ssh_host_alias_configured(alias_host):
+            return f"git@{alias_host}:{normalized_owner}/{normalized_repo_name}.git"
+        return f"git@github.com:{normalized_owner}/{normalized_repo_name}.git"
+
+    @staticmethod
+    def _parse_github_remote(remote_url: str) -> Optional[Tuple[str, str]]:
+        value = str(remote_url or "").strip()
+        if not value:
+            return None
+
+        patterns = [
+            re.compile(r"^https://(?:[^/@]+@)?github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IGNORECASE),
+            re.compile(r"^ssh://git@[^/]+/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IGNORECASE),
+            re.compile(r"^git@[^:]+:([^/\s]+)/([^/\s]+?)(?:\.git)?$", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.match(value)
+            if match:
+                return match.group(1), match.group(2)
+        return None
+
+    @staticmethod
+    def _format_git_remote_probe_error(error_kind: str, error_message: str) -> str:
+        message = str(error_message or "").strip()
+        mapping = {
+            "empty_remote": "远程仓库地址为空",
+            "git_not_found": "未找到 git 命令",
+            "repository_not_found": "目标仓库不存在",
+            "network_error": "网络不可达或域名解析失败",
+            "auth_failed": "认证失败或当前账号没有访问权限",
+            "unknown_error": "远程检查失败",
+        }
+        prefix = mapping.get(str(error_kind or "").strip(), "远程检查失败")
+        return f"{prefix}：{message}" if message else prefix
+
+    @staticmethod
+    def _default_git_push_commit_message(project: dict, repository_name: str) -> str:
+        project_name = str((project or {}).get("name") or "").strip()
+        target_name = project_name or str(repository_name or "").strip() or "workspace"
+        return f"chore: sync {target_name} workspace"
 
     def _remember_github_repository_list(
         self,
@@ -2125,6 +2692,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
         return f"{conversation_key}::user::{user_id}"
 
     @staticmethod
+    def _display_path(path_value: str) -> str:
+        value = str(path_value or "").strip()
+        if not value:
+            return "-"
+        if "`" in value:
+            value = value.replace("`", "'")
+        return f"`{value}`"
+
+    @staticmethod
     def _build_display_content(
         thinking_lines: List[str],
         text: str,
@@ -2146,6 +2722,66 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if len(command) <= 80:
             return command
         return command[:77] + "..."
+
+    @classmethod
+    def _normalize_control_command_input(cls, content: str) -> str:
+        command = (content or "").strip()
+        if not command:
+            return ""
+
+        shortcut_match = CONTROL_COMMAND_SHORTCUT_EXACT_RE.match(command)
+        if shortcut_match:
+            shortcut = CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_match.group(1))
+            if shortcut:
+                return str(shortcut["command"])
+            return command
+
+        shortcut_match = CONTROL_COMMAND_SHORTCUT_WITH_ARGS_RE.match(command)
+        if not shortcut_match:
+            return command
+
+        shortcut = CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_match.group(1))
+        if not shortcut:
+            return command
+
+        if not shortcut.get("accepts_args"):
+            return command
+
+        tail = str(shortcut_match.group(2) or "").strip()
+        if not tail:
+            return str(shortcut["command"])
+        return f"{shortcut['command']} {tail}".strip()
+
+    @staticmethod
+    def _command_system_overview_lines() -> List[str]:
+        return [
+            "命令体系：",
+            "- 一级：控制命令（输入命令全称或序号，立即执行，不进入 Codex）",
+            "- 二级：普通对话（未命中一级命令的内容，一律按自然语言交给 Codex）",
+            "- 带参数的一级命令可直接写成：`序号 参数...`，例如 `6 hello-world`、`19 hello-world`",
+        ]
+
+    @staticmethod
+    def _format_numbered_command_lines(command_ids: Tuple[str, ...]) -> List[str]:
+        lines: List[str] = []
+        for command_id in command_ids:
+            command = CONTROL_COMMAND_SHORTCUT_MAP.get(command_id)
+            if not command:
+                continue
+            lines.append(f"- {command_id}. {command['display']}")
+        return lines
+
+    @staticmethod
+    def _git_identity_usage_help(prefix: str = "设置Git身份") -> str:
+        return "\n".join(
+            [
+                "Git 身份命令格式不完整。",
+                f"用法：{prefix} <name> <email>",
+                "也可以直接发送：11 <name> <email>",
+                "示例：11 kangaroo117 kangaroo117@users.noreply.github.com",
+                "可先发送：10 查看当前工作区 Git 身份状态",
+            ]
+        )
 
     def _parse_project_create_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
         command = (command or "").strip()
@@ -2342,11 +2978,40 @@ class CodexCliOrchestrator(BaseOrchestrator):
             if command.startswith(prefix):
                 args = self._split_command_args(command[len(prefix) :].strip())
                 if len(args) < 2:
-                    return None, f"用法：{prefix} <name> <email>"
+                    return None, self._git_identity_usage_help(prefix)
                 return {
                     "action": "set_git_identity",
                     "name": " ".join(args[:-1]).strip(),
                     "email": args[-1],
+                }, None
+
+        return None, None
+
+    def _parse_github_push_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
+        command = (command or "").strip()
+        if not command:
+            return None, None
+
+        for prefix, private in (
+            ("提交并推送到GitHub公开", False),
+            ("提交并推送到Github公开", False),
+            ("提交并推送到GitHub私有", True),
+            ("提交并推送到Github私有", True),
+            ("提交并推送到GitHub", True),
+            ("提交并推送到Github", True),
+            ("推送到GitHub公开", False),
+            ("推送到Github公开", False),
+            ("推送到GitHub私有", True),
+            ("推送到Github私有", True),
+            ("推送到GitHub", True),
+            ("推送到Github", True),
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "push_to_github",
+                    "name": " ".join(args).strip(),
+                    "private": private,
                 }, None
 
         return None, None
@@ -2427,56 +3092,50 @@ class CodexCliOrchestrator(BaseOrchestrator):
         ]
         if mode_text:
             lines.append(f"当前模式：{mode_text}")
-        lines.append(f"当前工作区：{workspace['path']}")
+        lines.append(f"当前工作区：{self._display_path(workspace['path'])}")
         return "\n".join(lines)
 
     @staticmethod
     def _project_command_help() -> str:
-        return (
-            "项目命令：\n"
-            "- 直接发开发需求：会自动进入默认个人项目 default\n"
-            "- 新建项目 <名称>\n"
-            "- 新建仓库项目 <名称> <Git地址>\n"
-            "- 从仓库派生项目 <名称> <源Git地址>\n"
-            "- 创建GitHub仓库 <仓库名>（默认私有）\n"
-            "- 创建GitHub公开仓库 <仓库名> / 创建GitHub私有仓库 <仓库名>\n"
-            "- 创建GitHub组织仓库 <org> <仓库名>\n"
-            "- 创建GitHub仓库并发布 <仓库名>\n"
-            "- GitHub仓库列表 [关键词]\n"
-            "- GitHub组织仓库 <org> [关键词]\n"
-            "- 选择仓库 <序号> / 当前选中仓库 / 从选中仓库派生项目 <名称>\n"
-            "- 新建复制项目 <名称> [本地目录]\n"
-            "- 新建项目 git_remote <名称> <Git地址>\n"
-            "- 新建项目 legacy_copy <名称> [本地目录]\n"
-            "- 进入项目 <名称或ID>\n"
-            "- 项目列表 / 当前项目 / 当前工作区 / 工作区列表 / 远程状态\n"
-            "- Git身份状态 / 设置Git身份 <name> <email>\n"
-            "- 部署帮助 / 部署状态 / 同步上游\n"
-            "- 准备GitHub仓库 <Git地址>\n"
-            "- 发布到新仓库 <新Git地址>\n"
-            "- 启用Pages部署 <Pages项目名> [构建目录]\n"
-            "- 启用Worker部署 <Worker名称> [入口文件]\n"
-            "- 查看完整说明：项目帮助 / 项目命令 / 帮助"
+        lines = CodexCliOrchestrator._command_system_overview_lines()
+        lines.extend(
+            [
+                "",
+                "一级控制命令菜单：",
+                "- 直接发开发需求：会进入二级普通对话，并默认在项目 `default` 中继续开发",
+                "- 若要切项目、列仓库、推 GitHub、改部署，请优先使用下面的一级命令",
+            ]
         )
+        lines.append("")
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(CONTROL_COMMAND_ORDER))
+        lines.extend(
+            [
+                "",
+                "兼容别名：",
+                "- 仍兼容少量旧写法，如 `创建GitHub私有仓库 <仓库名>`、`创建GitHub组织仓库 <org> <仓库名>`",
+                "- 仍兼容扩展项目写法，如 `新建复制项目 <名称> [本地目录]`、`新建项目 git_remote <名称> <Git地址>`、`新建项目 legacy_copy <名称> [本地目录]`",
+                "- 统一 GitHub 账号可在 bots.yaml 的 provider_config.default_github_owner 中配置",
+                "- 常用示例：`6 hello-world`、`11 kangaroo117 kangaroo117@users.noreply.github.com`、`12 react`、`19 hello-world`、`30`",
+                "- 查看完整说明：`1` / 项目帮助 / 项目命令 / 帮助",
+            ]
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _deployment_command_help() -> str:
-        return (
-            "部署命令：\n"
-            "- 远程状态\n"
-            "- Git身份状态 / 设置Git身份 <name> <email>\n"
-            "- 部署状态\n"
-            "- 创建GitHub仓库 <仓库名>（默认私有）\n"
-            "- 创建GitHub组织仓库 <org> <仓库名>\n"
-            "- 创建GitHub仓库并发布 <仓库名>\n"
-            "- 准备GitHub仓库 <Git地址>\n"
-            "- 发布到新仓库 <新Git地址>\n"
-            "- 同步上游\n"
-            "- 启用Pages部署 <Pages项目名> [构建目录]\n"
-            "- 启用Worker部署 <Worker名称> [入口文件]\n"
-            "- GitHub 推送凭证建议使用宿主机 SSH / gh 登录\n"
-            "- Cloudflare 凭证建议只放 GitHub Actions Secrets，不要发到聊天里"
+        lines = CodexCliOrchestrator._command_system_overview_lines()
+        lines.extend(["", "部署相关一级命令："])
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(DEPLOYMENT_COMMAND_ORDER))
+        lines.extend(
+            [
+                "",
+                "- 推送到GitHub [仓库名]：缺远程时会自动建仓、绑定 origin，并自动提交/推送",
+                "- 若 bots.yaml 配置了 provider_config.default_github_owner，则企业微信里的 GitHub 列仓/建仓/推送都统一走该账号",
+                "- GitHub 推送凭证建议使用宿主机 SSH；Cloudflare 凭证只放 GitHub Actions Secrets",
+                "- 输入序号也可执行，如：`23 git@github-kangaroo117:kangaroo117/demo.git`、`26 hello-pages dist`、`19 hello-world`",
+            ]
         )
+        return "\n".join(lines)
 
     @staticmethod
     def _file_action_label(action: str) -> str:
