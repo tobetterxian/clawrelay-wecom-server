@@ -9,6 +9,7 @@ import asyncio
 import base64
 import logging
 import mimetypes
+import os
 import re
 import shlex
 import shutil
@@ -20,7 +21,18 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .chat_logger import get_chat_logger
-from .github_repository_manager import GitHubRepositoryInfo, GitHubRepositoryManager
+from .cloudflare_pages_manager import (
+    CloudflarePagesDeploymentInfo,
+    CloudflarePagesManager,
+    CloudflarePagesProjectInfo,
+    CloudflareWorkerStatusInfo,
+)
+from .github_actions_secret_manager import GitHubActionsSecretManager
+from .github_repository_manager import (
+    GitHubRepositoryInfo,
+    GitHubRepositoryManager,
+    GitHubWorkflowRunInfo,
+)
 from .project_deployment_manager import GitIdentityResult, ProjectDeploymentManager
 from .project_registry import ProjectRegistry
 from .session_binding_manager import SessionBindingManager
@@ -94,6 +106,10 @@ CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
     {"id": "28", "command": "使用个人工作区", "display": "使用个人工作区", "accepts_args": False},
     {"id": "29", "command": "使用共享工作区", "display": "使用共享工作区", "accepts_args": False},
     {"id": "30", "command": "部署帮助", "display": "部署帮助", "accepts_args": False},
+    {"id": "31", "command": "一键发布Pages", "display": "一键发布Pages <仓库名> <Pages项目名> [构建目录]", "accepts_args": True},
+    {"id": "32", "command": "一键发布Worker", "display": "一键发布Worker <仓库名> <Worker名称> [入口文件]", "accepts_args": True},
+    {"id": "33", "command": "发布流水线状态", "display": "发布流水线状态", "accepts_args": False},
+    {"id": "34", "command": "Cloudflare项目状态", "display": "Cloudflare项目状态", "accepts_args": False},
 )
 CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in CONTROL_COMMAND_SHORTCUTS}
 CONTROL_COMMAND_SHORTCUT_EXACT_RE = re.compile(r"^\s*(\d{1,2})[.、:：)]?\s*$")
@@ -117,7 +133,77 @@ DEPLOYMENT_COMMAND_ORDER: Tuple[str, ...] = (
     "26",
     "27",
     "30",
+    "31",
+    "32",
+    "33",
+    "34",
 )
+HELP_MENU_TOPIC_ORDER: Tuple[str, ...] = (
+    "project_workspace",
+    "git_identity",
+    "github_repository",
+    "deployment",
+    "quick_examples",
+    "full_help",
+)
+HELP_MENU_TOPICS: Dict[str, dict] = {
+    "project_workspace": {
+        "title": "项目与工作区",
+        "summary": "项目列表、当前项目、新建项目、切换工作区",
+        "command_ids": ("2", "3", "4", "5", "6", "7", "8", "9", "28", "29"),
+        "extra_lines": (
+            "- 直接发开发需求时，会默认落在个人项目 `default` 中继续开发",
+            "- 想从远程仓库开始，优先使用：`7 新建仓库项目` 或 `8 从仓库派生项目`",
+            "- 群聊默认可切换个人/共享工作区，单聊默认就是个人工作区",
+        ),
+    },
+    "git_identity": {
+        "title": "Git 身份",
+        "summary": "查看和设置当前工作区的 Git 身份",
+        "command_ids": ("10", "11"),
+        "extra_lines": (
+            "- 首次提交前建议先执行：`11 <name> <email>`",
+            "- 后续 commit/push 会优先使用当前工作区本地 Git 身份，不再根据企业微信昵称猜测",
+            "- 示例：`11 kangaroo117 kangaroo117@users.noreply.github.com`",
+        ),
+    },
+    "github_repository": {
+        "title": "GitHub 仓库",
+        "summary": "列仓、选仓、建仓、推送到 GitHub",
+        "command_ids": ("12", "13", "14", "15", "16", "17", "18", "19", "20"),
+        "extra_lines": (
+            "- `19` 缺少远程时，会尝试自动建仓、绑定 origin 并推送",
+            "- 若 bots.yaml 配置了 `provider_config.default_github_owner`，列仓/建仓/推送会统一使用该账号",
+            "- 常用起手式：`12` 查看仓库，`16 hello-world` 建仓，`19 hello-world` 推送",
+        ),
+    },
+    "deployment": {
+        "title": "发布部署",
+        "summary": "远程状态、发布到新仓库、Pages/Worker 部署",
+    },
+    "quick_examples": {
+        "title": "常用示例",
+        "summary": "最常用的一组序号命令示例",
+        "extra_lines": (
+            "常用示例：",
+            "- `6 hello-world`：新建一个本地空工作区项目",
+            "- `7 demo https://github.com/org/repo.git`：从远程仓库初始化项目",
+            "- `11 kangaroo117 kangaroo117@users.noreply.github.com`：设置当前工作区 Git 身份",
+            "- `12 react`：按关键词列出 GitHub 仓库",
+            "- `19 hello-world`：把当前项目推送到 GitHub",
+            "- `26 hello-pages dist`：写入 Cloudflare Pages 部署工作流",
+            "- `31 hello-pages hello-pages dist`：自动建仓、注入 Secrets、启用 Pages 部署并再次推送",
+            "- `32 hello-worker hello-worker src/index.ts`：自动建仓、注入 Secrets、启用 Worker 部署并再次推送",
+            "- `33`：查看当前部署 workflow 最近一次 GitHub Actions 运行状态",
+            "- `34`：直接查询 Cloudflare 侧 Pages / Worker 当前项目与最近部署状态",
+            "- `30`：查看部署帮助",
+        ),
+    },
+    "full_help": {
+        "title": "完整帮助",
+        "summary": "返回完整一级命令菜单与说明",
+    },
+}
 
 OnInteractionRequest = Optional[Callable[[dict], Awaitable[None]]]
 
@@ -197,11 +283,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
         runtime_env_vars = dict(env_vars or {})
         runtime_env_vars["HOME"] = self.codex_home
         runtime_env_vars.setdefault("USERPROFILE", self.codex_home)
+        self.runtime_env_vars = runtime_env_vars
 
         self.adapter = CodexAppServerAdapter(
             model=model or DEFAULT_CODEX_CLI_MODEL,
             working_dir=self.base_working_dir,
-            env_vars=runtime_env_vars,
+            env_vars=self.runtime_env_vars,
             sandbox_mode=sandbox_mode,
             skip_git_repo_check=skip_git_repo_check,
             dangerously_bypass_approvals_and_sandbox=dangerously_bypass_approvals_and_sandbox,
@@ -211,7 +298,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
             approval_policy=approval_policy,
         )
         self.project_registry = ProjectRegistry(self.workspace_root)
-        self.github_repository_manager = GitHubRepositoryManager(env_vars=runtime_env_vars)
+        self.github_repository_manager = GitHubRepositoryManager(env_vars=self.runtime_env_vars)
+        self.github_actions_secret_manager = GitHubActionsSecretManager(env_vars=self.runtime_env_vars)
+        self.cloudflare_pages_manager = CloudflarePagesManager(env_vars=self.runtime_env_vars)
         self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
@@ -289,6 +378,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return self._handle_current_selected_repository_command(user_id, session_key, log_context)
         if command in {"部署状态", "当前部署"}:
             return self._handle_deployment_status_command(user_id, session_key, log_context)
+        if command in {"发布流水线状态", "流水线状态", "CI状态", "GitHub Actions状态"}:
+            return self._handle_pipeline_status_command(user_id, session_key, log_context)
+        if command in {"Cloudflare项目状态", "Cloudflare状态", "Cloudflare部署状态"}:
+            return self._handle_cloudflare_project_status_command(user_id, session_key, log_context)
         if command in {"当前工作区", "我的工作区"}:
             return self._handle_current_workspace_command(user_id, session_key, log_context)
         if command == "工作区列表":
@@ -418,6 +511,24 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     session_key=session_key,
                     log_context=log_context,
                 )
+            if action == "publish_pages":
+                return self._handle_publish_pages_command(
+                    user_id=user_id,
+                    repository_name=deployment_request["repository_name"],
+                    pages_project_name=deployment_request["pages_project_name"],
+                    build_dir=deployment_request.get("build_dir", "dist"),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "publish_worker":
+                return self._handle_publish_worker_command(
+                    user_id=user_id,
+                    repository_name=deployment_request["repository_name"],
+                    worker_name=deployment_request["worker_name"],
+                    entry_file=deployment_request.get("entry_file", "src/index.ts"),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
         create_request, usage_message = self._parse_project_create_command(command)
         if usage_message:
             return usage_message
@@ -462,6 +573,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "当前选中仓库",
             "部署状态",
             "当前部署",
+            "发布流水线状态",
+            "流水线状态",
+            "CI状态",
+            "GitHub Actions状态",
+            "Cloudflare项目状态",
+            "Cloudflare状态",
+            "Cloudflare部署状态",
             "当前工作区",
             "我的工作区",
             "工作区列表",
@@ -1907,6 +2025,195 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not str(project.get("deployment_type") or "").strip():
             lines.append("可发送：启用Pages部署 <Pages项目名> [构建目录]")
             lines.append("或：启用Worker部署 <Worker名称> [入口文件]")
+        else:
+            lines.append("可发送：34 Cloudflare项目状态")
+            if self._resolve_project_workflow_id(project):
+                lines.append("可发送：33 发布流水线状态")
+        return "\n".join(lines)
+
+    def _handle_pipeline_status_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        if not project:
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
+
+        workspace_path = runtime_context["working_dir"]
+        origin_url = self.project_deployment_manager.get_git_origin(workspace_path)
+        parsed_remote = self._parse_github_remote(origin_url)
+        if not parsed_remote:
+            return (
+                "当前项目还没有可识别的 GitHub 远程仓库，暂时无法查询发布流水线状态。\n"
+                f"项目：{project['name']}\n"
+                f"当前 origin：{origin_url or '(未配置)'}"
+            )
+
+        owner, repo_name = parsed_remote
+        workflow_id = self._resolve_project_workflow_id(project)
+        if not workflow_id:
+            return (
+                "当前项目还没有配置部署工作流，暂时无法定位发布流水线状态。\n"
+                f"项目：{project['name']}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                "可先发送：26 启用Pages部署 ...、27 启用Worker部署 ...、31 一键发布Pages ... 或 32 一键发布Worker ..."
+            )
+
+        try:
+            run = self.github_repository_manager.get_latest_workflow_run(
+                owner=owner,
+                repo=repo_name,
+                workflow_id=workflow_id,
+            )
+        except Exception as exc:
+            return (
+                "查询 GitHub Actions 发布流水线状态失败。\n"
+                f"项目：{project['name']}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"工作流：{workflow_id}\n"
+                f"错误：{exc}"
+            )
+
+        lines = [
+            f"项目：{project['name']}",
+            f"仓库：{owner}/{repo_name}",
+            f"工作流：{workflow_id}",
+            f"GitHub Actions：{self._github_actions_url(owner, repo_name)}",
+        ]
+        if not run:
+            lines.append("最近运行：未找到记录")
+            lines.append("说明：可能还没有推送触发过该工作流")
+            return "\n".join(lines)
+
+        lines.extend(self._format_workflow_run_lines(run))
+        return "\n".join(lines)
+
+    def _handle_cloudflare_project_status_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        if not project:
+            return f"当前工作目录：{self._display_path(runtime_context['working_dir'])}"
+
+        workspace_path = runtime_context["working_dir"]
+        deployment_type = str(project.get("deployment_type") or "").strip()
+        deployment_config = project.get("deployment_config") or {}
+        if not deployment_type:
+            return (
+                "当前项目还没有配置 Cloudflare 部署，暂时无法查询 Cloudflare 项目状态。\n"
+                f"项目：{project['name']}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "可先发送：26 启用Pages部署 ...、27 启用Worker部署 ...、31 一键发布Pages ... 或 32 一键发布Worker ..."
+            )
+
+        try:
+            self._read_runtime_secret("CLOUDFLARE_API_TOKEN")
+            self._read_runtime_secret("CLOUDFLARE_ACCOUNT_ID")
+        except Exception as exc:
+            return (
+                "当前项目已配置 Cloudflare 部署，但缺少 Cloudflare 凭证，无法查询远端项目状态。\n"
+                f"项目：{project['name']}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "需要配置：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID\n"
+                f"错误：{exc}"
+            )
+
+        try:
+            if deployment_type == "cloudflare_pages":
+                return self._handle_cloudflare_pages_status_query(
+                    project=project,
+                    workspace_path=workspace_path,
+                    deployment_config=deployment_config,
+                )
+            if deployment_type == "cloudflare_worker":
+                return self._handle_cloudflare_worker_status_query(
+                    project=project,
+                    workspace_path=workspace_path,
+                    deployment_config=deployment_config,
+                )
+        except Exception as exc:
+            return (
+                "查询 Cloudflare 项目状态失败。\n"
+                f"项目：{project['name']}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"部署类型：{deployment_type}\n"
+                f"错误：{exc}"
+            )
+
+        return (
+            "当前项目配置了暂不支持的 Cloudflare 部署类型。\n"
+            f"项目：{project['name']}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"部署类型：{deployment_type}"
+        )
+
+    def _handle_cloudflare_pages_status_query(
+        self,
+        project: dict,
+        workspace_path: str,
+        deployment_config: dict,
+    ) -> str:
+        pages_project_name = str(deployment_config.get("pages_project_name") or "").strip()
+        if not pages_project_name:
+            return (
+                "当前项目已配置 Cloudflare Pages 部署，但缺少 Pages 项目名，无法查询远端状态。\n"
+                f"项目：{project['name']}\n"
+                f"工作区：{self._display_path(workspace_path)}"
+            )
+
+        pages_project = self.cloudflare_pages_manager.get_project(pages_project_name)
+        latest_deployment = self.cloudflare_pages_manager.get_latest_deployment(pages_project_name)
+        configured_project = pages_project or CloudflarePagesProjectInfo(
+            name=pages_project_name,
+            subdomain=str(deployment_config.get("pages_subdomain") or "").strip(),
+            production_branch=str(deployment_config.get("production_branch") or "").strip(),
+        )
+
+        lines = [
+            f"项目：{project['name']}",
+            f"工作区：{self._display_path(workspace_path)}",
+            "Cloudflare 类型：Pages",
+            f"Pages 项目：{pages_project_name}",
+            f"构建目录：{str(deployment_config.get('build_dir') or '-').strip() or '-'}",
+            f"Pages 域名：{self._cloudflare_pages_public_url(configured_project)}",
+            f"生产分支：{configured_project.production_branch or '-'}",
+            f"Cloudflare 项目：{'已存在' if pages_project else '未找到'}",
+        ]
+        lines.extend(self._format_cloudflare_pages_deployment_lines(latest_deployment))
+        return "\n".join(lines)
+
+    def _handle_cloudflare_worker_status_query(
+        self,
+        project: dict,
+        workspace_path: str,
+        deployment_config: dict,
+    ) -> str:
+        worker_name = str(deployment_config.get("worker_name") or "").strip()
+        if not worker_name:
+            return (
+                "当前项目已配置 Cloudflare Worker 部署，但缺少 Worker 名称，无法查询远端状态。\n"
+                f"项目：{project['name']}\n"
+                f"工作区：{self._display_path(workspace_path)}"
+            )
+
+        worker_status = self.cloudflare_pages_manager.get_worker_status(worker_name)
+        lines = [
+            f"项目：{project['name']}",
+            f"工作区：{self._display_path(workspace_path)}",
+            "Cloudflare 类型：Worker",
+            f"Worker 名称：{worker_name}",
+            f"入口文件：{str(deployment_config.get('entry_file') or '-').strip() or '-'}",
+            f"兼容日期：{str(deployment_config.get('compatibility_date') or '-').strip() or '-'}",
+        ]
+        lines.extend(self._format_cloudflare_worker_status_lines(worker_status))
         return "\n".join(lines)
 
     def _handle_prepare_github_remote_command(
@@ -2115,6 +2422,160 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.append("提示：Cloudflare Pages 项目需提前在控制台或 wrangler 中创建")
         return "\n".join(lines)
 
+    def _handle_publish_pages_command(
+        self,
+        user_id: str,
+        repository_name: str,
+        pages_project_name: str,
+        build_dir: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        git_identity = self.project_deployment_manager.get_git_identity(workspace_path)
+        if not git_identity.is_configured:
+            return (
+                "当前工作区还没有配置 Git 身份，暂不执行一键发布 Pages。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "请先发送：11 <name> <email>"
+            )
+
+        normalized_repo_name = self._normalize_github_repository_name(repository_name)
+        normalized_pages_project_name = self._normalize_github_repository_name(pages_project_name)
+        normalized_build_dir = str(build_dir or "dist").strip() or "dist"
+        if not normalized_repo_name:
+            return "一键发布 Pages 失败：仓库名不能为空"
+        if not normalized_pages_project_name:
+            return "一键发布 Pages 失败：Pages 项目名不能为空"
+
+        push_reply = self._handle_push_to_github_command(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context,
+            repository_name=normalized_repo_name,
+            private=True,
+        )
+        if not push_reply.startswith("已提交并推送当前项目到 GitHub"):
+            return (
+                "一键发布 Pages 在 GitHub 推送阶段失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n\n"
+                f"{push_reply}"
+            )
+
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        parsed_remote = self._parse_github_remote(current_origin)
+        if not parsed_remote:
+            return (
+                "GitHub 推送已完成，但无法解析当前 origin，暂时无法继续配置 Cloudflare Pages。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"origin：{current_origin or '(未配置)'}"
+            )
+        owner, repo_name = parsed_remote
+
+        try:
+            pages_project = self.cloudflare_pages_manager.ensure_project(
+                normalized_pages_project_name,
+                production_branch="main",
+            )
+        except Exception as exc:
+            return (
+                "GitHub 推送已完成，但 Cloudflare Pages 项目初始化失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"Pages 项目：{normalized_pages_project_name}\n"
+                f"错误：{exc}\n"
+                "你可以补齐 Cloudflare 配置后，再发送：26 <Pages项目名> [构建目录]"
+            )
+
+        try:
+            cloudflare_api_token = self._read_runtime_secret("CLOUDFLARE_API_TOKEN")
+            cloudflare_account_id = self._read_runtime_secret("CLOUDFLARE_ACCOUNT_ID")
+            secret_names = self.github_actions_secret_manager.seed_cloudflare_repository_secrets(
+                owner=owner,
+                repo=repo_name,
+                api_token=cloudflare_api_token,
+                account_id=cloudflare_account_id,
+            )
+        except Exception as exc:
+            return (
+                "GitHub 推送与 Cloudflare Pages 项目初始化已完成，但写入 GitHub Actions Secrets 失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"Pages 项目：{pages_project.name}\n"
+                f"错误：{exc}\n"
+                "可手动在 GitHub 仓库中补充：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID"
+            )
+
+        result = self.project_deployment_manager.scaffold_cloudflare_pages(
+            workspace_path=workspace_path,
+            pages_project_name=pages_project.name,
+            build_dir=normalized_build_dir,
+        )
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                github_remote_url=current_origin or str(project.get("github_remote_url") or "").strip(),
+                deployment_type=result.deployment_type,
+                deployment_config={
+                    "workflow_path": result.workflow_path,
+                    "pages_project_name": result.pages_project_name,
+                    "build_dir": result.build_dir,
+                    "pages_subdomain": pages_project.subdomain,
+                    "production_branch": pages_project.production_branch or "main",
+                },
+            )
+
+        try:
+            push_result = self.project_deployment_manager.commit_and_push_current_branch(
+                workspace_path=workspace_path,
+                commit_message=f"ci: enable Cloudflare Pages deploy for {result.pages_project_name}",
+                remote_name="origin",
+            )
+        except Exception as exc:
+            file_summaries = "、".join(
+                f"{item.relative_path}（{self._file_action_label(item.action)}）"
+                for item in result.files
+            )
+            return (
+                "Cloudflare Pages 部署脚手架已写入，但二次推送失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"Pages 项目：{pages_project.name}\n"
+                f"工作流：{result.workflow_path}\n"
+                f"写入文件：{file_summaries}\n"
+                f"错误：{exc}\n"
+                "可稍后再次发送：19"
+            )
+
+        file_summaries = "、".join(
+            f"{item.relative_path}（{self._file_action_label(item.action)}）"
+            for item in result.files
+        )
+        lines = [
+            "已完成一键发布 Cloudflare Pages",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"GitHub 仓库：{owner}/{repo_name}",
+            f"仓库地址：{self._github_repository_html_url(owner, repo_name)}",
+            f"GitHub Actions：{self._github_actions_url(owner, repo_name)}",
+            f"Pages 项目：{pages_project.name}",
+            f"Pages 状态：{'已自动创建' if pages_project.created else '已存在，直接复用'}",
+            f"Pages 域名：{self._cloudflare_pages_public_url(pages_project)}",
+            f"工作流：{result.workflow_path}",
+            f"写入文件：{file_summaries}",
+            f"GitHub Secrets：{', '.join(secret_names)}",
+            f"最终推送：origin/{push_result.branch_name}",
+        ]
+        lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Pages 部署")
+        return "\n".join(lines)
+
     def _handle_enable_worker_deployment_command(
         self,
         user_id: str,
@@ -2170,6 +2631,266 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not current_origin:
             lines.append("提示：当前工作区还未配置 origin，可先发送：准备GitHub仓库 <Git地址>")
         return "\n".join(lines)
+
+    def _handle_publish_worker_command(
+        self,
+        user_id: str,
+        repository_name: str,
+        worker_name: str,
+        entry_file: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        git_identity = self.project_deployment_manager.get_git_identity(workspace_path)
+        if not git_identity.is_configured:
+            return (
+                "当前工作区还没有配置 Git 身份，暂不执行一键发布 Worker。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "请先发送：11 <name> <email>"
+            )
+
+        normalized_repo_name = self._normalize_github_repository_name(repository_name)
+        normalized_worker_name = self._normalize_github_repository_name(worker_name)
+        normalized_entry_file = str(entry_file or "src/index.ts").strip() or "src/index.ts"
+        if not normalized_repo_name:
+            return "一键发布 Worker 失败：仓库名不能为空"
+        if not normalized_worker_name:
+            return "一键发布 Worker 失败：Worker 名称不能为空"
+
+        push_reply = self._handle_push_to_github_command(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context,
+            repository_name=normalized_repo_name,
+            private=True,
+        )
+        if not push_reply.startswith("已提交并推送当前项目到 GitHub"):
+            return (
+                "一键发布 Worker 在 GitHub 推送阶段失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n\n"
+                f"{push_reply}"
+            )
+
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        parsed_remote = self._parse_github_remote(current_origin)
+        if not parsed_remote:
+            return (
+                "GitHub 推送已完成，但无法解析当前 origin，暂时无法继续配置 Cloudflare Worker。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"origin：{current_origin or '(未配置)'}"
+            )
+        owner, repo_name = parsed_remote
+
+        try:
+            cloudflare_api_token = self._read_runtime_secret("CLOUDFLARE_API_TOKEN")
+            cloudflare_account_id = self._read_runtime_secret("CLOUDFLARE_ACCOUNT_ID")
+            secret_names = self.github_actions_secret_manager.seed_cloudflare_repository_secrets(
+                owner=owner,
+                repo=repo_name,
+                api_token=cloudflare_api_token,
+                account_id=cloudflare_account_id,
+            )
+        except Exception as exc:
+            return (
+                "GitHub 推送已完成，但写入 GitHub Actions Secrets 失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"Worker：{normalized_worker_name}\n"
+                f"错误：{exc}\n"
+                "可手动在 GitHub 仓库中补充：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID"
+            )
+
+        result = self.project_deployment_manager.scaffold_cloudflare_worker(
+            workspace_path=workspace_path,
+            worker_name=normalized_worker_name,
+            entry_file=normalized_entry_file,
+        )
+        current_origin = self.project_deployment_manager.get_git_origin(workspace_path)
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                github_remote_url=current_origin or str(project.get("github_remote_url") or "").strip(),
+                deployment_type=result.deployment_type,
+                deployment_config={
+                    "workflow_path": result.workflow_path,
+                    "worker_name": result.worker_name,
+                    "entry_file": result.entry_file,
+                    "compatibility_date": result.compatibility_date,
+                },
+            )
+
+        try:
+            push_result = self.project_deployment_manager.commit_and_push_current_branch(
+                workspace_path=workspace_path,
+                commit_message=f"ci: enable Cloudflare Worker deploy for {result.worker_name}",
+                remote_name="origin",
+            )
+        except Exception as exc:
+            file_summaries = "、".join(
+                f"{item.relative_path}（{self._file_action_label(item.action)}）"
+                for item in result.files
+            )
+            return (
+                "Cloudflare Worker 部署脚手架已写入，但二次推送失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"仓库：{owner}/{repo_name}\n"
+                f"Worker：{result.worker_name}\n"
+                f"工作流：{result.workflow_path}\n"
+                f"写入文件：{file_summaries}\n"
+                f"错误：{exc}\n"
+                "可稍后再次发送：19"
+            )
+
+        file_summaries = "、".join(
+            f"{item.relative_path}（{self._file_action_label(item.action)}）"
+            for item in result.files
+        )
+        lines = [
+            "已完成一键发布 Cloudflare Worker",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"GitHub 仓库：{owner}/{repo_name}",
+            f"仓库地址：{self._github_repository_html_url(owner, repo_name)}",
+            f"GitHub Actions：{self._github_actions_url(owner, repo_name)}",
+            f"Worker 名称：{result.worker_name}",
+            f"入口文件：{result.entry_file}",
+            f"兼容日期：{result.compatibility_date}",
+            f"工作流：{result.workflow_path}",
+            f"写入文件：{file_summaries}",
+            f"GitHub Secrets：{', '.join(secret_names)}",
+            f"最终推送：origin/{push_result.branch_name}",
+        ]
+        for warning in result.warnings:
+            lines.append(f"提示：{warning}")
+        lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Worker 部署")
+        return "\n".join(lines)
+
+    def _read_runtime_secret(self, key: str) -> str:
+        value = self.runtime_env_vars.get(key) or os.getenv(key) or ""
+        normalized = str(value).strip()
+        if not normalized:
+            raise RuntimeError(f"未配置 {key}")
+        return normalized
+
+    @staticmethod
+    def _github_repository_html_url(owner: str, repo_name: str) -> str:
+        normalized_owner = str(owner or "").strip()
+        normalized_repo_name = str(repo_name or "").strip()
+        if not normalized_owner or not normalized_repo_name:
+            return "-"
+        return f"https://github.com/{normalized_owner}/{normalized_repo_name}"
+
+    @staticmethod
+    def _github_actions_url(owner: str, repo_name: str) -> str:
+        repo_url = CodexCliOrchestrator._github_repository_html_url(owner, repo_name)
+        if repo_url == "-":
+            return "-"
+        return f"{repo_url}/actions"
+
+    @staticmethod
+    def _resolve_project_workflow_id(project: dict) -> str:
+        deployment_config = (project or {}).get("deployment_config") or {}
+        workflow_path = str(deployment_config.get("workflow_path") or "").strip()
+        if workflow_path:
+            return Path(workflow_path).name
+        return ""
+
+    @staticmethod
+    def _format_workflow_run_lines(run: GitHubWorkflowRunInfo) -> List[str]:
+        status_text = str(run.status or "").strip() or "(未知)"
+        conclusion_text = str(run.conclusion or "").strip() or (
+            "进行中" if status_text.lower() != "completed" else "(未提供)"
+        )
+        created_at = str(run.created_at or "").strip() or "-"
+        updated_at = str(run.updated_at or "").strip() or "-"
+        head_sha = str(run.head_sha or "").strip()
+        short_sha = head_sha[:7] if head_sha else "-"
+
+        return [
+            f"最近运行：#{run.run_number or run.id}",
+            f"标题：{run.display_title or run.name or '(未命名)'}",
+            f"状态：{status_text}",
+            f"结论：{conclusion_text}",
+            f"分支：{run.head_branch or '-'}",
+            f"提交：{short_sha}",
+            f"事件：{run.event or '-'}",
+            f"创建时间：{created_at}",
+            f"更新时间：{updated_at}",
+            f"详情：{run.html_url or '-'}",
+        ]
+
+    @staticmethod
+    def _cloudflare_pages_public_url(project: CloudflarePagesProjectInfo) -> str:
+        subdomain = str((project or CloudflarePagesProjectInfo(name="")).subdomain or "").strip()
+        if subdomain:
+            if subdomain.startswith("http://") or subdomain.startswith("https://"):
+                return subdomain
+            return f"https://{subdomain}"
+        name = str((project or CloudflarePagesProjectInfo(name="")).name or "").strip()
+        if name:
+            return f"https://{name}.pages.dev"
+        return "-"
+
+    @staticmethod
+    def _format_cloudflare_pages_deployment_lines(
+        deployment: Optional[CloudflarePagesDeploymentInfo],
+    ) -> List[str]:
+        if not deployment:
+            return [
+                "最近部署：未找到记录",
+                "说明：可能还没有触发过 Cloudflare Pages 部署",
+            ]
+
+        lines = [
+            f"最近部署ID：{deployment.deployment_id or '-'}",
+            f"环境：{deployment.environment or '-'}",
+        ]
+        if deployment.stage_name or deployment.stage_status:
+            lines.append(
+                f"阶段：{deployment.stage_name or '-'} / {deployment.stage_status or '-'}"
+            )
+        lines.extend(
+            [
+                f"部署地址：{deployment.url or '-'}",
+                f"创建时间：{deployment.created_on or '-'}",
+                f"更新时间：{deployment.modified_on or '-'}",
+            ]
+        )
+        return lines
+
+    @staticmethod
+    def _format_cloudflare_worker_status_lines(status: CloudflareWorkerStatusInfo) -> List[str]:
+        lines = [
+            f"Cloudflare Worker：{'已存在' if status.exists else '未找到'}",
+            f"Workers.dev：{'已启用' if status.workers_dev_enabled else '未启用'}",
+            f"Workers.dev 地址：{status.workers_dev_url or '-'}",
+            f"预览环境：{'已启用' if status.previews_enabled else '未启用'}",
+            f"账号子域：{status.account_subdomain or '-'}",
+        ]
+        if not status.latest_deployment:
+            lines.extend(
+                [
+                    "最近部署：未找到记录",
+                    "说明：可能还没有通过 GitHub Actions 或 Wrangler 发布过该 Worker",
+                ]
+            )
+            return lines
+
+        lines.extend(
+            [
+                f"最近部署ID：{status.latest_deployment.deployment_id or '-'}",
+                f"部署来源：{status.latest_deployment.source or '-'}",
+                f"部署时间：{status.latest_deployment.created_on or '-'}",
+            ]
+        )
+        return lines
 
     def _handle_current_workspace_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
         runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
@@ -3048,6 +3769,44 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "remote_url": " ".join(args).strip(),
                 }, None
 
+        for prefix in (
+            "一键发布Pages",
+            "一键部署Pages",
+            "一键发布Cloudflare Pages",
+            "一键部署Cloudflare Pages",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if len(args) < 2:
+                    return None, f"用法：{prefix} <仓库名> <Pages项目名> [构建目录]"
+                return {
+                    "action": "publish_pages",
+                    "repository_name": args[0],
+                    "pages_project_name": args[1],
+                    "build_dir": " ".join(args[2:]).strip() or "dist",
+                }, None
+
+        for prefix in (
+            "一键发布Worker",
+            "一键部署Worker",
+            "一键发布Workers",
+            "一键部署Workers",
+            "一键发布Cloudflare Worker",
+            "一键部署Cloudflare Worker",
+            "一键发布Cloudflare Workers",
+            "一键部署Cloudflare Workers",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                if len(args) < 2:
+                    return None, f"用法：{prefix} <仓库名> <Worker名称> [入口文件]"
+                return {
+                    "action": "publish_worker",
+                    "repository_name": args[0],
+                    "worker_name": args[1],
+                    "entry_file": " ".join(args[2:]).strip() or "src/index.ts",
+                }, None
+
         for prefix in ("启用Pages部署", "启用Cloudflare Pages部署"):
             if command.startswith(prefix):
                 args = self._split_command_args(command[len(prefix) :].strip())
@@ -3121,6 +3880,109 @@ class CodexCliOrchestrator(BaseOrchestrator):
         )
         return "\n".join(lines)
 
+    @classmethod
+    def build_help_menu_card(cls, task_id: str) -> dict:
+        option_list = []
+        for index, topic_id in enumerate(HELP_MENU_TOPIC_ORDER):
+            topic = HELP_MENU_TOPICS.get(topic_id, {})
+            title = str(topic.get("title") or topic_id).strip()
+            summary = str(topic.get("summary") or "").strip()
+            text = title if not summary else f"{title}：{summary}"
+            option_list.append(
+                {
+                    "id": topic_id,
+                    "text": text,
+                    "is_checked": index == 0,
+                }
+            )
+
+        return TemplateCardBuilder.vote_interaction(
+            task_id=task_id,
+            title="📚 Codex CLI 帮助菜单",
+            desc="请选择要查看的帮助分类。提交后，机器人会返回对应说明。",
+            option_list=option_list,
+            submit_button_text="查看说明",
+            submit_button_key="submit_help_menu",
+            question_key="help_topic",
+            mode=0,
+            source_desc="Codex CLI",
+        )
+
+    @classmethod
+    def build_help_menu_reply(cls, topic_id: str) -> str:
+        normalized_topic_id = str(topic_id or "").strip()
+        if not normalized_topic_id:
+            return cls._project_command_help()
+
+        if normalized_topic_id == "deployment":
+            return cls._deployment_command_help()
+        if normalized_topic_id == "full_help":
+            return cls._project_command_help()
+
+        topic = HELP_MENU_TOPICS.get(normalized_topic_id) or {}
+        title = str(topic.get("title") or "").strip()
+        command_ids = tuple(topic.get("command_ids") or ())
+        extra_lines = list(topic.get("extra_lines") or ())
+
+        if not title:
+            return cls._project_command_help()
+
+        lines = cls._command_system_overview_lines()
+        lines.extend(["", f"{title}："])
+        if command_ids:
+            lines.extend(cls._format_numbered_command_lines(command_ids))
+        if extra_lines:
+            lines.append("")
+            lines.extend(extra_lines)
+        lines.extend(
+            [
+                "",
+                "如需完整菜单，可发送：`1` / `帮助`",
+            ]
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def build_help_topic_card(cls, topic_id: str, task_id: str) -> dict:
+        normalized_topic_id = str(topic_id or "").strip()
+        reply_text = cls.build_help_menu_reply(normalized_topic_id)
+        topic = HELP_MENU_TOPICS.get(normalized_topic_id) or {}
+        title = str(topic.get("title") or "帮助说明").strip()
+        summary = str(topic.get("summary") or "").strip()
+        desc = summary or "已为你展开该帮助分类。"
+        detail_text = cls._truncate_help_card_detail(reply_text)
+        return TemplateCardBuilder.text_notice(
+            task_id=task_id,
+            title=f"📚 {title}",
+            desc=desc,
+            source_desc="Codex CLI",
+            sub_title=detail_text,
+        )
+
+    @staticmethod
+    def _truncate_help_card_detail(text: str, max_lines: int = 7, max_chars: int = 280) -> str:
+        lines = [str(line).strip() for line in str(text or "").splitlines() if str(line).strip()]
+        if not lines:
+            return "如需完整文字版帮助，可再次发送：帮助"
+
+        filtered: List[str] = []
+        for line in lines:
+            cleaned = line.replace("`", "")
+            if cleaned == "命令体系：":
+                continue
+            if cleaned.startswith("- 一级：") or cleaned.startswith("- 二级："):
+                continue
+            filtered.append(cleaned)
+            if len(filtered) >= max_lines:
+                break
+
+        detail = "\n".join(filtered).strip()
+        if len(detail) > max_chars:
+            detail = detail[: max_chars - 1].rstrip() + "…"
+        if "如需完整菜单" not in detail:
+            detail = f"{detail}\n如需完整文字版帮助，可发送：帮助"
+        return detail.strip()
+
     @staticmethod
     def _deployment_command_help() -> str:
         lines = CodexCliOrchestrator._command_system_overview_lines()
@@ -3130,9 +3992,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             [
                 "",
                 "- 推送到GitHub [仓库名]：缺远程时会自动建仓、绑定 origin，并自动提交/推送",
+                "- 一键发布Pages <仓库名> <Pages项目名> [构建目录]：自动建仓、创建 Pages 项目、注入 GitHub Secrets、写入工作流并再次推送；若没有 package.json，也可直接发布现成的静态目录",
+                "- 一键发布Worker <仓库名> <Worker名称> [入口文件]：自动建仓、注入 GitHub Secrets、写入 Worker 工作流与 wrangler.toml，并再次推送",
+                "- 发布流水线状态：查看当前部署工作流最近一次 GitHub Actions 运行状态",
+                "- Cloudflare项目状态：直接查询 Cloudflare 侧 Pages / Worker 当前项目与最近部署状态",
                 "- 若 bots.yaml 配置了 provider_config.default_github_owner，则企业微信里的 GitHub 列仓/建仓/推送都统一走该账号",
                 "- GitHub 推送凭证建议使用宿主机 SSH；Cloudflare 凭证只放 GitHub Actions Secrets",
-                "- 输入序号也可执行，如：`23 git@github-kangaroo117:kangaroo117/demo.git`、`26 hello-pages dist`、`19 hello-world`",
+                "- 输入序号也可执行，如：`23 git@github-kangaroo117:kangaroo117/demo.git`、`26 hello-pages dist`、`31 hello-pages hello-pages dist`、`32 hello-worker hello-worker src/index.ts`、`33`、`34`、`19 hello-world`",
             ]
         )
         return "\n".join(lines)

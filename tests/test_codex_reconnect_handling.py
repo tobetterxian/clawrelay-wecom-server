@@ -9,8 +9,18 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from config.bot_config import BotConfig, BotConfigManager
+from src.core.cloudflare_pages_manager import (
+    CloudflarePagesDeploymentInfo,
+    CloudflarePagesProjectInfo,
+    CloudflareWorkerDeploymentInfo,
+    CloudflareWorkerStatusInfo,
+)
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
-from src.core.github_repository_manager import GitHubRepositoryInfo, GitHubRepositoryManager
+from src.core.github_repository_manager import (
+    GitHubRepositoryInfo,
+    GitHubRepositoryManager,
+    GitHubWorkflowRunInfo,
+)
 from src.core.json_state_store import JsonStateStore
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.project_deployment_manager import ProjectDeploymentManager
@@ -65,6 +75,142 @@ def test_codex_cli_uses_shared_home_directory():
 def test_display_path_wraps_windows_paths_for_markdown_safe_output():
     path_text = r"C:\next\.codex_data\projects\demo"
     assert CodexCliOrchestrator._display_path(path_text) == f"`{path_text}`"
+
+
+def test_help_menu_card_contains_expected_topics():
+    card = CodexCliOrchestrator.build_help_menu_card("menu@help@cx_bot")
+
+    assert card["card_type"] == "vote_interaction"
+    assert card["task_id"] == "menu@help@cx_bot"
+    option_ids = [item["id"] for item in card["checkbox"]["option_list"]]
+    assert option_ids == [
+        "project_workspace",
+        "git_identity",
+        "github_repository",
+        "deployment",
+        "quick_examples",
+        "full_help",
+    ]
+
+
+def test_help_menu_reply_for_github_repository_topic():
+    reply = CodexCliOrchestrator.build_help_menu_reply("github_repository")
+
+    assert "GitHub 仓库：" in reply
+    assert "12. GitHub仓库列表 [关键词]" in reply
+    assert "19. 推送到GitHub [仓库名]" in reply
+    assert "default_github_owner" in reply
+
+
+def test_help_topic_card_for_github_repository_topic():
+    card = CodexCliOrchestrator.build_help_topic_card(
+        "github_repository",
+        "menu@help@cx_bot@github_repository",
+    )
+
+    assert card["card_type"] == "text_notice"
+    assert card["task_id"] == "menu@help@cx_bot@github_repository"
+    assert "GitHub 仓库" in card["main_title"]["title"]
+    assert "列仓、选仓、建仓、推送到 GitHub" in card["main_title"]["desc"]
+
+
+def test_message_dispatcher_extracts_card_selected_values():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    selected = MessageDispatcher._extract_card_selected_values(
+        {
+            "checkbox": {
+                "question_key": "help_topic",
+                "selected_ids": ["github_repository"],
+            },
+            "submit_button": {"key": "submit_help_menu"},
+        }
+    )
+
+    assert selected == ["github_repository"]
+
+
+def test_help_menu_card_disabled_by_default():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        async def send_reply(self, payload: dict):
+            return None
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        dispatcher = MessageDispatcher(
+            DummyWs(),
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+
+        assert dispatcher._supports_help_menu_card() is False
+
+
+def test_message_dispatcher_help_menu_click_updates_template_card():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+
+        asyncio.run(
+            dispatcher._handle_menu_card_event(
+                "req_help_menu",
+                {
+                    "event": {
+                        "task_id": "menu@help@cx_bot",
+                        "response_code": "response_help_123",
+                        "checkbox": {
+                            "question_key": "help_topic",
+                            "selected_ids": ["github_repository"],
+                        },
+                        "submit_button": {"key": "submit_help_menu"},
+                    },
+                },
+                "alice",
+            )
+        )
+
+        assert len(ws.payloads) == 1
+        payload = ws.payloads[0]
+        assert payload["cmd"] == "aibot_respond_update_msg"
+        assert payload["body"]["response_code"] == "response_help_123"
+        assert payload["body"]["template_card"]["card_type"] == "text_notice"
+        assert "GitHub 仓库" in payload["body"]["template_card"]["main_title"]["title"]
 
 
 def test_workspace_copy_ignores_codex_directory():
@@ -217,12 +363,20 @@ def test_project_help_mentions_default_project_flow():
     assert "设置Git身份 <name> <email>" in help_text
     assert "推送到GitHub [仓库名]" in help_text
     assert "30. 部署帮助" in help_text
+    assert "31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]" in help_text
+    assert "32. 一键发布Worker <仓库名> <Worker名称> [入口文件]" in help_text
+    assert "33. 发布流水线状态" in help_text
+    assert "34. Cloudflare项目状态" in help_text
     assert "准备GitHub仓库 <Git地址>" in help_text
     assert "发布到新仓库 <新Git地址>" in help_text
     assert "帮助" in help_text
     assert help_text.index("27. 启用Worker部署") < help_text.index("28. 使用个人工作区")
     assert help_text.index("28. 使用个人工作区") < help_text.index("29. 使用共享工作区")
     assert help_text.index("29. 使用共享工作区") < help_text.index("30. 部署帮助")
+    assert help_text.index("30. 部署帮助") < help_text.index("31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]")
+    assert help_text.index("31. 一键发布Pages <仓库名> <Pages项目名> [构建目录]") < help_text.index("32. 一键发布Worker <仓库名> <Worker名称> [入口文件]")
+    assert help_text.index("32. 一键发布Worker <仓库名> <Worker名称> [入口文件]") < help_text.index("33. 发布流水线状态")
+    assert help_text.index("33. 发布流水线状态") < help_text.index("34. Cloudflare项目状态")
 
 
 def test_parse_deployment_commands():
@@ -266,6 +420,197 @@ def test_parse_deployment_commands():
         assert request["action"] == "enable_worker"
         assert request["worker_name"] == "hello-worker"
         assert request["entry_file"] == "src/index.ts"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "一键发布Pages hello-pages hello-pages dist"
+        )
+        assert usage is None
+        assert request["action"] == "publish_pages"
+        assert request["repository_name"] == "hello-pages"
+        assert request["pages_project_name"] == "hello-pages"
+        assert request["build_dir"] == "dist"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "一键发布Worker hello-worker hello-worker src/index.ts"
+        )
+        assert usage is None
+        assert request["action"] == "publish_worker"
+        assert request["repository_name"] == "hello-worker"
+        assert request["worker_name"] == "hello-worker"
+        assert request["entry_file"] == "src/index.ts"
+
+
+def test_orchestrator_reports_latest_pipeline_status():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            await orchestrator.handle_control_command(
+                "alice",
+                "6 hello-pages",
+                session_key="alice",
+            )
+            runtime_context, _ = orchestrator._ensure_single_runtime_context("alice", "alice")
+            workspace = Path(runtime_context["working_dir"])
+            await orchestrator.handle_control_command(
+                "alice",
+                "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                session_key="alice",
+            )
+            await orchestrator.handle_control_command(
+                "alice",
+                "23 git@github.com:kangaroo117/hello-pages.git",
+                session_key="alice",
+            )
+            await orchestrator.handle_control_command(
+                "alice",
+                "26 hello-pages dist",
+                session_key="alice",
+            )
+            return await orchestrator.handle_control_command(
+                "alice",
+                "33",
+                session_key="alice",
+            )
+
+        orchestrator.github_repository_manager.get_latest_workflow_run = lambda owner, repo, workflow_id="": GitHubWorkflowRunInfo(
+            id=123,
+            name="Deploy Cloudflare Pages",
+            workflow_name="Deploy Cloudflare Pages",
+            display_title="ci: enable Cloudflare Pages deploy",
+            status="completed",
+            conclusion="success",
+            html_url="https://github.com/kangaroo117/hello-pages/actions/runs/123",
+            event="push",
+            head_branch="main",
+            head_sha="abcdef1234567890",
+            run_number=7,
+            created_at="2026-03-20T10:00:00Z",
+            updated_at="2026-03-20T10:01:00Z",
+        )
+
+        reply = asyncio.run(run_flow())
+
+        assert "项目：hello-pages" in reply
+        assert "工作流：deploy-cloudflare-pages.yml" in reply
+        assert "最近运行：#7" in reply
+        assert "状态：completed" in reply
+        assert "结论：success" in reply
+
+
+def test_orchestrator_reports_cloudflare_pages_project_status():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            env_vars={
+                "CLOUDFLARE_API_TOKEN": "token",
+                "CLOUDFLARE_ACCOUNT_ID": "account-id",
+            },
+        )
+
+        async def run_flow():
+            await orchestrator.handle_control_command(
+                "alice",
+                "6 hello-pages",
+                session_key="alice",
+            )
+            await orchestrator.handle_control_command(
+                "alice",
+                "26 hello-pages dist",
+                session_key="alice",
+            )
+            return await orchestrator.handle_control_command(
+                "alice",
+                "34",
+                session_key="alice",
+            )
+
+        orchestrator.cloudflare_pages_manager.get_project = lambda project_name: CloudflarePagesProjectInfo(
+            name=project_name,
+            subdomain=f"{project_name}.pages.dev",
+            production_branch="main",
+            created=False,
+        )
+        orchestrator.cloudflare_pages_manager.get_latest_deployment = (
+            lambda project_name: CloudflarePagesDeploymentInfo(
+                deployment_id="dep_pages_123",
+                environment="production",
+                url=f"https://{project_name}.pages.dev",
+                stage_name="deploy",
+                stage_status="success",
+                created_on="2026-03-20T10:00:00Z",
+                modified_on="2026-03-20T10:01:00Z",
+            )
+        )
+
+        reply = asyncio.run(run_flow())
+
+        assert "Cloudflare 类型：Pages" in reply
+        assert "Pages 项目：hello-pages" in reply
+        assert "Pages 域名：https://hello-pages.pages.dev" in reply
+        assert "最近部署ID：dep_pages_123" in reply
+        assert "阶段：deploy / success" in reply
+
+
+def test_orchestrator_reports_cloudflare_worker_project_status():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+            env_vars={
+                "CLOUDFLARE_API_TOKEN": "token",
+                "CLOUDFLARE_ACCOUNT_ID": "account-id",
+            },
+        )
+
+        async def run_flow():
+            await orchestrator.handle_control_command(
+                "alice",
+                "6 hello-worker",
+                session_key="alice",
+            )
+            await orchestrator.handle_control_command(
+                "alice",
+                "27 hello-worker src/index.ts",
+                session_key="alice",
+            )
+            return await orchestrator.handle_control_command(
+                "alice",
+                "34",
+                session_key="alice",
+            )
+
+        orchestrator.cloudflare_pages_manager.get_worker_status = lambda worker_name: CloudflareWorkerStatusInfo(
+            name=worker_name,
+            exists=True,
+            workers_dev_enabled=True,
+            previews_enabled=True,
+            account_subdomain="kangaroo117",
+            workers_dev_url=f"https://{worker_name}.kangaroo117.workers.dev",
+            latest_deployment=CloudflareWorkerDeploymentInfo(
+                deployment_id="dep_worker_456",
+                created_on="2026-03-20T11:00:00Z",
+                source="github",
+            ),
+        )
+
+        reply = asyncio.run(run_flow())
+
+        assert "Cloudflare 类型：Worker" in reply
+        assert "Worker 名称：hello-worker" in reply
+        assert "Workers.dev：已启用" in reply
+        assert "Workers.dev 地址：https://hello-worker.kangaroo117.workers.dev" in reply
+        assert "最近部署ID：dep_worker_456" in reply
 
 
 def test_parse_github_repository_commands():
@@ -1347,6 +1692,12 @@ def test_scaffold_cloudflare_pages_writes_workflow():
         assert result.pages_project_name == "hello-pages"
         assert result.build_dir == "build-output"
         assert workflow_path.exists()
+        assert "Detect Node.js project" in content
+        assert "Install dependencies with lockfile" in content
+        assert "Install dependencies without lockfile" in content
+        assert "npm run build --if-present" in content
+        assert "Cloudflare Pages build directory not found: build-output" in content
+        assert "Cloudflare Pages build directory is empty: build-output" in content
         assert "pages deploy build-output --project-name=hello-pages" in content
 
 

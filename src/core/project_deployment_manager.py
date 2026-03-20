@@ -267,6 +267,10 @@ class ProjectDeploymentManager:
             f"--project-name={shlex.quote(normalized_project_name)}"
         )
         workflow_content = workflow_content.replace(
+            "__CF_PAGES_BUILD_DIR__",
+            normalized_build_dir,
+        )
+        workflow_content = workflow_content.replace(
             "command: pages deploy ${{ vars.CF_PAGES_BUILD_DIR }} --project-name=${{ vars.CF_PAGES_PROJECT_NAME }}",
             f"command: {deploy_command}",
         )

@@ -19,17 +19,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect Node.js project
+        id: node_project
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Node.js
+        if: ${{ steps.node_project.outputs.exists == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install dependencies
+      - name: Install dependencies with lockfile
+        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('package-lock.json', 'npm-shrinkwrap.json') != '' }}
         run: npm ci
 
+      - name: Install dependencies without lockfile
+        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('package-lock.json', 'npm-shrinkwrap.json') == '' }}
+        run: npm install
+
       - name: Build
-        run: npm run build
+        if: ${{ steps.node_project.outputs.exists == 'true' }}
+        run: npm run build --if-present
+
+      - name: Verify deploy directory
+        shell: bash
+        run: |
+          if [ ! -d "__CF_PAGES_BUILD_DIR__" ]; then
+            echo "Cloudflare Pages build directory not found: __CF_PAGES_BUILD_DIR__" >&2
+            exit 1
+          fi
+          if [ -z "$(find "__CF_PAGES_BUILD_DIR__" -mindepth 1 -print -quit)" ]; then
+            echo "Cloudflare Pages build directory is empty: __CF_PAGES_BUILD_DIR__" >&2
+            exit 1
+          fi
 
       - name: Deploy
         uses: cloudflare/wrangler-action@v3

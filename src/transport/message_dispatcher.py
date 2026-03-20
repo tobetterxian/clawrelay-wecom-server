@@ -51,6 +51,7 @@ _CODEX_CLI_RECONNECT_HINT = (
     "本地 Codex CLI 与服务端连接暂时中断，系统正在重连，请稍后再试。"
 )
 _CODEX_CLI_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
+_HELP_MENU_TRIGGER_RE = re.compile(r"^\s*1[.、:：)]?\s*$")
 
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
@@ -150,6 +151,55 @@ class MessageDispatcher:
                 )
 
         return {"on_interaction_request": on_interaction_request}
+
+    @staticmethod
+    def _is_truthy_config(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return False
+
+    def _supports_help_menu_card(self) -> bool:
+        provider_config = self.config.provider_config or {}
+        return (
+            self.config.bot_type == "codex_cli"
+            and self._is_truthy_config(provider_config.get("help_menu_card_enabled"))
+            and callable(getattr(self.orchestrator, "build_help_menu_card", None))
+            and callable(getattr(self.orchestrator, "build_help_menu_reply", None))
+        )
+
+    @staticmethod
+    def _is_help_menu_trigger(content: str) -> bool:
+        normalized = str(content or "").strip().lower()
+        if normalized in {
+            "帮助",
+            "help",
+            "?",
+            "？",
+            "菜单",
+            "项目帮助",
+            "项目命令",
+            "工作区帮助",
+            "怎么用",
+        }:
+            return True
+        return _HELP_MENU_TRIGGER_RE.match(str(content or "").strip()) is not None
+
+    async def _reply_help_menu_card(self, req_id: str) -> bool:
+        if not self._supports_help_menu_card():
+            return False
+        template_card = self.orchestrator.build_help_menu_card(
+            task_id=f"menu@help@{self.bot_key}"
+        )
+        await self._reply_template_card(
+            req_id,
+            template_card,
+            plain_card=True,
+        )
+        return True
 
     def _is_orchestrator_control_command(self, content: str) -> bool:
         checker = getattr(self.orchestrator, "is_control_command", None)
@@ -310,6 +360,13 @@ class MessageDispatcher:
                 if ack:
                     await self._reply_text(req_id, ack, finish=True)
                     return
+
+        if (
+            not self.orchestrator.has_pending_interaction(runtime_session_key)
+            and self._is_help_menu_trigger(content)
+            and await self._reply_help_menu_card(req_id)
+        ):
+            return
 
         control_reply = await self.orchestrator.handle_control_command(
             user_id=user_id,
@@ -576,6 +633,18 @@ class MessageDispatcher:
             logger.info("[Dispatcher:%s] 处理AskUserQuestion卡片点击: task_id=%s", self.bot_key, task_id)
             return
 
+        if task_id.startswith("menu@"):
+            logger.info(
+                "[Dispatcher:%s] 收到帮助菜单卡片事件: task_id=%s, chatid=%s, response_code=%s, event=%s",
+                self.bot_key,
+                task_id,
+                body.get("chatid") or event.get("chatid") or body.get("chat", {}).get("chatid", ""),
+                event.get("response_code") or body.get("response_code") or "",
+                event,
+            )
+            await self._handle_menu_card_event(req_id, body, user_id)
+            return
+
         if task_id.startswith("codex@"):
             has_pending = self.orchestrator.has_pending_interaction(runtime_session_key)
             logger.info(
@@ -606,6 +675,45 @@ class MessageDispatcher:
             return
 
         logger.info("[Dispatcher:%s] 未知卡片事件: task_id=%s", self.bot_key, task_id)
+
+    async def _handle_menu_card_event(self, req_id: str, body: dict, user_id: str):
+        event = body.get("event", {}) or {}
+        if not self._supports_help_menu_card():
+            await self._reply_text(req_id, "当前机器人暂不支持帮助菜单卡片。", finish=True)
+            return
+
+        extractor = getattr(self.orchestrator, "_extract_card_selected_values", None)
+        if callable(extractor):
+            selected_values = extractor(event)
+        else:
+            selected_values = self._extract_card_selected_values(event)
+
+        if not selected_values:
+            await self._reply_text(req_id, "未识别到帮助菜单选择，请重新发送：帮助", finish=True)
+            return
+
+        topic_id = selected_values[0]
+        response_code = self._extract_template_card_response_code(body)
+        logger.info(
+            "[Dispatcher:%s] 处理帮助菜单卡片点击: topic=%s, response_code=%s, selected_values=%s, event=%s",
+            self.bot_key,
+            topic_id,
+            response_code,
+            selected_values,
+            event,
+        )
+
+        template_card = self.orchestrator.build_help_topic_card(
+            topic_id,
+            task_id=f"menu@help@{self.bot_key}@{topic_id}",
+        )
+
+        if response_code:
+            await self._reply_update_template_card(req_id, response_code, template_card)
+            return
+
+        reply_text = self.orchestrator.build_help_menu_reply(topic_id)
+        await self._reply_text(req_id, reply_text, finish=True)
 
     # ---- 流式推送 ----
 
@@ -718,27 +826,67 @@ class MessageDispatcher:
         stream_id = uuid.uuid4().hex[:12]
         await self._reply_stream(req_id, stream_id, content, finish)
 
-    async def _reply_template_card(self, req_id: str, template_card: dict):
+    async def _reply_template_card(
+        self,
+        req_id: str,
+        template_card: dict,
+        stream_content: str = "Codex 需要你的确认，请点击下方卡片。",
+        plain_card: bool = False,
+    ):
         """回复模板卡片消息
 
         企业微信 WebSocket 机器人对纯 template_card 兼容性不稳定，
         这里统一改为 stream_with_template_card，提升实际展示成功率。
         """
         stream_id = uuid.uuid4().hex[:12]
+        body = {
+            "msgtype": "stream_with_template_card",
+            "stream": {
+                "id": stream_id,
+                "finish": True,
+                "content": stream_content,
+            },
+            "template_card": template_card,
+        }
+        if plain_card:
+            body = {
+                "msgtype": "template_card",
+                "template_card": template_card,
+            }
         payload = {
             "cmd": "aibot_respond_msg",
             "headers": {"req_id": req_id},
+            "body": body,
+        }
+        await self.ws.send_reply(payload)
+
+    async def _reply_update_template_card(self, req_id: str, response_code: str, template_card: dict):
+        payload = {
+            "cmd": "aibot_respond_update_msg",
+            "headers": {"req_id": req_id},
             "body": {
-                "msgtype": "stream_with_template_card",
-                "stream": {
-                    "id": stream_id,
-                    "finish": True,
-                    "content": "Codex 需要你的确认，请点击下方卡片。",
-                },
+                "response_code": response_code,
                 "template_card": template_card,
             },
         }
         await self.ws.send_reply(payload)
+
+    @staticmethod
+    def _extract_template_card_response_code(body: dict) -> str:
+        event = body.get("event", {}) or {}
+        candidates = [
+            event.get("response_code"),
+            body.get("response_code"),
+            event.get("template_card", {}).get("response_code"),
+            event.get("button_selection", {}).get("response_code"),
+            event.get("checkbox", {}).get("response_code"),
+            event.get("multiple_select", {}).get("response_code"),
+            event.get("submit_button", {}).get("response_code"),
+        ]
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     async def _reply_stream(self, req_id: str, stream_id: str, content: str, finish: bool):
         """通过WebSocket发送流式消息回复"""
@@ -764,3 +912,63 @@ class MessageDispatcher:
         expired = [k for k, v in self._processed_msgids.items() if now - v > 300]
         for k in expired:
             del self._processed_msgids[k]
+
+    @staticmethod
+    def _extract_card_selected_values(event: dict) -> list[str]:
+        candidates = [
+            event.get("selected_items"),
+            event.get("selected_item"),
+            event.get("option_ids"),
+            event.get("option_id"),
+            event.get("selected_ids"),
+            event.get("selected_id"),
+            event.get("value"),
+            event.get("values"),
+            event.get("event_data"),
+            event.get("checkbox"),
+            event.get("button_selection"),
+            event.get("multiple_select"),
+            event.get("select_list"),
+            event.get("submit_button"),
+        ]
+
+        for candidate in candidates:
+            values = MessageDispatcher._extract_selected_values(candidate)
+            if values:
+                return values
+        return []
+
+    @staticmethod
+    def _extract_selected_values(selected_items) -> list[str]:
+        values: list[str] = []
+
+        def walk(value):
+            if value is None:
+                return
+            if isinstance(value, str):
+                if value:
+                    values.append(value)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if isinstance(value, dict):
+                for key in ("id", "key", "value", "option_id", "selected_id"):
+                    if key in value and isinstance(value[key], str) and value[key]:
+                        values.append(value[key])
+                for key in ("selected_ids", "option_ids", "values"):
+                    if key in value:
+                        walk(value[key])
+                for nested_key, nested in value.items():
+                    if nested_key in {"question_key", "task_id", "event_key", "submit_button_key"}:
+                        continue
+                    if isinstance(nested, (list, dict)):
+                        walk(nested)
+
+        walk(selected_items)
+        deduped: list[str] = []
+        for value in values:
+            if value not in deduped:
+                deduped.append(value)
+        return deduped

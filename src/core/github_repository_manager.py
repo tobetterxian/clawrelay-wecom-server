@@ -42,6 +42,23 @@ class GitHubRepositoryInfo:
         return self.ssh_url or self.clone_url
 
 
+@dataclass
+class GitHubWorkflowRunInfo:
+    id: int
+    name: str
+    workflow_name: str
+    display_title: str
+    status: str
+    conclusion: str
+    html_url: str
+    event: str
+    head_branch: str
+    head_sha: str
+    run_number: int
+    created_at: str
+    updated_at: str
+
+
 class GitHubRepositoryManager:
     def __init__(self, env_vars: Optional[Dict[str, str]] = None, gh_executable: str = "gh"):
         self.env_vars = dict(env_vars or {})
@@ -154,6 +171,37 @@ class GitHubRepositoryManager:
             raise RuntimeError("创建 GitHub 组织仓库成功，但返回数据无法识别")
         return repository
 
+    def get_latest_workflow_run(
+        self,
+        owner: str,
+        repo: str,
+        workflow_id: str = "",
+    ) -> Optional[GitHubWorkflowRunInfo]:
+        normalized_owner = str(owner or "").strip()
+        normalized_repo = str(repo or "").strip()
+        normalized_workflow_id = str(workflow_id or "").strip()
+        if not normalized_owner:
+            raise ValueError("GitHub owner 不能为空")
+        if not normalized_repo:
+            raise ValueError("GitHub repo 不能为空")
+
+        if normalized_workflow_id:
+            endpoint = f"/repos/{normalized_owner}/{normalized_repo}/actions/workflows/{normalized_workflow_id}/runs"
+        else:
+            endpoint = f"/repos/{normalized_owner}/{normalized_repo}/actions/runs"
+
+        data = self._request_json(
+            endpoint=endpoint,
+            method="GET",
+            query_params={"per_page": "1"},
+        )
+        if not isinstance(data, dict):
+            raise RuntimeError("GitHub Actions 返回格式异常")
+        runs = data.get("workflow_runs") or []
+        if not isinstance(runs, list) or not runs:
+            return None
+        return self._normalize_workflow_run(runs[0])
+
     def _filter_and_normalize_repositories(
         self,
         repositories: List[dict],
@@ -202,6 +250,39 @@ class GitHubRepositoryManager:
             clone_url=str(payload.get("clone_url") or "").strip(),
             ssh_url=str(payload.get("ssh_url") or "").strip(),
             html_url=str(payload.get("html_url") or "").strip(),
+        )
+
+    def _normalize_workflow_run(self, payload: dict) -> Optional[GitHubWorkflowRunInfo]:
+        if not isinstance(payload, dict):
+            return None
+        run_id = payload.get("id")
+        if run_id in (None, ""):
+            return None
+        try:
+            normalized_id = int(run_id)
+        except (TypeError, ValueError):
+            return None
+
+        run_number = payload.get("run_number")
+        try:
+            normalized_run_number = int(run_number) if run_number not in (None, "") else 0
+        except (TypeError, ValueError):
+            normalized_run_number = 0
+
+        return GitHubWorkflowRunInfo(
+            id=normalized_id,
+            name=str(payload.get("name") or "").strip(),
+            workflow_name=str(payload.get("name") or "").strip(),
+            display_title=str(payload.get("display_title") or "").strip(),
+            status=str(payload.get("status") or "").strip(),
+            conclusion=str(payload.get("conclusion") or "").strip(),
+            html_url=str(payload.get("html_url") or "").strip(),
+            event=str(payload.get("event") or "").strip(),
+            head_branch=str(payload.get("head_branch") or "").strip(),
+            head_sha=str(payload.get("head_sha") or "").strip(),
+            run_number=normalized_run_number,
+            created_at=str(payload.get("created_at") or "").strip(),
+            updated_at=str(payload.get("updated_at") or "").strip(),
         )
 
     def _request_repositories(self, endpoint: str, query_params: Dict[str, str]) -> List[dict]:

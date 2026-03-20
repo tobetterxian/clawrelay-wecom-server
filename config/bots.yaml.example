@@ -112,12 +112,17 @@ bots:
   #   system_prompt: "你是一个擅长本地代码修改与排障的 AI 助手。"
   #   env_vars:
   #     OPENAI_API_KEY: "${OPENAI_API_KEY}"
+  #     GITHUB_TOKEN: "${GITHUB_TOKEN}"  # 一键发布到 GitHub / Cloudflare 时推荐提供
+  #     CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN}"  # 一键发布 Pages 时推荐提供
+  #     CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID}"  # 一键发布 Pages 时推荐提供
   #   provider_config:
   #     codex_path: "codex"  # 容器内或 PATH 已配置时推荐直接使用命令名
   #     sandbox_mode: "workspace-write"   # 可选: read-only | workspace-write
   #     skip_git_repo_check: false
   #     approval_policy: "on-request"      # 可选: untrusted | on-request | on-failure | never
   #     dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
+  #     enable_one_click_deploy: true      # 可选：启用企业微信内一键发布流程
+  #     help_menu_card_enabled: false      # 默认关闭；企业微信未正确回调模板卡片事件时，帮助会自动退回文字菜单
   #     workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"  # 可选，默认 <working_dir>/.codex_data
   #     codex_home: "${CODEX_HOME_BASE:-/data/codex-home}/codex_cli_bot"  # 可选，作为 Codex 运行 HOME；实际配置会落到其下的 .codex/
   #     default_workspace_init_mode: "empty"  # 可选: empty | git_remote | legacy_copy
