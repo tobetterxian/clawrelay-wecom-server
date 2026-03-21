@@ -124,6 +124,14 @@ class WeChatMiniProgramScaffoldResult:
     robot: int = 1
 
 
+@dataclass
+class WeChatMiniProgramAuditScaffoldResult:
+    workspace_path: str
+    deployment_type: str
+    config_path: str
+    files: List[FileWriteResult] = field(default_factory=list)
+
+
 class ProjectDeploymentManager:
     def __init__(self, repo_root: str = ""):
         self.repo_root = (
@@ -382,6 +390,39 @@ class ProjectDeploymentManager:
             robot=normalized_robot,
         )
 
+    def scaffold_wechat_miniprogram_audit_config(
+        self,
+        workspace_path: str,
+        config_path: str = ".github/wechat-miniprogram-audit.json",
+    ) -> WeChatMiniProgramAuditScaffoldResult:
+        root = self._resolve_workspace(workspace_path)
+        normalized_config_path = self._normalize_repo_relative_path(
+            config_path or ".github/wechat-miniprogram-audit.json"
+        )
+        target_path = root / normalized_config_path
+        config_content = """{
+  "item_list": [
+    {
+      "address": "pages/index/index",
+      "tag": "工具",
+      "title": "首页",
+      "first_class": "工具",
+      "second_class": "信息查询",
+      "first_id": 0,
+      "second_id": 0
+    }
+  ],
+  "version_desc": "请填写本次提审说明"
+}
+"""
+        config_result = self._write_text(root, target_path, config_content)
+        return WeChatMiniProgramAuditScaffoldResult(
+            workspace_path=str(root),
+            deployment_type="wechat_miniprogram",
+            config_path=normalized_config_path,
+            files=[config_result],
+        )
+
     def get_git_origin(self, workspace_path: str | Path) -> str:
         return self.get_git_remote(workspace_path, "origin")
 
@@ -571,6 +612,15 @@ class ProjectDeploymentManager:
                 f" / path={deployment_config.get('project_path', '.')}"
                 f" / robot={deployment_config.get('robot', '-')}"
             )
+            audit_config_path = str(deployment_config.get("audit_config_path") or "").strip()
+            if audit_config_path:
+                lines.append(f"audit_config={audit_config_path}")
+            latest_audit_id = str(deployment_config.get("latest_audit_id") or "").strip()
+            if latest_audit_id:
+                lines.append(f"latest_audit_id={latest_audit_id}")
+            latest_audit_status = str(deployment_config.get("latest_audit_status") or "").strip()
+            if latest_audit_status:
+                lines.append(f"audit_status={latest_audit_status}")
         else:
             lines.append(deployment_type)
 

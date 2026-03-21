@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import json
 import logging
 import mimetypes
 import os
@@ -37,6 +38,7 @@ from .project_deployment_manager import GitIdentityResult, ProjectDeploymentMana
 from .project_registry import ProjectRegistry
 from .session_binding_manager import SessionBindingManager
 from .workspace_manager import WorkspaceManager
+from .wechat_miniprogram_manager import WeChatMiniProgramManager
 from .workspace_init_modes import (
     DEFAULT_WORKSPACE_INIT_MODE,
     WORKSPACE_INIT_EMPTY,
@@ -112,6 +114,11 @@ CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
     {"id": "34", "command": "Cloudflare项目状态", "display": "Cloudflare项目状态", "accepts_args": False},
     {"id": "35", "command": "启用小程序上传", "display": "启用小程序上传 [AppID] [项目路径]", "accepts_args": True},
     {"id": "36", "command": "一键上传小程序", "display": "一键上传小程序 [仓库名] [AppID] [项目路径]", "accepts_args": True},
+    {"id": "37", "command": "启用小程序提审", "display": "启用小程序提审 [配置文件]", "accepts_args": True},
+    {"id": "38", "command": "提交小程序审核", "display": "提交小程序审核 [配置文件]", "accepts_args": True},
+    {"id": "39", "command": "小程序审核状态", "display": "小程序审核状态 [审核单号]", "accepts_args": True},
+    {"id": "40", "command": "发布小程序", "display": "发布小程序", "accepts_args": False},
+    {"id": "41", "command": "撤回小程序审核", "display": "撤回小程序审核", "accepts_args": False},
 )
 CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in CONTROL_COMMAND_SHORTCUTS}
 CONTROL_COMMAND_SHORTCUT_EXACT_RE = re.compile(r"^\s*(\d{1,2})[.、:：)]?\s*$")
@@ -141,6 +148,11 @@ DEPLOYMENT_COMMAND_ORDER: Tuple[str, ...] = (
     "34",
     "35",
     "36",
+    "37",
+    "38",
+    "39",
+    "40",
+    "41",
 )
 HELP_MENU_TOPIC_ORDER: Tuple[str, ...] = (
     "quick_examples",
@@ -154,7 +166,7 @@ HELP_MENU_TOPICS: Dict[str, dict] = {
     "quick_examples": {
         "title": "新手上手",
         "summary": "小白优先看这里，按 5 步走完",
-        "command_ids": ("6", "11", "19", "31", "32", "35", "36", "33", "34"),
+        "command_ids": ("6", "11", "19", "31", "32", "35", "36", "38", "39", "40", "33", "34"),
         "aliases": ("1", "新手", "入门", "快速开始", "开始使用", "常用示例"),
         "extra_lines": (
             "最短使用路径：",
@@ -164,6 +176,7 @@ HELP_MENU_TOPICS: Dict[str, dict] = {
             "- 第 4 步：`19` 推送到 GitHub；仓库名留空时默认使用当前项目名",
             "- 第 5 步：`31` 发布网站，或 `32` 发布 Worker；留空参数时默认也使用当前项目名",
             "- 如果是微信小程序：`35` 先启用上传，或直接用 `36` 一键上传体验版",
+            "- 想正式上线小程序：先用 `37` 准备提审资料，再用 `38` 提交审核，最后 `40` 发布",
             "- 常查状态：`33` 看 GitHub Actions，`34` 看 Cloudflare 状态",
         ),
     },
@@ -308,6 +321,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         self.github_repository_manager = GitHubRepositoryManager(env_vars=self.runtime_env_vars)
         self.github_actions_secret_manager = GitHubActionsSecretManager(env_vars=self.runtime_env_vars)
         self.cloudflare_pages_manager = CloudflarePagesManager(env_vars=self.runtime_env_vars)
+        self.wechat_miniprogram_manager = WeChatMiniProgramManager(env_vars=self.runtime_env_vars)
         self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
@@ -553,6 +567,39 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     repository_name=deployment_request.get("repository_name", ""),
                     appid=deployment_request.get("appid", ""),
                     project_path=deployment_request.get("project_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "enable_wechat_miniprogram_audit":
+                return self._handle_enable_wechat_miniprogram_audit_command(
+                    user_id=user_id,
+                    config_path=deployment_request.get("config_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "submit_wechat_miniprogram_audit":
+                return self._handle_submit_wechat_miniprogram_audit_command(
+                    user_id=user_id,
+                    config_path=deployment_request.get("config_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "query_wechat_miniprogram_audit_status":
+                return self._handle_query_wechat_miniprogram_audit_status_command(
+                    user_id=user_id,
+                    audit_id=deployment_request.get("audit_id", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "release_wechat_miniprogram":
+                return self._handle_release_wechat_miniprogram_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "undo_wechat_miniprogram_audit":
+                return self._handle_undo_wechat_miniprogram_audit_command(
+                    user_id=user_id,
                     session_key=session_key,
                     log_context=log_context,
                 )
@@ -2057,6 +2104,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
         else:
             if str(project.get("deployment_type") or "").strip() in {"cloudflare_pages", "cloudflare_worker"}:
                 lines.append("可发送：34 Cloudflare项目状态")
+            if str(project.get("deployment_type") or "").strip() == "wechat_miniprogram":
+                deployment_config = project.get("deployment_config") or {}
+                if not str(deployment_config.get("audit_config_path") or "").strip():
+                    lines.append("可发送：37 启用小程序提审 [配置文件]")
+                else:
+                    lines.append("可发送：38 提交小程序审核")
+                    lines.append("可发送：39 小程序审核状态")
+                    lines.append("可发送：40 发布小程序")
+                    lines.append("可发送：41 撤回小程序审核")
             if self._resolve_project_workflow_id(project):
                 lines.append("可发送：33 发布流水线状态")
         return "\n".join(lines)
@@ -3111,6 +3167,313 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.append("说明：GitHub Actions 触发后会继续上传微信小程序体验版")
         return "\n".join(lines)
 
+    def _handle_enable_wechat_miniprogram_audit_command(
+        self,
+        user_id: str,
+        config_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        resolved_appid = self._resolve_wechat_miniprogram_appid(project, "")
+        if not resolved_appid:
+            return (
+                "当前项目还没有可用的微信小程序 AppID。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                "请先发送：35 <AppID> [项目路径]\n"
+                "或在运行环境中配置：WECHAT_MINIPROGRAM_APPID"
+            )
+
+        resolved_config_path = self._resolve_wechat_miniprogram_audit_config_path(project, config_path)
+        result = self.project_deployment_manager.scaffold_wechat_miniprogram_audit_config(
+            workspace_path=workspace_path,
+            config_path=resolved_config_path,
+        )
+
+        current_deployment_config = dict((project or {}).get("deployment_config") or {})
+        current_deployment_config.update(
+            {
+                "appid": resolved_appid,
+                "audit_config_path": result.config_path,
+            }
+        )
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                deployment_type="wechat_miniprogram",
+                deployment_config=current_deployment_config,
+            )
+
+        file_summaries = "、".join(
+            f"{item.relative_path}（{self._file_action_label(item.action)}）"
+            for item in result.files
+        )
+        return (
+            "已为当前项目写入小程序提审配置模板\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"AppID：{resolved_appid}\n"
+            f"配置文件：{result.config_path}\n"
+            f"写入文件：{file_summaries}\n"
+            "提示：请先把分类、页面地址、标题、提审说明改成真实内容，再发送：38"
+        )
+
+    def _handle_submit_wechat_miniprogram_audit_command(
+        self,
+        user_id: str,
+        config_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        resolved_appid = self._resolve_wechat_miniprogram_appid(project, "")
+        if not resolved_appid:
+            return (
+                "提交小程序审核失败：当前项目还没有可用的微信小程序 AppID。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                "请先发送：35 <AppID> [项目路径]"
+            )
+        try:
+            appsecret = self._resolve_wechat_miniprogram_app_secret()
+        except Exception as exc:
+            return (
+                "提交小程序审核失败：未检测到微信小程序 AppSecret。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                "需要配置：WECHAT_MINIPROGRAM_APPSECRET\n"
+                f"错误：{exc}"
+            )
+
+        resolved_config_path = self._resolve_wechat_miniprogram_audit_config_path(project, config_path)
+        try:
+            payload = self._load_wechat_miniprogram_audit_payload(workspace_path, resolved_config_path)
+        except Exception as exc:
+            return (
+                "提交小程序审核失败：读取提审配置文件失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"配置文件：{resolved_config_path}\n"
+                f"错误：{exc}\n"
+                "可先发送：37 [配置文件]"
+            )
+
+        try:
+            result = self.wechat_miniprogram_manager.submit_audit(
+                appid=resolved_appid,
+                appsecret=appsecret,
+                payload=payload,
+            )
+        except Exception as exc:
+            return (
+                "提交小程序审核失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"AppID：{resolved_appid}\n"
+                f"配置文件：{resolved_config_path}\n"
+                f"错误：{exc}"
+            )
+
+        audit_id = str(result.get("auditid") or "").strip()
+        current_deployment_config = dict((project or {}).get("deployment_config") or {})
+        current_deployment_config.update(
+            {
+                "appid": resolved_appid,
+                "audit_config_path": resolved_config_path,
+                "latest_audit_id": audit_id,
+                "latest_audit_status": "submitted",
+            }
+        )
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                deployment_type="wechat_miniprogram",
+                deployment_config=current_deployment_config,
+            )
+
+        lines = [
+            "已提交微信小程序审核",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"AppID：{resolved_appid}",
+            f"配置文件：{resolved_config_path}",
+        ]
+        if audit_id:
+            lines.append(f"审核单号：{audit_id}")
+        lines.append(f"返回结果：{json.dumps(result, ensure_ascii=False)}")
+        lines.append("下一步：可发送 39 查看审核状态；审核通过后发送 40 正式发布")
+        return "\n".join(lines)
+
+    def _handle_query_wechat_miniprogram_audit_status_command(
+        self,
+        user_id: str,
+        audit_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        resolved_appid = self._resolve_wechat_miniprogram_appid(project, "")
+        if not resolved_appid:
+            return (
+                "查询小程序审核状态失败：当前项目还没有可用的微信小程序 AppID。\n"
+                f"项目：{(project or {}).get('name', '-')}"
+            )
+        try:
+            appsecret = self._resolve_wechat_miniprogram_app_secret()
+            resolved_audit_id = self._resolve_wechat_miniprogram_audit_id(project, audit_id)
+            result = self.wechat_miniprogram_manager.get_audit_status(
+                appid=resolved_appid,
+                appsecret=appsecret,
+                audit_id=resolved_audit_id,
+            )
+        except Exception as exc:
+            return (
+                "查询小程序审核状态失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        status_text = str(result.get("status") or result.get("audit_status") or "").strip()
+        reason_text = str(result.get("reason") or result.get("errmsg") or "").strip()
+        current_deployment_config = dict((project or {}).get("deployment_config") or {})
+        current_deployment_config.update(
+            {
+                "latest_audit_id": str(resolved_audit_id),
+                "latest_audit_status": status_text or "unknown",
+            }
+        )
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                deployment_type="wechat_miniprogram",
+                deployment_config=current_deployment_config,
+            )
+
+        lines = [
+            "微信小程序审核状态",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"AppID：{resolved_appid}",
+            f"审核单号：{resolved_audit_id}",
+            f"状态：{status_text or '-'}",
+        ]
+        if reason_text:
+            lines.append(f"说明：{reason_text}")
+        lines.append(f"返回结果：{json.dumps(result, ensure_ascii=False)}")
+        return "\n".join(lines)
+
+    def _handle_release_wechat_miniprogram_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        resolved_appid = self._resolve_wechat_miniprogram_appid(project, "")
+        if not resolved_appid:
+            return (
+                "发布小程序失败：当前项目还没有可用的微信小程序 AppID。\n"
+                f"项目：{(project or {}).get('name', '-')}"
+            )
+        try:
+            appsecret = self._resolve_wechat_miniprogram_app_secret()
+            result = self.wechat_miniprogram_manager.release(
+                appid=resolved_appid,
+                appsecret=appsecret,
+            )
+        except Exception as exc:
+            return (
+                "发布小程序失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        current_deployment_config = dict((project or {}).get("deployment_config") or {})
+        current_deployment_config["latest_audit_status"] = "released"
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                deployment_type="wechat_miniprogram",
+                deployment_config=current_deployment_config,
+            )
+
+        return (
+            "已触发微信小程序正式发布\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"AppID：{resolved_appid}\n"
+            f"返回结果：{json.dumps(result, ensure_ascii=False)}"
+        )
+
+    def _handle_undo_wechat_miniprogram_audit_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        resolved_appid = self._resolve_wechat_miniprogram_appid(project, "")
+        if not resolved_appid:
+            return (
+                "撤回小程序审核失败：当前项目还没有可用的微信小程序 AppID。\n"
+                f"项目：{(project or {}).get('name', '-')}"
+            )
+        try:
+            appsecret = self._resolve_wechat_miniprogram_app_secret()
+            result = self.wechat_miniprogram_manager.undo_code_audit(
+                appid=resolved_appid,
+                appsecret=appsecret,
+            )
+        except Exception as exc:
+            return (
+                "撤回小程序审核失败。\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        current_deployment_config = dict((project or {}).get("deployment_config") or {})
+        current_deployment_config["latest_audit_status"] = "undone"
+        if project:
+            self.project_registry.update_project(
+                project["project_id"],
+                deployment_type="wechat_miniprogram",
+                deployment_config=current_deployment_config,
+            )
+
+        return (
+            "已撤回微信小程序审核\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"AppID：{resolved_appid}\n"
+            f"返回结果：{json.dumps(result, ensure_ascii=False)}"
+        )
+
     def _read_runtime_secret(self, key: str) -> str:
         value = self.runtime_env_vars.get(key) or os.getenv(key) or ""
         normalized = str(value).strip()
@@ -3683,6 +4046,65 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if detected:
             return detected
         return ""
+
+    def _resolve_wechat_miniprogram_app_secret(self) -> str:
+        return self._read_runtime_secret("WECHAT_MINIPROGRAM_APPSECRET")
+
+    def _resolve_wechat_miniprogram_audit_config_path(
+        self,
+        project: dict,
+        explicit_config_path: str = "",
+    ) -> str:
+        normalized_explicit = str(explicit_config_path or "").strip()
+        if normalized_explicit:
+            return self.project_deployment_manager._normalize_repo_relative_path(
+                normalized_explicit,
+                fallback=".github/wechat-miniprogram-audit.json",
+            )
+
+        deployment_config = (project or {}).get("deployment_config") or {}
+        stored_path = str(deployment_config.get("audit_config_path") or "").strip()
+        if stored_path:
+            return self.project_deployment_manager._normalize_repo_relative_path(
+                stored_path,
+                fallback=".github/wechat-miniprogram-audit.json",
+            )
+        return ".github/wechat-miniprogram-audit.json"
+
+    def _load_wechat_miniprogram_audit_payload(
+        self,
+        workspace_path: str,
+        config_path: str,
+    ) -> dict:
+        normalized_path = self.project_deployment_manager._normalize_repo_relative_path(
+            config_path,
+            fallback=".github/wechat-miniprogram-audit.json",
+        )
+        payload_path = Path(workspace_path).expanduser().resolve() / normalized_path
+        if not payload_path.exists() or not payload_path.is_file():
+            raise RuntimeError(f"未找到小程序提审配置文件：{normalized_path}")
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"小程序提审配置文件不是合法 JSON：{normalized_path} / {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"小程序提审配置文件必须是 JSON 对象：{normalized_path}")
+        if not payload:
+            raise RuntimeError(f"小程序提审配置文件不能为空：{normalized_path}")
+        return payload
+
+    @staticmethod
+    def _resolve_wechat_miniprogram_audit_id(project: dict, explicit_audit_id: str = "") -> int:
+        raw_value = str(explicit_audit_id or "").strip()
+        if not raw_value:
+            deployment_config = (project or {}).get("deployment_config") or {}
+            raw_value = str(deployment_config.get("latest_audit_id") or "").strip()
+        if not raw_value:
+            raise RuntimeError("当前项目还没有可用的审核单号，请先发送：38 提交小程序审核")
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise RuntimeError(f"审核单号无效：{raw_value}") from exc
 
     @staticmethod
     def _normalize_github_repository_name(value: str) -> str:
@@ -4319,6 +4741,50 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "project_path": project_path,
                 }, None
 
+        for prefix in (
+            "提交小程序审核",
+            "提交小程序提审",
+            "提交微信小程序审核",
+            "提交微信小程序提审",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "submit_wechat_miniprogram_audit",
+                    "config_path": " ".join(args).strip(),
+                }, None
+
+        for prefix in (
+            "小程序审核状态",
+            "查询小程序审核状态",
+            "微信小程序审核状态",
+            "查询微信小程序审核状态",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "query_wechat_miniprogram_audit_status",
+                    "audit_id": args[0] if args else "",
+                }, None
+
+        for prefix in (
+            "发布小程序",
+            "正式发布小程序",
+            "发布微信小程序",
+            "正式发布微信小程序",
+        ):
+            if command == prefix or command.startswith(f"{prefix} "):
+                return {"action": "release_wechat_miniprogram"}, None
+
+        for prefix in (
+            "撤回小程序审核",
+            "撤回小程序提审",
+            "撤回微信小程序审核",
+            "撤回微信小程序提审",
+        ):
+            if command == prefix or command.startswith(f"{prefix} "):
+                return {"action": "undo_wechat_miniprogram_audit"}, None
+
         for prefix in ("启用Pages部署", "启用Cloudflare Pages部署"):
             if command.startswith(prefix):
                 args = self._split_command_args(command[len(prefix) :].strip())
@@ -4361,6 +4827,19 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "action": "enable_wechat_miniprogram",
                     "appid": appid,
                     "project_path": project_path,
+                }, None
+
+        for prefix in (
+            "启用小程序提审",
+            "启用微信小程序提审",
+            "启用小程序审核",
+            "启用微信小程序审核",
+        ):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "enable_wechat_miniprogram_audit",
+                    "config_path": " ".join(args).strip(),
                 }, None
 
         return None, None
@@ -4419,6 +4898,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "- `31`：一键发布网站；参数留空时默认当前项目名 + `dist`",
                 "- `32`：一键发布 Worker；参数留空时默认当前项目名 + `src/index.ts`",
                 "- `35` / `36`：启用或一键上传微信小程序体验版；可自动补 AppID / 项目路径",
+                "- `37` ~ `41`：小程序提审、查审核、正式发布、撤回审核",
                 "- `33` / `34`：查看发布与 Cloudflare 状态",
             ]
         )
@@ -4604,8 +5084,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             [
                 "",
                 "发布部署分三层：",
-                "- 最常用：`19` 推 GitHub、`31` 发布网站、`32` 发布 Worker、`36` 上传小程序体验版、`33` / `34` 查状态",
-                "- 轻量配置：`26` 只写 Pages 部署脚手架、`27` 只写 Worker 部署脚手架、`35` 只写小程序上传脚手架",
+                "- 最常用：`19` 推 GitHub、`31` 发布网站、`32` 发布 Worker、`36` 上传小程序体验版、`38` 提交小程序审核、`40` 发布小程序",
+                "- 轻量配置：`26` 只写 Pages 部署脚手架、`27` 只写 Worker 部署脚手架、`35` 只写小程序上传脚手架、`37` 只写小程序提审模板",
                 "- 高级操作：`23` 绑定 GitHub 仓库、`24` 发布到新仓库、`25` 同步上游",
                 "",
                 "默认参数：",
@@ -4616,11 +5096,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "- `27 [Worker名称] [入口文件]`：Worker 名称留空时默认当前项目名，入口文件默认 `src/index.ts`",
                 "- `35 [AppID] [项目路径]`：AppID 可沿用已配置值或环境变量，项目路径会自动探测 `project.config.json`",
                 "- `36 [仓库名] [AppID] [项目路径]`：仓库名留空时默认当前项目名；也支持直接 `36 <AppID> [项目路径]`",
+                "- `37 [配置文件]`：默认写入 `.github/wechat-miniprogram-audit.json`",
+                "- `38 [配置文件]`：配置文件留空时沿用项目里已保存的提审模板路径",
+                "- `39 [审核单号]`：审核单号留空时默认用最近一次提交返回的审核单号",
                 "",
                 "常用命令：",
             ]
         )
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("19", "26", "27", "31", "32", "35", "36", "33", "34")))
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("19", "26", "27", "31", "32", "35", "36", "37", "38", "39", "40", "41", "33", "34")))
         lines.extend(
             [
                 "",
@@ -4629,12 +5112,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "- `32`：自动建仓、注入 GitHub Secrets、写入 Worker 工作流与 `wrangler.toml`，并再次推送",
                 "- `35`：只写入微信小程序 GitHub Actions 工作流与上传脚本，不会自动建仓",
                 "- `36`：自动建仓/推送、写入 `WECHAT_MINIPROGRAM_PRIVATE_KEY` Secret、生成上传工作流，再次推送后触发体验版上传",
+                "- `37`：写入小程序提审 JSON 模板，便于后续直接在企业微信里完成提审",
+                "- `38`：机器人直接调用微信小程序 OpenAPI 提交审核，需要配置 `WECHAT_MINIPROGRAM_APPSECRET`",
+                "- `39`：查询指定或最近一次审核单的状态",
+                "- `40` / `41`：分别用于正式发布和撤回审核",
                 "- `33`：查看当前部署工作流最近一次 GitHub Actions 运行状态",
                 "- `34`：直接查询 Cloudflare 侧 Pages / Worker 当前项目与最近部署状态",
-                "- 小程序第一阶段只做“体验版上传”，暂不直接做提审/正式发布",
                 "- 若 bots.yaml 配置了 provider_config.default_github_owner，则企业微信里的 GitHub 列仓/建仓/推送都统一走该账号",
                 "- GitHub 推送凭证建议使用宿主机 SSH；Cloudflare 凭证只放 GitHub Actions Secrets",
-                "- 微信小程序需要在仓库里找到 `project.config.json`，并在运行环境中配置 `WECHAT_MINIPROGRAM_PRIVATE_KEY`",
+                "- 微信小程序体验版上传需要 `WECHAT_MINIPROGRAM_PRIVATE_KEY`；提审/发布阶段还需要 `WECHAT_MINIPROGRAM_APPSECRET`",
                 "- 如需完整命令列表，可发送：`帮助 全部`",
             ]
         )

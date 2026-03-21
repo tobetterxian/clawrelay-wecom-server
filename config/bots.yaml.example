@@ -117,6 +117,7 @@ bots:
   #     CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID}"  # 一键发布 Pages 时推荐提供
   #     WECHAT_MINIPROGRAM_APPID: "${WECHAT_MINIPROGRAM_APPID:-}"  # 可选：默认小程序 AppID，`35/36` 留空时可自动使用
   #     WECHAT_MINIPROGRAM_PRIVATE_KEY: "${WECHAT_MINIPROGRAM_PRIVATE_KEY:-}"  # 可选：`36` 一键上传小程序时写入 GitHub Actions Secret
+  #     WECHAT_MINIPROGRAM_APPSECRET: "${WECHAT_MINIPROGRAM_APPSECRET:-}"  # 可选：`38/39/40/41` 小程序提审/发布阶段需要
   #     WECHAT_MINIPROGRAM_ROBOT: "${WECHAT_MINIPROGRAM_ROBOT:-1}"  # 可选：CI 机器人编号，范围 1~30
   #   provider_config:
   #     codex_path: "codex"  # 容器内或 PATH 已配置时推荐直接使用命令名
