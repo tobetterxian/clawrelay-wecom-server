@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Detect Node.js project
         id: node_project
@@ -31,9 +31,9 @@ jobs:
 
       - name: Setup Node.js
         if: ${{ steps.node_project.outputs.exists == 'true' }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies with lockfile
         if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('package-lock.json', 'npm-shrinkwrap.json') != '' }}

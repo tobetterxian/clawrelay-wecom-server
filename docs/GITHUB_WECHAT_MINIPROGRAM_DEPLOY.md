@@ -164,9 +164,16 @@
 
 - 目标目录里必须有 `project.config.json`
 
-如果你的仓库根目录不是小程序目录，执行时传入项目路径即可，例如：
+项目路径是仓库内相对路径。
+
+- 如果 `project.config.json` 在仓库根目录，可省略项目路径，或显式传 `.`。
+- 如果 `project.config.json` 在子目录或构建产物目录，请传对应相对路径。
+
+例如：
 
 ```text
+36 hello-mini
+36 hello-mini .
 35 wx1234567890ab miniprogram
 36 hello-mini wx1234567890ab dist/mp-weixin
 ```

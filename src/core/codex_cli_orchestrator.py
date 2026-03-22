@@ -77,7 +77,57 @@ DEFAULT_PROJECT_REQUEST_RE = re.compile(
     r"(新建|创建|搭建|做(?:一个|个)?|开发|实现|生成).{0,24}项目",
     re.IGNORECASE,
 )
-CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
+PUBLIC_CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
+    {"id": "1 1", "command": "新建项目", "display": "新建项目 <名称>", "accepts_args": True},
+    {"id": "1 2", "command": "新建仓库项目", "display": "从现有仓库开始 <名称> <Git地址>", "accepts_args": True},
+    {"id": "1 3", "command": "推送到GitHub", "display": "推送到GitHub [仓库名]", "accepts_args": True},
+    {"id": "1 4", "command": "一键发布Pages", "display": "发布网站 [仓库名] [Pages项目名] [构建目录]", "accepts_args": True},
+    {"id": "1 5", "command": "一键上传小程序", "display": "发布小程序体验版 [仓库名] [AppID] [项目路径]", "accepts_args": True},
+    {"id": "2 1", "command": "项目列表", "display": "项目列表", "accepts_args": False},
+    {"id": "2 2", "command": "当前项目", "display": "当前项目", "accepts_args": False},
+    {"id": "2 3", "command": "当前工作区", "display": "当前工作区", "accepts_args": False},
+    {"id": "2 4", "command": "工作区列表", "display": "工作区列表", "accepts_args": False},
+    {"id": "2 5", "command": "新建项目", "display": "新建项目 <名称>", "accepts_args": True},
+    {"id": "2 6", "command": "新建仓库项目", "display": "新建仓库项目 <名称> <Git地址>", "accepts_args": True},
+    {"id": "2 7", "command": "从仓库派生项目", "display": "从仓库派生项目 <名称> <源Git地址>", "accepts_args": True},
+    {"id": "2 8", "command": "进入项目", "display": "进入项目 <名称或ID>", "accepts_args": True},
+    {"id": "2 9", "command": "使用个人工作区", "display": "使用个人工作区", "accepts_args": False},
+    {"id": "2 10", "command": "使用共享工作区", "display": "使用共享工作区", "accepts_args": False},
+    {"id": "3 1", "command": "Git身份状态", "display": "Git身份状态", "accepts_args": False},
+    {"id": "3 2", "command": "设置Git身份", "display": "设置Git身份 [name] [email]", "accepts_args": True},
+    {"id": "3 3", "command": "GitHub仓库列表", "display": "GitHub仓库列表 [关键词]", "accepts_args": True},
+    {"id": "3 4", "command": "当前选中仓库", "display": "当前选中仓库", "accepts_args": False},
+    {"id": "3 5", "command": "选择仓库", "display": "选择仓库 <序号>", "accepts_args": True},
+    {"id": "3 6", "command": "从选中仓库派生项目", "display": "从选中仓库派生项目 <名称>", "accepts_args": True},
+    {"id": "3 7", "command": "创建GitHub仓库", "display": "创建GitHub仓库 <仓库名>", "accepts_args": True},
+    {"id": "3 8", "command": "创建GitHub公开仓库", "display": "创建GitHub公开仓库 <仓库名>", "accepts_args": True},
+    {"id": "3 9", "command": "创建GitHub仓库并发布", "display": "创建GitHub仓库并发布 <仓库名>", "accepts_args": True},
+    {"id": "3 10", "command": "推送到GitHub", "display": "推送到GitHub [仓库名]", "accepts_args": True},
+    {"id": "3 11", "command": "推送到GitHub公开", "display": "推送到GitHub公开 [仓库名]", "accepts_args": True},
+    {"id": "3 12", "command": "准备GitHub仓库", "display": "准备GitHub仓库 <Git地址>", "accepts_args": True},
+    {"id": "3 13", "command": "发布到新仓库", "display": "发布到新仓库 <新Git地址>", "accepts_args": True},
+    {"id": "3 14", "command": "同步上游", "display": "同步上游 [Git地址]", "accepts_args": True},
+    {"id": "4 1", "command": "启用Pages部署", "display": "启用Pages部署 [Pages项目名] [构建目录]", "accepts_args": True},
+    {"id": "4 2", "command": "一键发布Pages", "display": "一键发布Pages [仓库名] [Pages项目名] [构建目录]", "accepts_args": True},
+    {"id": "4 3", "command": "启用Worker部署", "display": "启用Worker部署 [Worker名称] [入口文件]", "accepts_args": True},
+    {"id": "4 4", "command": "一键发布Worker", "display": "一键发布Worker [仓库名] [Worker名称] [入口文件]", "accepts_args": True},
+    {"id": "4 5", "command": "发布流水线状态", "display": "发布流水线状态", "accepts_args": False},
+    {"id": "4 6", "command": "Cloudflare项目状态", "display": "Cloudflare项目状态", "accepts_args": False},
+    {"id": "5 1", "command": "启用小程序上传", "display": "启用小程序上传 [AppID] [项目路径]", "accepts_args": True},
+    {"id": "5 2", "command": "一键上传小程序", "display": "一键上传小程序 [仓库名] [AppID] [项目路径]", "accepts_args": True},
+    {"id": "5 3", "command": "启用小程序提审", "display": "启用小程序提审 [配置文件]", "accepts_args": True},
+    {"id": "5 4", "command": "提交小程序审核", "display": "提交小程序审核 [配置文件]", "accepts_args": True},
+    {"id": "5 5", "command": "小程序审核状态", "display": "小程序审核状态 [审核单号]", "accepts_args": True},
+    {"id": "5 6", "command": "发布小程序", "display": "发布小程序", "accepts_args": False},
+    {"id": "5 7", "command": "撤回小程序审核", "display": "撤回小程序审核", "accepts_args": False},
+    {"id": "6 1", "command": "远程状态", "display": "远程状态", "accepts_args": False},
+    {"id": "6 2", "command": "部署状态", "display": "部署状态", "accepts_args": False},
+    {"id": "6 3", "command": "Git身份状态", "display": "Git身份状态", "accepts_args": False},
+    {"id": "6 4", "command": "发布流水线状态", "display": "发布流水线状态", "accepts_args": False},
+    {"id": "6 5", "command": "Cloudflare项目状态", "display": "Cloudflare项目状态", "accepts_args": False},
+    {"id": "6 6", "command": "小程序审核状态", "display": "小程序审核状态 [审核单号]", "accepts_args": True},
+)
+LEGACY_CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
     {"id": "1", "command": "项目帮助", "display": "项目帮助", "accepts_args": False},
     {"id": "2", "command": "项目列表", "display": "项目列表", "accepts_args": False},
     {"id": "3", "command": "当前项目", "display": "当前项目", "accepts_args": False},
@@ -120,108 +170,131 @@ CONTROL_COMMAND_SHORTCUTS: Tuple[dict, ...] = (
     {"id": "40", "command": "发布小程序", "display": "发布小程序", "accepts_args": False},
     {"id": "41", "command": "撤回小程序审核", "display": "撤回小程序审核", "accepts_args": False},
 )
-CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in CONTROL_COMMAND_SHORTCUTS}
+CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in PUBLIC_CONTROL_COMMAND_SHORTCUTS}
+LEGACY_CONTROL_COMMAND_SHORTCUT_MAP = {item["id"]: item for item in LEGACY_CONTROL_COMMAND_SHORTCUTS}
 CONTROL_COMMAND_SHORTCUT_EXACT_RE = re.compile(r"^\s*(\d{1,2})[.、:：)]?\s*$")
 CONTROL_COMMAND_SHORTCUT_WITH_ARGS_RE = re.compile(r"^\s*(\d{1,2})(?:[.、:：)]|\s)+(.+?)\s*$")
-CONTROL_COMMAND_ORDER: Tuple[str, ...] = tuple(
-    str(index) for index in range(1, len(CONTROL_COMMAND_SHORTCUTS) + 1)
+PUBLIC_CONTROL_COMMAND_SHORTCUT_RE = re.compile(
+    r"^\s*(\d{1,2})(?:[.、:：/\-]|\s)+(\d{1,2})(?:\s+(.+?))?\s*$"
 )
+CONTROL_COMMAND_ORDER: Tuple[str, ...] = tuple(item["id"] for item in PUBLIC_CONTROL_COMMAND_SHORTCUTS)
 DEPLOYMENT_COMMAND_ORDER: Tuple[str, ...] = (
-    "10",
-    "11",
-    "16",
-    "17",
-    "18",
-    "19",
-    "20",
-    "21",
-    "22",
-    "23",
-    "24",
-    "25",
-    "26",
-    "27",
-    "30",
-    "31",
-    "32",
-    "33",
-    "34",
-    "35",
-    "36",
-    "37",
-    "38",
-    "39",
-    "40",
-    "41",
+    "3 1",
+    "3 2",
+    "3 7",
+    "3 8",
+    "3 9",
+    "3 10",
+    "3 11",
+    "6 1",
+    "6 2",
+    "3 12",
+    "3 13",
+    "3 14",
+    "4 1",
+    "4 3",
+    "4 2",
+    "4 4",
+    "4 5",
+    "4 6",
+    "5 1",
+    "5 2",
+    "5 3",
+    "5 4",
+    "5 5",
+    "5 6",
+    "5 7",
 )
 HELP_MENU_TOPIC_ORDER: Tuple[str, ...] = (
-    "quick_examples",
+    "quick_start",
     "project_workspace",
-    "git_identity",
     "github_repository",
-    "deployment",
+    "website_publish",
+    "wechat_miniprogram",
+    "status_troubleshooting",
     "full_help",
 )
 HELP_MENU_TOPICS: Dict[str, dict] = {
-    "quick_examples": {
-        "title": "新手上手",
-        "summary": "小白优先看这里，按 5 步走完",
-        "command_ids": ("6", "11", "19", "31", "32", "35", "36", "38", "39", "40", "33", "34"),
-        "aliases": ("1", "新手", "入门", "快速开始", "开始使用", "常用示例"),
+    "quick_start": {
+        "title": "新手开始",
+        "summary": "先看这里，按任务走最短路径",
+        "command_ids": ("1 1", "1 2", "1 3", "1 4", "1 5"),
+        "aliases": ("1", "新手", "开始", "快速开始", "新手开始", "入门"),
         "extra_lines": (
             "最短使用路径：",
-            "- 第 1 步：`6 hello-world` 新建项目",
-            "- 第 2 步：直接发需求，让机器人继续写代码",
-            "- 第 3 步：`11` 设置默认 Git 身份；若想自定义，再用 `11 <name> <email>`",
-            "- 第 4 步：`19` 推送到 GitHub；仓库名留空时默认使用当前项目名",
-            "- 第 5 步：`31` 发布网站，或 `32` 发布 Worker；留空参数时默认也使用当前项目名",
-            "- 如果是微信小程序：`35` 先启用上传，或直接用 `36` 一键上传体验版",
-            "- 想正式上线小程序：先用 `37` 准备提审资料，再用 `38` 提交审核，最后 `40` 发布",
-            "- 常查状态：`33` 看 GitHub Actions，`34` 看 Cloudflare 状态",
+            "- 做新项目：`1.1 hello-world`",
+            "- 从现有仓库开始：`1.2 hello-world <Git地址>`",
+            "- 写完后推 GitHub：`1.3` 或 `3.10`",
+            "- 发布网站：`1.4` 或进入 `4 网站发布`",
+            "- 发布小程序：`1.5` 或进入 `5 微信小程序`",
+            "- 想看所有功能：发送 `7`",
         ),
     },
     "project_workspace": {
-        "title": "项目与工作区",
-        "summary": "项目列表、当前项目、新建项目、切换工作区",
-        "command_ids": ("2", "3", "4", "5", "6", "7", "8", "9", "28", "29"),
-        "aliases": ("2", "项目", "工作区", "项目与工作区"),
+        "title": "项目工作区",
+        "summary": "新建项目、切换项目、管理工作区",
+        "command_ids": ("2 1", "2 2", "2 3", "2 4", "2 5", "2 6", "2 7", "2 8", "2 9", "2 10"),
+        "aliases": ("2", "项目", "工作区", "项目工作区", "项目与工作区"),
         "extra_lines": (
-            "- 直接发开发需求时，会默认落在个人项目 `default` 中继续开发",
-            "- 想从远程仓库开始，优先使用：`7 新建仓库项目` 或 `8 从仓库派生项目`",
-            "- 群聊默认可切换个人/共享工作区，单聊默认就是个人工作区",
-        ),
-    },
-    "git_identity": {
-        "title": "Git 身份",
-        "summary": "查看和设置当前工作区的 Git 身份",
-        "command_ids": ("10", "11"),
-        "aliases": ("3", "git", "git身份", "git 身份", "作者"),
-        "extra_lines": (
-            "- 首次提交前建议先执行：`11`；若配置了统一 GitHub 账号，会自动填默认身份",
-            "- 后续 commit/push 会优先使用当前工作区本地 Git 身份，不再根据企业微信昵称猜测",
-            "- 示例：`11 kangaroo117 kangaroo117@users.noreply.github.com`",
+            "- 直接发开发需求时，会默认落在当前项目继续开发",
+            "- 想从远程仓库开始，优先使用：`2.6` 或 `2.7`",
+            "- 群聊可切换个人 / 共享工作区；单聊默认就是个人工作区",
         ),
     },
     "github_repository": {
-        "title": "GitHub 仓库",
-        "summary": "列仓、选仓、建仓、推送到 GitHub",
-        "command_ids": ("10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"),
-        "aliases": ("4", "github", "仓库", "git仓库", "github仓库"),
+        "title": "Git 与 GitHub",
+        "summary": "Git 身份、选仓、建仓、推送与发布",
+        "command_ids": ("3 1", "3 2", "3 3", "3 4", "3 5", "3 6", "3 7", "3 8", "3 9", "3 10", "3 11", "3 12", "3 13", "3 14"),
+        "aliases": ("3", "git", "github", "仓库", "git与github", "github仓库"),
         "extra_lines": (
-            "- `19` 缺少远程时，会尝试自动建仓、绑定 origin 并推送",
-            "- 若 bots.yaml 配置了 `provider_config.default_github_owner`，列仓/建仓/推送会统一使用该账号",
-            "- 常用起手式：`11` 设置默认 Git 身份，`12` 查看仓库，`19` 推送",
+            "- 首次提交前建议先执行：`3.2` 设置 Git 身份",
+            "- `3.10` 缺少远程时，会尝试自动建仓、绑定 origin 并推送",
+            "- 若配置了 `default_github_owner`，列仓 / 建仓 / 推送会统一使用该账号",
         ),
+    },
+    "website_publish": {
+        "title": "网站发布",
+        "summary": "Pages / Worker / Cloudflare 网站上线",
+        "command_ids": ("4 1", "4 2", "4 3", "4 4", "4 5", "4 6"),
+        "aliases": ("4", "网站", "网站发布", "pages", "worker", "cloudflare"),
+        "extra_lines": (
+            "- 做静态网站，优先用：`4.2`",
+            "- 做 Worker 服务，优先用：`4.4`",
+            "- 查网站流水线 / Cloudflare 状态，优先看：`4.5`、`4.6`",
+        ),
+    },
+    "wechat_miniprogram": {
+        "title": "微信小程序",
+        "summary": "体验版上传、提审、审核、正式发布",
+        "command_ids": ("5 1", "5 2", "5 3", "5 4", "5 5", "5 6", "5 7"),
+        "aliases": ("5", "小程序", "微信小程序", "miniprogram"),
+        "extra_lines": (
+            "- 先上传体验版：`5.1` 或 `5.2`",
+            "- 再准备提审资料：`5.3`",
+            "- 提交审核：`5.4`，查审核：`5.5`",
+            "- 审核通过后正式发布：`5.6`",
+        ),
+    },
+    "status_troubleshooting": {
+        "title": "状态与排障",
+        "summary": "查看状态、判断下一步、处理常见报错",
+        "command_ids": ("6 1", "6 2", "6 3", "6 4", "6 5", "6 6"),
+        "aliases": ("6", "状态", "排障", "故障", "诊断"),
+        "extra_lines": (
+            "- 通用起手式：先看 `6.2 部署状态`，再看对应平台状态",
+            "- 网站问题优先看：`6.4`、`6.5`",
+            "- 小程序问题优先看：`6.6`，并检查 `project.config.json`、`WECHAT_MINIPROGRAM_PRIVATE_KEY`、`WECHAT_MINIPROGRAM_APPSECRET`",
+        ),
+    },
+    "full_help": {
+        "title": "全部命令",
+        "summary": "查看完整两级编号菜单",
+        "aliases": ("7", "全部", "完整", "全部命令", "所有命令"),
     },
     "deployment": {
         "title": "发布部署",
-        "summary": "远程状态、发布到新仓库、Pages/Worker/小程序 部署",
-        "aliases": ("5", "部署", "发布", "上线", "pages", "worker", "cloudflare"),
-    },
-    "full_help": {
-        "title": "完整命令",
-        "summary": "返回完整一级命令菜单与说明",
-        "aliases": ("6", "全部", "完整", "完整命令", "所有命令"),
+        "summary": "网站发布、小程序发布与状态排障",
+        "aliases": ("部署", "发布", "上线", "部署帮助"),
     },
 }
 
@@ -1531,6 +1604,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
         )
         if chat_type == "group":
             chat_id = log_context.get("chat_id", "") or session_key
+            existing_project = self.project_registry.resolve_project(project_name, user_id=user_id, chat_id=chat_id)
+            if existing_project:
+                return self._build_existing_project_reused_reply(
+                    user_id=user_id,
+                    project_name=project_name,
+                    session_key=session_key,
+                    log_context=log_context,
+                )
             project = self.project_registry.create_project(
                 name=project_name,
                 kind="shared",
@@ -1568,6 +1649,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 mode_text="共享工作区" if self.default_group_workspace_mode == MODE_SHARED else "个人工作区",
             )
 
+        existing_project = self.project_registry.resolve_project(project_name, user_id=user_id)
+        if existing_project:
+            return self._build_existing_project_reused_reply(
+                user_id=user_id,
+                project_name=project_name,
+                session_key=session_key,
+                log_context=log_context,
+            )
+
         project = self.project_registry.create_project(
             name=project_name,
             kind="personal",
@@ -1593,6 +1683,37 @@ class CodexCliOrchestrator(BaseOrchestrator):
             project=project,
             workspace=workspace,
             scope_text="个人项目",
+        )
+
+    @staticmethod
+    def _suggest_next_project_name(project_name: str) -> str:
+        normalized_name = str(project_name or "").strip()
+        if not normalized_name:
+            return "my-project-2"
+        matched = re.match(r"^(.*?)-(\d+)$", normalized_name)
+        if matched:
+            return f"{matched.group(1)}-{int(matched.group(2)) + 1}"
+        return f"{normalized_name}-2"
+
+    def _build_existing_project_reused_reply(
+        self,
+        user_id: str,
+        project_name: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        enter_reply = self._handle_enter_project_command(
+            user_id=user_id,
+            target=project_name,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        suggested_name = self._suggest_next_project_name(project_name)
+        return (
+            f"项目已存在：{project_name}\n"
+            "已为你直接进入现有项目。\n"
+            f"{enter_reply}\n"
+            f"如需新建另一个项目，可换个名字，例如：2.5 {suggested_name}"
         )
 
     def _handle_enter_project_command(self, user_id: str, target: str, session_key: str, log_context: dict = None) -> str:
@@ -1734,7 +1855,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     f"项目：{(project or {}).get('name', '-')}\n"
                     f"工作区：{self._display_path(workspace_path)}\n"
                     f"错误：{message}\n"
-                    f"可先发送：4 查看当前工作区，或重新进入项目后再执行 {self._git_identity_status_hint().replace('可发送：', '')}"
+                    f"可先发送：2 3（当前工作区），或重新进入项目后再执行 {self._git_identity_status_hint().replace('可发送：', '')}"
                 )
             return f"设置 Git 身份失败：{exc}"
 
@@ -1797,8 +1918,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "当前项目还没有合适的 GitHub 仓库名，暂不自动推送。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：19 <仓库名>\n"
-                "或：18 <仓库名>"
+                "请发送：3.10 <仓库名>\n"
+                "或：3.9 <仓库名>"
             )
 
         current_publish_url = (
@@ -1882,7 +2003,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         "检测到当前 GitHub 远程仓库不存在，但统一 GitHub 账号校验失败，无法自动创建仓库。\n"
                         f"目标仓库名：{desired_repo_name}\n"
                         f"错误：{validation_error}\n"
-                        "你也可以先在 GitHub 手动创建空仓库，再发送：19"
+                        "你也可以先在 GitHub 手动创建空仓库，再发送：3.10"
                     )
                 try:
                     created_repository = self.github_repository_manager.create_user_repository(
@@ -1894,7 +2015,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         "检测到当前 GitHub 远程仓库不存在，尝试自动创建时失败。\n"
                         f"目标仓库名：{desired_repo_name}\n"
                         f"错误：{exc}\n"
-                        "你也可以手动发送：18 <仓库名>"
+                        "你也可以手动发送：3 9 <仓库名>"
                     )
                 if configured_owner and str(created_repository.owner or "").strip().lower() != configured_owner.lower():
                     return (
@@ -2096,25 +2217,25 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         remotes = self.project_deployment_manager.list_git_remotes(workspace_path)
         if not remotes.get("origin"):
-            lines.append("可发送：准备GitHub仓库 <Git地址>")
+            lines.append("可发送：3.12 准备GitHub仓库 <Git地址>")
         if not str(project.get("deployment_type") or "").strip():
-            lines.append("可发送：启用Pages部署 [Pages项目名] [构建目录]")
-            lines.append("或：启用Worker部署 [Worker名称] [入口文件]")
-            lines.append("或：启用小程序上传 [AppID] [项目路径]")
+            lines.append("可发送：4.1 启用Pages部署 [Pages项目名] [构建目录]")
+            lines.append("或：4.3 启用Worker部署 [Worker名称] [入口文件]")
+            lines.append("或：5.1 启用小程序上传 [AppID] [项目路径]")
         else:
             if str(project.get("deployment_type") or "").strip() in {"cloudflare_pages", "cloudflare_worker"}:
-                lines.append("可发送：34 Cloudflare项目状态")
+                lines.append("可发送：4.6 Cloudflare项目状态")
             if str(project.get("deployment_type") or "").strip() == "wechat_miniprogram":
                 deployment_config = project.get("deployment_config") or {}
                 if not str(deployment_config.get("audit_config_path") or "").strip():
-                    lines.append("可发送：37 启用小程序提审 [配置文件]")
+                    lines.append("可发送：5.3 启用小程序提审 [配置文件]")
                 else:
-                    lines.append("可发送：38 提交小程序审核")
-                    lines.append("可发送：39 小程序审核状态")
-                    lines.append("可发送：40 发布小程序")
-                    lines.append("可发送：41 撤回小程序审核")
+                    lines.append("可发送：5.4 提交小程序审核")
+                    lines.append("可发送：5.5 小程序审核状态")
+                    lines.append("可发送：5.6 发布小程序")
+                    lines.append("可发送：5.7 撤回小程序审核")
             if self._resolve_project_workflow_id(project):
-                lines.append("可发送：33 发布流水线状态")
+                lines.append("可发送：4.5 发布流水线状态")
         return "\n".join(lines)
 
     def _handle_pipeline_status_command(self, user_id: str, session_key: str, log_context: dict = None) -> str:
@@ -2143,7 +2264,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有配置部署工作流，暂时无法定位发布流水线状态。\n"
                 f"项目：{project['name']}\n"
                 f"仓库：{owner}/{repo_name}\n"
-                "可先发送：26 启用Pages部署 ...、27 启用Worker部署 ...、31 一键发布Pages ... 或 32 一键发布Worker ..."
+                "可先发送：4.1 启用Pages部署 ...、4.3 启用Worker部署 ...、4.2 一键发布Pages ... 或 4.4 一键发布Worker ..."
             )
 
         try:
@@ -2197,7 +2318,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有配置 Cloudflare 部署，暂时无法查询 Cloudflare 项目状态。\n"
                 f"项目：{project['name']}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "可先发送：26 启用Pages部署 ...、27 启用Worker部署 ...、31 一键发布Pages ... 或 32 一键发布Worker ..."
+                "可先发送：4.1 启用Pages部署 ...、4.3 启用Worker部署 ...、4.2 一键发布Pages ... 或 4.4 一键发布Worker ..."
             )
 
         try:
@@ -2479,7 +2600,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有可用的 Pages 项目名。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "请发送：26 [Pages项目名] [构建目录]"
+                "请发送：4.1 [Pages项目名] [构建目录]"
             )
         result = self.project_deployment_manager.scaffold_cloudflare_pages(
             workspace_path=workspace_path,
@@ -2555,13 +2676,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "一键发布 Pages 失败：当前项目还没有可用的仓库名。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：31 <仓库名> [Pages项目名] [构建目录]"
+                "请发送：4.2 <仓库名> [Pages项目名] [构建目录]"
             )
         if not normalized_pages_project_name:
             return (
                 "一键发布 Pages 失败：当前项目还没有可用的 Pages 项目名。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：31 <仓库名> <Pages项目名> [构建目录]"
+                "请发送：4.2 <仓库名> <Pages项目名> [构建目录]"
             )
 
         push_reply = self._handle_push_to_github_command(
@@ -2600,7 +2721,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"仓库：{owner}/{repo_name}\n"
                 f"Pages 项目：{normalized_pages_project_name}\n"
                 f"错误：{exc}\n"
-                "你可以补齐 Cloudflare 配置后，再发送：26 [Pages项目名] [构建目录]"
+                "你可以补齐 Cloudflare 配置后，再发送：4.1 [Pages项目名] [构建目录]"
             )
 
         try:
@@ -2661,7 +2782,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"工作流：{result.workflow_path}\n"
                 f"写入文件：{file_summaries}\n"
                 f"错误：{exc}\n"
-                "可稍后再次发送：19"
+                "可稍后再次发送：3.10"
             )
 
         file_summaries = "、".join(
@@ -2710,7 +2831,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有可用的 Worker 名称。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "请发送：27 [Worker名称] [入口文件]"
+                "请发送：4.3 [Worker名称] [入口文件]"
             )
         result = self.project_deployment_manager.scaffold_cloudflare_worker(
             workspace_path=workspace_path,
@@ -2789,13 +2910,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "一键发布 Worker 失败：当前项目还没有可用的仓库名。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：32 <仓库名> [Worker名称] [入口文件]"
+                "请发送：4.4 <仓库名> [Worker名称] [入口文件]"
             )
         if not normalized_worker_name:
             return (
                 "一键发布 Worker 失败：当前项目还没有可用的 Worker 名称。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：32 <仓库名> <Worker名称> [入口文件]"
+                "请发送：4.4 <仓库名> <Worker名称> [入口文件]"
             )
 
         push_reply = self._handle_push_to_github_command(
@@ -2879,7 +3000,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"工作流：{result.workflow_path}\n"
                 f"写入文件：{file_summaries}\n"
                 f"错误：{exc}\n"
-                "可稍后再次发送：19"
+                "可稍后再次发送：3.10"
             )
 
         file_summaries = "、".join(
@@ -2926,7 +3047,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有可用的微信小程序 AppID。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "请发送：35 <AppID> [项目路径]\n"
+                "请发送：5.1 <AppID> [项目路径]\n"
                 "或在运行环境中配置：WECHAT_MINIPROGRAM_APPID"
             )
 
@@ -2942,16 +3063,26 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
                 f"错误：{exc}\n"
-                "请发送：35 <AppID> <项目路径>"
+                "请发送：5.1 [AppID] <项目路径>\n"
+                "提示：如果你刚执行的是“新建项目”，当前通常还是空工作区，不会自动带出小程序代码或 project.config.json\n"
+                "提示：如果 project.config.json 在仓库根目录，项目路径请填 ."
             )
         if not resolved_project_path:
             return (
                 "当前工作区里还没有识别到可上传的微信小程序目录。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "请确保目录内包含 project.config.json，然后发送：35 <AppID> <项目路径>"
+                "请确保目录内包含 project.config.json，然后发送：5.1 [AppID] <项目路径>\n"
+                "提示：如果你刚执行的是“新建项目”，当前通常还是空工作区，不会自动带出小程序代码或 project.config.json\n"
+                "提示：如果 project.config.json 在仓库根目录，项目路径请填 ."
             )
 
+        project_config_appid_synced = self._sync_wechat_miniprogram_project_appid(
+            workspace_path,
+            resolved_project_path,
+            resolved_appid,
+            explicit_appid=appid,
+        )
         robot = self._resolve_wechat_miniprogram_robot(project)
         result = self.project_deployment_manager.scaffold_wechat_miniprogram_upload(
             workspace_path=workspace_path,
@@ -2994,7 +3125,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
         ]
         if not current_origin:
             lines.append("提示：当前工作区还未配置 origin，可先发送：准备GitHub仓库 <Git地址>")
+        if project_config_appid_synced:
+            lines.append("提示：已同步 project.config.json 中的 AppID")
         lines.append("提示：项目目录内需包含 project.config.json，且已在微信公众平台配置 CI 机器人与上传密钥")
+        lines.append("下一步：推送代码到 main 后查看体验版上传结果；如需自动建仓并推送，可直接发送 5.2 <仓库名> [AppID] [项目路径]")
         return "\n".join(lines)
 
     def _handle_publish_wechat_miniprogram_command(
@@ -3026,7 +3160,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "一键上传小程序失败：当前项目还没有可用的仓库名。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：36 <仓库名> [AppID] [项目路径]"
+                "请发送：5.2 <仓库名> [AppID] [项目路径]"
             )
 
         resolved_appid = self._resolve_wechat_miniprogram_appid(project, appid)
@@ -3034,7 +3168,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "一键上传小程序失败：当前项目还没有可用的微信小程序 AppID。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请发送：36 <仓库名> <AppID> [项目路径]\n"
+                "请发送：5.2 <仓库名> <AppID> [项目路径]\n"
                 "或在运行环境中配置：WECHAT_MINIPROGRAM_APPID"
             )
 
@@ -3049,15 +3183,25 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "一键上传小程序失败：微信小程序项目路径校验失败。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"错误：{exc}\n"
-                "请发送：36 <仓库名> <AppID> <项目路径>"
+                "请发送：5.2 <仓库名> [AppID] <项目路径>\n"
+                "提示：如果你刚执行的是“新建项目”，当前通常还是空工作区，不会自动带出小程序代码或 project.config.json\n"
+                "提示：如果 project.config.json 在仓库根目录，项目路径请填 ."
             )
         if not resolved_project_path:
             return (
                 "一键上传小程序失败：当前工作区里还没有识别到可上传的微信小程序目录。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请确保目录内包含 project.config.json，然后发送：36 <仓库名> <AppID> <项目路径>"
+                "请确保目录内包含 project.config.json，然后发送：5.2 <仓库名> [AppID] <项目路径>\n"
+                "提示：如果你刚执行的是“新建项目”，当前通常还是空工作区，不会自动带出小程序代码或 project.config.json\n"
+                "提示：如果 project.config.json 在仓库根目录，项目路径请填 ."
             )
 
+        project_config_appid_synced = self._sync_wechat_miniprogram_project_appid(
+            workspace_path,
+            resolved_project_path,
+            resolved_appid,
+            explicit_appid=appid,
+        )
         robot = self._resolve_wechat_miniprogram_robot(project)
 
         push_reply = self._handle_push_to_github_command(
@@ -3141,7 +3285,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"工作流：{result.workflow_path}\n"
                 f"写入文件：{file_summaries}\n"
                 f"错误：{exc}\n"
-                "可稍后再次发送：19"
+                "可稍后再次发送：3.10"
             )
 
         file_summaries = "、".join(
@@ -3164,7 +3308,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"GitHub Secrets：{', '.join(secret_names)}",
             f"最终推送：origin/{push_result.branch_name}",
         ]
+        if project_config_appid_synced:
+            lines.append("说明：已同步 project.config.json 中的 AppID")
         lines.append("说明：GitHub Actions 触发后会继续上传微信小程序体验版")
+        lines.append("下一步：先查看 GitHub Actions 上传结果；体验版确认无误后，可发送 5.3 [配置文件] 进入提审流程")
         return "\n".join(lines)
 
     def _handle_enable_wechat_miniprogram_audit_command(
@@ -3186,7 +3333,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "当前项目还没有可用的微信小程序 AppID。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
                 f"工作区：{self._display_path(workspace_path)}\n"
-                "请先发送：35 <AppID> [项目路径]\n"
+                "请先发送：5.1 <AppID> [项目路径]\n"
                 "或在运行环境中配置：WECHAT_MINIPROGRAM_APPID"
             )
 
@@ -3221,7 +3368,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"AppID：{resolved_appid}\n"
             f"配置文件：{result.config_path}\n"
             f"写入文件：{file_summaries}\n"
-            "提示：请先把分类、页面地址、标题、提审说明改成真实内容，再发送：38"
+            "下一步：请先把分类、页面地址、标题、提审说明改成真实内容，再发送 5.4 提交小程序审核"
         )
 
     def _handle_submit_wechat_miniprogram_audit_command(
@@ -3242,7 +3389,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return (
                 "提交小程序审核失败：当前项目还没有可用的微信小程序 AppID。\n"
                 f"项目：{(project or {}).get('name', '-')}\n"
-                "请先发送：35 <AppID> [项目路径]"
+                "请先发送：5.1 <AppID> [项目路径]"
             )
         try:
             appsecret = self._resolve_wechat_miniprogram_app_secret()
@@ -3264,7 +3411,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 f"工作区：{self._display_path(workspace_path)}\n"
                 f"配置文件：{resolved_config_path}\n"
                 f"错误：{exc}\n"
-                "可先发送：37 [配置文件]"
+                "可先发送：5.3 [配置文件]"
             )
 
         try:
@@ -3309,7 +3456,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if audit_id:
             lines.append(f"审核单号：{audit_id}")
         lines.append(f"返回结果：{json.dumps(result, ensure_ascii=False)}")
-        lines.append("下一步：可发送 39 查看审核状态；审核通过后发送 40 正式发布")
+        lines.append("下一步：可发送 5.5 查看审核状态；审核通过后发送 5.6 正式发布")
         return "\n".join(lines)
 
     def _handle_query_wechat_miniprogram_audit_status_command(
@@ -3374,6 +3521,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if reason_text:
             lines.append(f"说明：{reason_text}")
         lines.append(f"返回结果：{json.dumps(result, ensure_ascii=False)}")
+        lines.append("下一步：如已审核通过，可发送 5.6 正式发布；如需修改内容，调整后可重新发送 5.4 提交小程序审核")
         return "\n".join(lines)
 
     def _handle_release_wechat_miniprogram_command(
@@ -3422,7 +3570,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"项目：{(project or {}).get('name', '-')}\n"
             f"工作区：{self._display_path(workspace_path)}\n"
             f"AppID：{resolved_appid}\n"
-            f"返回结果：{json.dumps(result, ensure_ascii=False)}"
+            f"返回结果：{json.dumps(result, ensure_ascii=False)}\n"
+            "下一步：可在微信公众平台或客户端确认正式版是否已生效"
         )
 
     def _handle_undo_wechat_miniprogram_audit_command(
@@ -3471,7 +3620,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"项目：{(project or {}).get('name', '-')}\n"
             f"工作区：{self._display_path(workspace_path)}\n"
             f"AppID：{resolved_appid}\n"
-            f"返回结果：{json.dumps(result, ensure_ascii=False)}"
+            f"返回结果：{json.dumps(result, ensure_ascii=False)}\n"
+            "下一步：如需继续提审，调整内容后可重新发送 5.4 提交小程序审核"
         )
 
     def _read_runtime_secret(self, key: str) -> str:
@@ -3694,11 +3844,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
         return (
             f"🆕 首次使用说明：已自动进入默认个人项目 `{project_name}`\n"
             "💡 现在支持两级体系：一级控制命令，二级普通对话\n"
-            "🔢 一级控制命令统一带序号，可输入全称，也可直接输入序号\n"
-            "🏷️ 想指定项目名：发送 `6 hello-world` 或 `新建项目 hello-world`\n"
-            "📦 想从 GitHub 账号仓库里挑一个开始：发送 `12` 或 `GitHub仓库列表`\n"
-            "🚀 想发布到 GitHub：发送 `19 <仓库名>`；想看部署命令：发送 `30`\n"
-            "📘 输入 `1` 查看完整一级命令菜单"
+            "🔢 一级控制命令统一带两级编号，展示默认用点号，输入时空格/点号都支持\n"
+            "🏷️ 想指定项目名：发送 `2.5 hello-world` 或 `新建项目 hello-world`\n"
+            "📦 想从 GitHub 账号仓库里挑一个开始：发送 `3.3` 或 `GitHub仓库列表`\n"
+            "🚀 想发布到 GitHub：发送 `3.10 <仓库名>`；想发网站看 `4`；想发小程序看 `5`\n"
+            "📘 输入 `1` 查看新手开始；输入 `7` 查看完整命令菜单"
         )
 
     @classmethod
@@ -3758,7 +3908,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
                 "但当前工作区还没有配置 Git 身份。\n"
                 f"{self._git_identity_setup_hint_text()}\n"
-                "然后再发送：19 [仓库名]"
+                "然后再发送：3.10 [仓库名]"
             )
 
         repo_name = self._resolve_push_repository_name(project, "", workspace_path)
@@ -3774,15 +3924,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "看起来你是想把当前项目推送到 GitHub。\n"
                     "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
                     "当前还没有配置远程仓库。\n"
-                    f"可直接发送：19 {repo_name}\n"
-                    f"或：20 {repo_name}"
+                    f"可直接发送：3.10 {repo_name}\n"
+                    f"或：3.11 {repo_name}"
                 )
             return (
                 "看起来你是想把当前项目推送到 GitHub。\n"
                 "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
                 "当前还没有配置远程仓库，且项目名还不适合作为仓库名。\n"
-                "请直接发送：19 <仓库名>\n"
-                "例如：19 hello-world"
+                "请直接发送：3.10 <仓库名>\n"
+                "例如：3.10 hello-world"
             )
 
         preferred_remote_url = self._preferred_publish_remote_url_from_existing_remote(current_publish_url)
@@ -3796,8 +3946,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "看起来你是想把当前项目推送到 GitHub。\n"
                     "这类操作属于一级控制命令，不会直接按普通对话自动执行。\n"
                     "但当前 origin 对应的 GitHub 仓库还不存在。\n"
-                    f"可直接发送：19 {suggested_name}\n"
-                    f"或：20 {suggested_name}"
+                    f"可直接发送：3.10 {suggested_name}\n"
+                    f"或：3.11 {suggested_name}"
                 )
         return ""
 
@@ -3907,20 +4057,20 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _git_identity_status_hint(self) -> str:
         default_name, default_email = self._default_git_identity_values()
         if default_name and default_email:
-            return f"可发送：11（默认使用 {default_name} <{default_email}>）"
-        return "可发送：11 <name> <email>"
+            return f"可发送：3.2（默认使用 {default_name} <{default_email}>）"
+        return "可发送：3.2 <name> <email>"
 
     def _git_identity_setup_hint_text(self) -> str:
         default_name, default_email = self._default_git_identity_values()
         if default_name and default_email:
             return (
-                "请先发送：11\n"
+                "请先发送：3.2\n"
                 f"默认将使用：{default_name} <{default_email}>\n"
-                "如需自定义，也可发送：11 <name> <email>"
+                "如需自定义，也可发送：3.2 <name> <email>"
             )
         return (
-            "请先发送：11 <name> <email>\n"
-            "例如：11 kangaroo117 kangaroo117@users.noreply.github.com"
+            "请先发送：3.2 <name> <email>\n"
+            "例如：3.2 kangaroo117 kangaroo117@users.noreply.github.com"
         )
 
     def _resolve_default_github_owner(self, validate_token: bool = False) -> str:
@@ -4047,6 +4197,57 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return detected
         return ""
 
+    def _sync_wechat_miniprogram_project_appid(
+        self,
+        workspace_path: str,
+        project_path: str,
+        appid: str,
+        explicit_appid: str = "",
+    ) -> bool:
+        normalized_appid = str(appid or "").strip()
+        if not normalized_appid:
+            return False
+
+        try:
+            normalized_project_path = self.project_deployment_manager._normalize_repo_relative_path(
+                project_path or "."
+            )
+        except Exception:
+            return False
+
+        config_path = Path(workspace_path).expanduser().resolve() / normalized_project_path / "project.config.json"
+        if not config_path.exists() or not config_path.is_file():
+            return False
+
+        try:
+            config_data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            logger.warning("读取微信小程序 project.config.json 失败: path=%s error=%s", config_path, exc)
+            return False
+
+        if not isinstance(config_data, dict):
+            logger.warning("微信小程序 project.config.json 不是 JSON 对象: path=%s", config_path)
+            return False
+
+        current_appid = str(config_data.get("appid") or "").strip()
+        normalized_explicit = str(explicit_appid or "").strip()
+        should_update = False
+
+        if normalized_explicit:
+            should_update = current_appid != normalized_appid
+        elif not current_appid or current_appid == "touristappid":
+            should_update = current_appid != normalized_appid
+
+        if not should_update:
+            return False
+
+        config_data["appid"] = normalized_appid
+        config_path.write_text(
+            json.dumps(config_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return True
+
     def _resolve_wechat_miniprogram_app_secret(self) -> str:
         return self._read_runtime_secret("WECHAT_MINIPROGRAM_APPSECRET")
 
@@ -4100,7 +4301,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             deployment_config = (project or {}).get("deployment_config") or {}
             raw_value = str(deployment_config.get("latest_audit_id") or "").strip()
         if not raw_value:
-            raise RuntimeError("当前项目还没有可用的审核单号，请先发送：38 提交小程序审核")
+            raise RuntimeError("当前项目还没有可用的审核单号，请先发送：5.4 提交小程序审核")
         try:
             return int(raw_value)
         except ValueError as exc:
@@ -4326,16 +4527,30 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         shortcut_match = CONTROL_COMMAND_SHORTCUT_EXACT_RE.match(command)
         if shortcut_match:
-            shortcut = CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_match.group(1))
+            shortcut_id = shortcut_match.group(1)
+            if shortcut_id in {str(index) for index in range(1, len(HELP_MENU_TOPIC_ORDER) + 1)}:
+                return f"帮助 {shortcut_id}"
+            shortcut = LEGACY_CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_id)
             if shortcut:
                 return str(shortcut["command"])
             return command
+
+        public_shortcut_match = PUBLIC_CONTROL_COMMAND_SHORTCUT_RE.match(command)
+        if public_shortcut_match:
+            shortcut_id = f"{public_shortcut_match.group(1)} {public_shortcut_match.group(2)}"
+            shortcut = CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_id)
+            if not shortcut:
+                return command
+            tail = str(public_shortcut_match.group(3) or "").strip()
+            if tail and shortcut.get("accepts_args"):
+                return f"{shortcut['command']} {tail}".strip()
+            return str(shortcut["command"])
 
         shortcut_match = CONTROL_COMMAND_SHORTCUT_WITH_ARGS_RE.match(command)
         if not shortcut_match:
             return command
 
-        shortcut = CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_match.group(1))
+        shortcut = LEGACY_CONTROL_COMMAND_SHORTCUT_MAP.get(shortcut_match.group(1))
         if not shortcut:
             return command
 
@@ -4351,19 +4566,28 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _command_system_overview_lines() -> List[str]:
         return [
             "命令体系：",
-            "- 一级：控制命令（输入命令全称或序号，立即执行，不进入 Codex）",
+            "- 一级：控制命令（输入命令全称或两级编号，立即执行，不进入 Codex）",
             "- 二级：普通对话（未命中一级命令的内容，一律按自然语言交给 Codex）",
-            "- 带参数的一级命令可直接写成：`序号 参数...`，例如 `6 hello-world`、`19 hello-world`",
+            "- 带参数的一级命令可直接写成：`两级编号 参数...`，例如 `2.5 hello-world`、`3.10 hello-world`",
+            "- 编号展示默认使用点号；输入时 `3.10`、`3 10`、`3-10` 都能识别",
         ]
 
     @staticmethod
-    def _format_numbered_command_lines(command_ids: Tuple[str, ...]) -> List[str]:
+    def _display_command_id(command_id: str) -> str:
+        return str(command_id or "").replace(" ", ".")
+
+    @classmethod
+    def _format_numbered_command_lines(cls, command_ids: Tuple[str, ...]) -> List[str]:
         lines: List[str] = []
         for command_id in command_ids:
             command = CONTROL_COMMAND_SHORTCUT_MAP.get(command_id)
             if not command:
                 continue
-            lines.append(f"- {command_id}. {command['display']}")
+            display_id = cls._display_command_id(command_id)
+            if " " in command_id:
+                lines.append(f"- {display_id} {command['display']}")
+            else:
+                lines.append(f"- {display_id}. {command['display']}")
         return lines
 
     def _git_identity_usage_help(self, prefix: str = "设置Git身份") -> str:
@@ -4375,18 +4599,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if default_name and default_email:
             lines.extend(
                 [
-                    "如果你使用统一 GitHub 账号，也可以直接发送：11",
+                    "如果你使用统一 GitHub 账号，也可以直接发送：3.2",
                     f"默认将使用：{default_name} <{default_email}>",
                 ]
             )
         else:
             lines.extend(
                 [
-                    "也可以直接发送：11 <name> <email>",
-                    "示例：11 kangaroo117 kangaroo117@users.noreply.github.com",
+                    "也可以直接发送：3.2 <name> <email>",
+                    "示例：3.2 kangaroo117 kangaroo117@users.noreply.github.com",
                 ]
             )
-        lines.append("可先发送：10 查看当前工作区 Git 身份状态")
+        lines.append("可先发送：3.1 查看当前工作区 Git 身份状态")
         return "\n".join(lines)
 
     def _parse_project_create_command(self, command: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -4851,15 +5075,22 @@ class CodexCliOrchestrator(BaseOrchestrator):
         scope_text: str,
         mode_text: str = "",
     ) -> str:
+        init_mode = infer_project_workspace_init_mode(
+            project,
+            fallback=self.default_workspace_init_mode,
+        )
         lines = [
             f"已创建{scope_text}：{project['name']}",
             f"项目ID：{project['project_id']}",
-            f"初始化方式：{workspace_init_mode_label(infer_project_workspace_init_mode(project, fallback=self.default_workspace_init_mode))}",
+            f"初始化方式：{workspace_init_mode_label(init_mode)}",
             f"项目源：{project_source_summary(project)}",
         ]
         if mode_text:
             lines.append(f"当前模式：{mode_text}")
         lines.append(f"当前工作区：{self._display_path(workspace['path'])}")
+        if init_mode == WORKSPACE_INIT_EMPTY:
+            lines.append("提示：空工作区只会创建项目目录，不会自动生成业务代码或 project.config.json")
+            lines.append("提示：如果这是微信小程序项目，请先导入/生成小程序代码后，再执行 5.1 或 5.2")
         return "\n".join(lines)
 
     @classmethod
@@ -4867,6 +5098,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines = cls._command_system_overview_lines()
         lines.extend(
             [
+                "",
+                "帮助首页：",
+                "- 先看 `1 ~ 7` 这些大类编号，再进入对应分类",
+                "- 进入分类后，你会看到 `1.1`、`2.5`、`3.10` 这类子命令编号",
                 "",
                 "帮助中心：",
                 "- 直接发开发需求：会进入二级普通对话，并默认在当前项目继续开发",
@@ -4884,39 +5119,59 @@ class CodexCliOrchestrator(BaseOrchestrator):
             [
                 "",
                 "查看分类：",
-                "- 发送：`帮助 1` / `帮助 新手`",
-                "- 发送：`帮助 2` / `帮助 项目`",
-                "- 发送：`帮助 3` / `帮助 Git`",
-                "- 发送：`帮助 4` / `帮助 GitHub`",
-                "- 发送：`帮助 5` / `帮助 部署`",
-                "- 发送：`帮助 6` / `帮助 全部`",
+                "- 发送：`1` / `帮助 新手开始`",
+                "- 发送：`2` / `帮助 项目工作区`",
+                "- 发送：`3` / `帮助 Git 与 GitHub`",
+                "- 发送：`4` / `帮助 网站发布`",
+                "- 发送：`5` / `帮助 微信小程序`",
+                "- 发送：`6` / `帮助 状态与排障`",
+                "- 发送：`7` / `帮助 全部`",
                 "",
                 "新手最常用：",
-                "- `6 项目名`：新建项目",
-                "- `11`：设置默认 Git 身份；如需自定义，再用 `11 <name> <email>`",
-                "- `19`：推送到 GitHub；仓库名留空时默认当前项目名",
-                "- `31`：一键发布网站；参数留空时默认当前项目名 + `dist`",
-                "- `32`：一键发布 Worker；参数留空时默认当前项目名 + `src/index.ts`",
-                "- `35` / `36`：启用或一键上传微信小程序体验版；可自动补 AppID / 项目路径",
-                "- `37` ~ `41`：小程序提审、查审核、正式发布、撤回审核",
-                "- `33` / `34`：查看发布与 Cloudflare 状态",
+                "- `2.5 项目名`：新建项目",
+                "- `3.2`：设置默认 Git 身份；如需自定义，再用 `3.2 <name> <email>`",
+                "- `3.10`：推送到 GitHub；仓库名留空时默认当前项目名",
+                "- `4.2`：一键发布网站；参数留空时默认当前项目名 + `dist`",
+                "- `5.2`：一键上传微信小程序体验版",
+                "- `5.3` ~ `5.7`：小程序提审、查审核、正式发布、撤回审核",
+                "- `6.2`：查看部署状态，再决定下一步",
             ]
         )
         return "\n".join(lines)
 
-    @staticmethod
-    def _full_command_help() -> str:
-        lines = CodexCliOrchestrator._command_system_overview_lines()
+    @classmethod
+    def _help_category_overview_lines(cls, current_topic_id: str = "") -> List[str]:
+        lines = [
+            "分类导航：",
+            "- `1 ~ 7` 是帮助分类编号；`1.1 / 2.5 / 3.10` 是进入分类后的具体命令编号",
+        ]
+        for index, topic_id in enumerate(HELP_MENU_TOPIC_ORDER, start=1):
+            topic = HELP_MENU_TOPICS.get(topic_id) or {}
+            title = str(topic.get("title") or topic_id).strip()
+            prefix = "当前分类" if topic_id == current_topic_id else "可发送"
+            lines.append(f"- {prefix}：`{index}` / `帮助 {title}`")
+        return lines
+
+    @classmethod
+    def _full_command_help(cls) -> str:
+        lines = cls._command_system_overview_lines()
         lines.extend(
             [
                 "",
                 "完整一级控制命令菜单：",
                 "- 直接发开发需求：会进入二级普通对话，并默认在项目 `default` 中继续开发",
-                "- 若要切项目、列仓库、推 GitHub、改部署，请优先使用下面的一级命令",
+                "- 若要切项目、列仓库、推 GitHub、改部署，请优先使用下面的两级编号命令",
             ]
         )
-        lines.append("")
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(CONTROL_COMMAND_ORDER))
+        for index, topic_id in enumerate(HELP_MENU_TOPIC_ORDER, start=1):
+            if topic_id == "full_help":
+                continue
+            topic = HELP_MENU_TOPICS.get(topic_id) or {}
+            title = str(topic.get("title") or topic_id).strip()
+            command_ids = tuple(topic.get("command_ids") or ())
+            lines.append("")
+            lines.append(f"{index}. {title}：")
+            lines.extend(cls._format_numbered_command_lines(command_ids))
         lines.extend(
             [
                 "",
@@ -4924,7 +5179,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "- 仍兼容少量旧写法，如 `创建GitHub私有仓库 <仓库名>`、`创建GitHub组织仓库 <org> <仓库名>`",
                 "- 仍兼容扩展项目写法，如 `新建复制项目 <名称> [本地目录]`、`新建项目 git_remote <名称> <Git地址>`、`新建项目 legacy_copy <名称> [本地目录]`",
                 "- 统一 GitHub 账号可在 bots.yaml 的 provider_config.default_github_owner 中配置",
-                "- 新手建议先看：`帮助 1` / `帮助 新手`",
+                "- 新手建议先看：`1` / `帮助 新手开始`",
             ]
         )
         return "\n".join(lines)
@@ -4936,8 +5191,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return ""
 
         lowered = normalized.lower()
-        for topic_id in HELP_MENU_TOPIC_ORDER:
-            topic = HELP_MENU_TOPICS.get(topic_id) or {}
+        for topic_id, topic in HELP_MENU_TOPICS.items():
             candidates = [topic_id, topic.get("title", ""), topic.get("summary", "")]
             candidates.extend(topic.get("aliases") or ())
             for candidate in candidates:
@@ -5022,6 +5276,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return cls._project_command_help()
 
         lines = cls._command_system_overview_lines()
+        lines.extend([""])
+        lines.extend(cls._help_category_overview_lines(normalized_topic_id))
         lines.extend(["", f"{title}："])
         if command_ids:
             lines.extend(cls._format_numbered_command_lines(command_ids))
@@ -5031,7 +5287,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.extend(
             [
                 "",
-                "如需完整菜单，可发送：`1` / `帮助`",
+                "如需完整菜单，可发送：`7` / `帮助 全部`",
             ]
         )
         return "\n".join(lines)
@@ -5083,41 +5339,41 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.extend(
             [
                 "",
-                "发布部署分三层：",
-                "- 最常用：`19` 推 GitHub、`31` 发布网站、`32` 发布 Worker、`36` 上传小程序体验版、`38` 提交小程序审核、`40` 发布小程序",
-                "- 轻量配置：`26` 只写 Pages 部署脚手架、`27` 只写 Worker 部署脚手架、`35` 只写小程序上传脚手架、`37` 只写小程序提审模板",
-                "- 高级操作：`23` 绑定 GitHub 仓库、`24` 发布到新仓库、`25` 同步上游",
+                "发布部署现在分成三块：",
+                "- `4 网站发布`：Pages / Worker / Cloudflare 相关能力",
+                "- `5 微信小程序`：体验版上传、提审、审核、正式发布",
+                "- `6 状态与排障`：统一查看状态、判断下一步",
                 "",
-                "默认参数：",
-                "- `19 [仓库名]`：仓库名留空时，默认使用当前项目名",
-                "- `31 [仓库名] [Pages项目名] [构建目录]`：前两项留空时默认当前项目名，构建目录默认 `dist`",
-                "- `32 [仓库名] [Worker名称] [入口文件]`：前两项留空时默认当前项目名，入口文件默认 `src/index.ts`",
-                "- `26 [Pages项目名] [构建目录]`：Pages 项目名留空时默认当前项目名，构建目录默认 `dist`",
-                "- `27 [Worker名称] [入口文件]`：Worker 名称留空时默认当前项目名，入口文件默认 `src/index.ts`",
-                "- `35 [AppID] [项目路径]`：AppID 可沿用已配置值或环境变量，项目路径会自动探测 `project.config.json`",
-                "- `36 [仓库名] [AppID] [项目路径]`：仓库名留空时默认当前项目名；也支持直接 `36 <AppID> [项目路径]`",
-                "- `37 [配置文件]`：默认写入 `.github/wechat-miniprogram-audit.json`",
-                "- `38 [配置文件]`：配置文件留空时沿用项目里已保存的提审模板路径",
-                "- `39 [审核单号]`：审核单号留空时默认用最近一次提交返回的审核单号",
-                "",
-                "常用命令：",
+                "网站发布：",
             ]
         )
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("19", "26", "27", "31", "32", "35", "36", "37", "38", "39", "40", "41", "33", "34")))
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("4 1", "4 2", "4 3", "4 4", "4 5", "4 6")))
+        lines.extend(
+            [
+                "",
+                "微信小程序：",
+            ]
+        )
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("5 1", "5 2", "5 3", "5 4", "5 5", "5 6", "5 7")))
+        lines.extend(
+            [
+                "",
+                "状态与排障：",
+            ]
+        )
+        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("6 1", "6 2", "6 3", "6 4", "6 5", "6 6")))
         lines.extend(
             [
                 "",
                 "补充说明：",
-                "- `31`：自动建仓、创建 Pages 项目、注入 GitHub Secrets、写入工作流并再次推送；若没有 `package.json`，也可直接发布现成静态目录",
-                "- `32`：自动建仓、注入 GitHub Secrets、写入 Worker 工作流与 `wrangler.toml`，并再次推送",
-                "- `35`：只写入微信小程序 GitHub Actions 工作流与上传脚本，不会自动建仓",
-                "- `36`：自动建仓/推送、写入 `WECHAT_MINIPROGRAM_PRIVATE_KEY` Secret、生成上传工作流，再次推送后触发体验版上传",
-                "- `37`：写入小程序提审 JSON 模板，便于后续直接在企业微信里完成提审",
-                "- `38`：机器人直接调用微信小程序 OpenAPI 提交审核，需要配置 `WECHAT_MINIPROGRAM_APPSECRET`",
-                "- `39`：查询指定或最近一次审核单的状态",
-                "- `40` / `41`：分别用于正式发布和撤回审核",
-                "- `33`：查看当前部署工作流最近一次 GitHub Actions 运行状态",
-                "- `34`：直接查询 Cloudflare 侧 Pages / Worker 当前项目与最近部署状态",
+                "- `4.2`：自动建仓、创建 Pages 项目、注入 GitHub Secrets、写入工作流并再次推送；若没有 `package.json`，也可直接发布现成静态目录",
+                "- `4.4`：自动建仓、注入 GitHub Secrets、写入 Worker 工作流与 `wrangler.toml`，并再次推送",
+                "- `5.1`：只写入微信小程序 GitHub Actions 工作流与上传脚本，不会自动建仓",
+                "- `5.2`：自动建仓/推送、写入 `WECHAT_MINIPROGRAM_PRIVATE_KEY` Secret、生成上传工作流，再次推送后触发体验版上传",
+                "- `5.3`：写入小程序提审 JSON 模板，便于后续直接在企业微信里完成提审",
+                "- `5.4`：机器人直接调用微信小程序 OpenAPI 提交审核，需要配置 `WECHAT_MINIPROGRAM_APPSECRET`",
+                "- `5.5`：查询指定或最近一次审核单的状态",
+                "- `5.6` / `5.7`：分别用于正式发布和撤回审核",
                 "- 若 bots.yaml 配置了 provider_config.default_github_owner，则企业微信里的 GitHub 列仓/建仓/推送都统一走该账号",
                 "- GitHub 推送凭证建议使用宿主机 SSH；Cloudflare 凭证只放 GitHub Actions Secrets",
                 "- 微信小程序体验版上传需要 `WECHAT_MINIPROGRAM_PRIVATE_KEY`；提审/发布阶段还需要 `WECHAT_MINIPROGRAM_APPSECRET`",

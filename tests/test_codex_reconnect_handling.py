@@ -1,10 +1,12 @@
 import logging
 import subprocess
 import asyncio
+import json
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -84,11 +86,12 @@ def test_help_menu_card_contains_expected_topics():
     assert card["task_id"] == "menu@help@cx_bot"
     option_ids = [item["id"] for item in card["checkbox"]["option_list"]]
     assert option_ids == [
-        "quick_examples",
+        "quick_start",
         "project_workspace",
-        "git_identity",
         "github_repository",
-        "deployment",
+        "website_publish",
+        "wechat_miniprogram",
+        "status_troubleshooting",
         "full_help",
     ]
 
@@ -96,29 +99,32 @@ def test_help_menu_card_contains_expected_topics():
 def test_help_menu_reply_for_github_repository_topic():
     reply = CodexCliOrchestrator.build_help_menu_reply("github_repository")
 
-    assert "GitHub 仓库：" in reply
-    assert "12. GitHub仓库列表 [关键词]" in reply
-    assert "19. 推送到GitHub [仓库名]" in reply
+    assert "分类导航：" in reply
+    assert "`1 ~ 7` 是帮助分类编号" in reply
+    assert "Git 与 GitHub：" in reply
+    assert "3.3 GitHub仓库列表 [关键词]" in reply
+    assert "3.10 推送到GitHub [仓库名]" in reply
     assert "default_github_owner" in reply
 
 
-def test_help_menu_reply_for_quick_examples_topic():
-    reply = CodexCliOrchestrator.build_help_menu_reply("quick_examples")
+def test_help_menu_reply_for_quick_start_topic():
+    reply = CodexCliOrchestrator.build_help_menu_reply("quick_start")
 
-    assert "新手上手" in reply
-    assert "`31`" in reply
-    assert "`32`" in reply
-    assert "`35`" in reply
-    assert "`36`" in reply
-    assert "`33` / `34`" in reply
+    assert "当前分类：`1` / `帮助 新手开始`" in reply
+    assert "新手开始" in reply
+    assert "`1.1 hello-world`" in reply
+    assert "`1.2 hello-world <Git地址>`" in reply
+    assert "`1.3`" in reply
+    assert "`1.4`" in reply
+    assert "`1.5`" in reply
 
 
 def test_help_menu_reply_for_deployment_topic_mentions_wechat_miniprogram():
     reply = CodexCliOrchestrator.build_help_menu_reply("deployment")
 
-    assert "发布部署分三层" in reply
-    assert "35" in reply
-    assert "36" in reply
+    assert "发布部署现在分成三块" in reply
+    assert "5.1" in reply
+    assert "5.2" in reply
     assert "体验版上传" in reply
 
 
@@ -130,8 +136,8 @@ def test_help_topic_card_for_github_repository_topic():
 
     assert card["card_type"] == "text_notice"
     assert card["task_id"] == "menu@help@cx_bot@github_repository"
-    assert "GitHub 仓库" in card["main_title"]["title"]
-    assert "列仓、选仓、建仓、推送到 GitHub" in card["main_title"]["desc"]
+    assert "Git 与 GitHub" in card["main_title"]["title"]
+    assert "Git 身份、选仓、建仓、推送与发布" in card["main_title"]["desc"]
 
 
 def test_is_control_command_recognizes_help_subtopic():
@@ -145,6 +151,7 @@ def test_is_control_command_recognizes_help_subtopic():
 
         assert orchestrator.is_control_command("帮助 1")
         assert orchestrator.is_control_command("1 4")
+        assert orchestrator.is_control_command("1.4")
 
 
 def test_message_dispatcher_extracts_card_selected_values():
@@ -246,6 +253,280 @@ def test_message_dispatcher_help_menu_click_updates_template_card():
         assert "GitHub 仓库" in payload["body"]["template_card"]["main_title"]["title"]
 
 
+def test_message_dispatcher_group_text_command_strips_leading_mention():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+                name="测试机器人",
+            ),
+            orchestrator=orchestrator,
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": "req_group_text"},
+                    "body": {
+                        "msgid": "msg_group_text",
+                        "msgtype": "text",
+                        "chattype": "group",
+                        "chatid": "group-1",
+                        "from": {"userid": "alice"},
+                        "text": {"content": "@机器人\u2005新建项目 hello-mini"},
+                    },
+                }
+            )
+        )
+
+        assert len(ws.payloads) == 1
+        payload = ws.payloads[0]
+        assert payload["cmd"] == "aibot_respond_msg"
+        assert "已创建群项目：hello-mini" in payload["body"]["stream"]["content"]
+
+
+def test_message_dispatcher_group_mixed_text_routes_to_control_command():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": "req_group_mixed"},
+                    "body": {
+                        "msgid": "msg_group_mixed",
+                        "msgtype": "mixed",
+                        "chattype": "group",
+                        "chatid": "group-2",
+                        "from": {"userid": "alice"},
+                        "mixed": {
+                            "items": [
+                                {"msgtype": "text", "text": {"content": "@机器人\u2005"}},
+                                {"msgtype": "text", "text": {"content": "新建项目 hello-mixed"}},
+                            ]
+                        },
+                    },
+                }
+            )
+        )
+
+        assert len(ws.payloads) == 1
+        payload = ws.payloads[0]
+        assert payload["cmd"] == "aibot_respond_msg"
+        assert "已创建群项目：hello-mixed" in payload["body"]["stream"]["content"]
+
+
+def test_message_dispatcher_quote_context_is_forwarded_to_text_message():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.received_messages = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return False
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            return None
+
+        async def clear_session(self, session_key: str):
+            return None
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ):
+            self.received_messages.append(message)
+            if on_stream_delta:
+                await on_stream_delta("已收到", True)
+            return "已收到"
+
+    orchestrator = FakeOrchestrator()
+    ws = DummyWs()
+    dispatcher = MessageDispatcher(
+        ws,
+        BotConfig(
+            bot_key="cx_bot",
+            bot_id="test_bot_id",
+            secret="test_secret",
+            bot_type="codex_cli",
+        ),
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(
+        dispatcher.on_msg_callback(
+            {
+                "headers": {"req_id": "req_quote_text"},
+                "body": {
+                    "msgid": "msg_quote_text",
+                    "msgtype": "text",
+                    "chattype": "group",
+                    "chatid": "group-quote-1",
+                    "from": {"userid": "alice"},
+                    "text": {"content": "请继续处理这个问题"},
+                    "reply_to": {
+                        "from": {"userid": "bob"},
+                        "text": {"content": "上一条消息内容"},
+                    },
+                },
+            }
+        )
+    )
+
+    assert orchestrator.received_messages
+    message = orchestrator.received_messages[0]
+    assert "【引用消息】" in message
+    assert "bob：上一条消息内容" in message
+    assert "【当前消息】" in message
+    assert "请继续处理这个问题" in message
+
+
+def test_message_dispatcher_quote_command_uses_current_text_content():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.control_commands = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return content.startswith("新建项目 ")
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            self.control_commands.append(content)
+            if self.is_control_command(content):
+                return f"命中控制命令：{content}"
+            return None
+
+        async def clear_session(self, session_key: str):
+            return None
+
+        async def handle_text_message(self, *args, **kwargs):
+            raise AssertionError("quoted control command should not fall through to handle_text_message")
+
+    orchestrator = FakeOrchestrator()
+    ws = DummyWs()
+    dispatcher = MessageDispatcher(
+        ws,
+        BotConfig(
+            bot_key="cx_bot",
+            bot_id="test_bot_id",
+            secret="test_secret",
+            bot_type="codex_cli",
+        ),
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(
+        dispatcher.on_msg_callback(
+            {
+                "headers": {"req_id": "req_quote_command"},
+                "body": {
+                    "msgid": "msg_quote_command",
+                    "msgtype": "text",
+                    "chattype": "group",
+                    "chatid": "group-quote-2",
+                    "from": {"userid": "alice"},
+                    "text": {"content": "上一条消息内容\n新建项目 quoted-demo"},
+                    "reply_to": {
+                        "from": {"userid": "bob"},
+                        "text": {"content": "上一条消息内容"},
+                    },
+                },
+            }
+        )
+    )
+
+    assert orchestrator.control_commands == ["新建项目 quoted-demo"]
+    assert len(ws.payloads) == 1
+    payload = ws.payloads[0]
+    assert payload["cmd"] == "aibot_respond_msg"
+    assert "命中控制命令：新建项目 quoted-demo" in payload["body"]["stream"]["content"]
+
+
 def test_workspace_copy_ignores_codex_directory():
     with TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -301,9 +582,9 @@ def test_default_personal_project_notice_contains_usage_guidance():
         assert runtime_context["initial_notice"].strip() == "🆕 已自动创建默认个人项目：default"
         assert "首次使用说明" in runtime_context["first_reply_guidance"]
         assert "两级体系" in runtime_context["first_reply_guidance"]
-        assert "6 hello-world" in runtime_context["first_reply_guidance"]
-        assert "12" in runtime_context["first_reply_guidance"]
-        assert "1" in runtime_context["first_reply_guidance"]
+        assert "2.5 hello-world" in runtime_context["first_reply_guidance"]
+        assert "3.3" in runtime_context["first_reply_guidance"]
+        assert "输入 `1`" in runtime_context["first_reply_guidance"]
 
 
 def test_workspace_copy_skips_windows_reserved_name():
@@ -383,19 +664,21 @@ def test_project_create_command_supports_new_modes():
 
 def test_project_help_mentions_default_project_flow():
     help_text = CodexCliOrchestrator._project_command_help()
+    assert "帮助首页" in help_text
+    assert "`1 ~ 7`" in help_text
+    assert "`1.1`、`2.5`、`3.10`" in help_text
     assert "帮助中心" in help_text
     assert "二级普通对话" in help_text
     assert "default" in help_text
-    assert "帮助 1" in help_text
-    assert "帮助 新手" in help_text
-    assert "帮助 6" in help_text
+    assert "帮助 新手开始" in help_text
+    assert "帮助 状态与排障" in help_text
     assert "帮助 全部" in help_text
-    assert "`6 项目名`" in help_text
-    assert "`11`" in help_text
-    assert "`19`" in help_text
-    assert "`31`" in help_text
-    assert "`32`" in help_text
-    assert "`33` / `34`" in help_text
+    assert "`2.5 项目名`" in help_text
+    assert "`3.2`" in help_text
+    assert "`3.10`" in help_text
+    assert "`4.2`" in help_text
+    assert "`5.2`" in help_text
+    assert "`6.2`" in help_text
 
 
 def test_parse_deployment_commands():
@@ -560,29 +843,29 @@ def test_orchestrator_reports_latest_pipeline_status():
         async def run_flow():
             await orchestrator.handle_control_command(
                 "alice",
-                "6 hello-pages",
+                "2 5 hello-pages",
                 session_key="alice",
             )
             runtime_context, _ = orchestrator._ensure_single_runtime_context("alice", "alice")
             workspace = Path(runtime_context["working_dir"])
             await orchestrator.handle_control_command(
                 "alice",
-                "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                "3 2 kangaroo117 kangaroo117@users.noreply.github.com",
                 session_key="alice",
             )
             await orchestrator.handle_control_command(
                 "alice",
-                "23 git@github.com:kangaroo117/hello-pages.git",
+                "3 12 git@github.com:kangaroo117/hello-pages.git",
                 session_key="alice",
             )
             await orchestrator.handle_control_command(
                 "alice",
-                "26 hello-pages dist",
+                "4 1 hello-pages dist",
                 session_key="alice",
             )
             return await orchestrator.handle_control_command(
                 "alice",
-                "33",
+                "4 5",
                 session_key="alice",
             )
 
@@ -627,17 +910,17 @@ def test_orchestrator_reports_cloudflare_pages_project_status():
         async def run_flow():
             await orchestrator.handle_control_command(
                 "alice",
-                "6 hello-pages",
+                "2 5 hello-pages",
                 session_key="alice",
             )
             await orchestrator.handle_control_command(
                 "alice",
-                "26 hello-pages dist",
+                "4 1 hello-pages dist",
                 session_key="alice",
             )
             return await orchestrator.handle_control_command(
                 "alice",
-                "34",
+                "4 6",
                 session_key="alice",
             )
 
@@ -684,17 +967,17 @@ def test_orchestrator_reports_cloudflare_worker_project_status():
         async def run_flow():
             await orchestrator.handle_control_command(
                 "alice",
-                "6 hello-worker",
+                "2 5 hello-worker",
                 session_key="alice",
             )
             await orchestrator.handle_control_command(
                 "alice",
-                "27 hello-worker src/index.ts",
+                "4 3 hello-worker src/index.ts",
                 session_key="alice",
             )
             return await orchestrator.handle_control_command(
                 "alice",
-                "34",
+                "4 6",
                 session_key="alice",
             )
 
@@ -1402,7 +1685,7 @@ def test_orchestrator_supports_git_identity_commands_and_project_status():
         assert "已创建个人项目：demo" in create_reply
         assert "Git仓库：未初始化" in status_before
         assert "状态：未配置" in status_before
-        assert "可发送：11" in status_before
+        assert "可发送：3.2" in status_before
         assert "已设置当前工作区 Git 身份" in set_reply
         assert "Git 初始化：已初始化新仓库" in set_reply
         assert "user.name：kangaroo117" in set_reply
@@ -1410,6 +1693,38 @@ def test_orchestrator_supports_git_identity_commands_and_project_status():
         assert "状态：已配置" in status_after
         assert "user.name：kangaroo117" in status_after
         assert "Git身份：kangaroo117 <kangaroo117@users.noreply.github.com>" in project_reply
+
+
+def test_create_existing_project_reuses_current_project_instead_of_error():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        async def run_flow():
+            first_reply = await orchestrator.handle_control_command(
+                "alice",
+                "新建项目 hello-mini",
+                session_key="alice",
+            )
+            second_reply = await orchestrator.handle_control_command(
+                "alice",
+                "2.5 hello-mini",
+                session_key="alice",
+            )
+            return first_reply, second_reply
+
+        first_reply, second_reply = asyncio.run(run_flow())
+
+        assert "已创建个人项目：hello-mini" in first_reply
+        assert "空工作区只会创建项目目录" in first_reply
+        assert "项目已存在：hello-mini" in second_reply
+        assert "已为你直接进入现有项目" in second_reply
+        assert "已进入项目：hello-mini" in second_reply
+        assert "2.5 hello-mini-2" in second_reply
 
 
 def test_push_to_github_without_repo_name_requires_named_project():
@@ -1436,7 +1751,7 @@ def test_push_to_github_without_repo_name_requires_named_project():
         reply = asyncio.run(run_flow())
 
         assert "当前项目还没有合适的 GitHub 仓库名" in reply
-        assert "推送到GitHub <仓库名>" in reply
+        assert "3.10 <仓库名>" in reply
 
 
 def test_orchestrator_push_to_github_creates_remote_and_pushes():
@@ -1538,7 +1853,7 @@ def test_push_intent_preflight_suggests_push_command():
 
         assert "看起来你是想把当前项目推送到 GitHub" in reply
         assert "一级控制命令" in reply
-        assert "19 hello-world" in reply
+        assert "3.10 hello-world" in reply
 
 
 def test_numeric_shortcuts_execute_control_commands():
@@ -1558,12 +1873,12 @@ def test_numeric_shortcuts_execute_control_commands():
             )
             create_reply = await orchestrator.handle_control_command(
                 "alice",
-                "6 hello-world",
+                "2 5 hello-world",
                 session_key="alice",
             )
             git_reply = await orchestrator.handle_control_command(
                 "alice",
-                "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                "3 2 kangaroo117 kangaroo117@users.noreply.github.com",
                 session_key="alice",
             )
             return help_reply, create_reply, git_reply
@@ -1571,8 +1886,8 @@ def test_numeric_shortcuts_execute_control_commands():
         help_reply, create_reply, git_reply = asyncio.run(run_flow())
 
         assert orchestrator.is_control_command("1") is True
-        assert orchestrator.is_control_command("6 hello-world") is True
-        assert "一级控制命令菜单" in help_reply
+        assert orchestrator.is_control_command("2 5 hello-world") is True
+        assert "新手开始" in help_reply
         assert "已创建个人项目：hello-world" in create_reply
         assert "已设置当前工作区 Git 身份" in git_reply
 
@@ -1599,7 +1914,7 @@ def test_numeric_shortcuts_support_push_command_arguments():
             working_dir=str(working_dir),
         )
 
-        normalized = orchestrator._normalize_control_command_input("19 hello-world")
+        normalized = orchestrator._normalize_control_command_input("3.10 hello-world")
         request, usage = orchestrator._parse_github_push_command(normalized)
 
         assert usage is None
@@ -1658,6 +1973,290 @@ def test_list_github_repositories_uses_configured_owner():
         assert "GitHub 仓库列表（账号 kangaroo117）" in reply
         assert "kangaroo117/hello-world" in reply
         assert "other/demo" not in reply
+
+
+def test_publish_wechat_miniprogram_path_error_message_keeps_appid_optional():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"name": "hello-mini"},
+            },
+            None,
+        )
+        orchestrator.project_deployment_manager.get_git_identity = lambda workspace_path: SimpleNamespace(
+            is_configured=True
+        )
+        orchestrator._resolve_push_repository_name = lambda project, repository_name, workspace_path: (
+            repository_name
+        )
+        orchestrator._resolve_wechat_miniprogram_appid = lambda project, explicit_appid="": (
+            "wx1234567890ab"
+        )
+
+        reply = orchestrator._handle_publish_wechat_miniprogram_command(
+            user_id="alice",
+            repository_name="hello-mini",
+            appid="",
+            project_path="miniprogram",
+            session_key="alice",
+        )
+
+        assert "微信小程序项目路径校验失败" in reply
+        assert "未找到小程序项目配置文件：miniprogram/project.config.json" in reply
+        assert "请发送：5.2 <仓库名> [AppID] <项目路径>" in reply
+        assert "当前通常还是空工作区" in reply
+        assert "项目路径请填 ." in reply
+
+
+def test_sync_wechat_miniprogram_project_appid_updates_touristappid_from_default():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        config_path = working_dir / "project.config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "appid": "touristappid",
+                    "projectname": "hello-mini",
+                    "miniprogramRoot": "miniprogram/",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        changed = orchestrator._sync_wechat_miniprogram_project_appid(
+            str(working_dir),
+            ".",
+            "wx1234567890ab",
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert changed is True
+        assert updated["appid"] == "wx1234567890ab"
+
+
+def test_sync_wechat_miniprogram_project_appid_keeps_existing_real_appid_without_explicit():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        config_path = working_dir / "project.config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "appid": "wxexisting12345",
+                    "projectname": "hello-mini",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        changed = orchestrator._sync_wechat_miniprogram_project_appid(
+            str(working_dir),
+            ".",
+            "wx1234567890ab",
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert changed is False
+        assert updated["appid"] == "wxexisting12345"
+
+
+def test_sync_wechat_miniprogram_project_appid_explicit_override_wins():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        config_path = working_dir / "project.config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "appid": "wxexisting12345",
+                    "projectname": "hello-mini",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        changed = orchestrator._sync_wechat_miniprogram_project_appid(
+            str(working_dir),
+            ".",
+            "wx1234567890ab",
+            explicit_appid="wx1234567890ab",
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert changed is True
+        assert updated["appid"] == "wx1234567890ab"
+
+
+def test_publish_wechat_miniprogram_success_reply_includes_next_step_hint():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"project_id": "proj_1", "name": "hello-mini"},
+            },
+            None,
+        )
+        orchestrator.project_deployment_manager.get_git_identity = lambda workspace_path: SimpleNamespace(
+            is_configured=True
+        )
+        orchestrator._resolve_push_repository_name = lambda project, repository_name, workspace_path: (
+            repository_name
+        )
+        orchestrator._resolve_wechat_miniprogram_appid = lambda project, explicit_appid="": (
+            "wx1234567890ab"
+        )
+        orchestrator._resolve_wechat_miniprogram_project_path = (
+            lambda project, workspace_path, explicit_project_path="": "."
+        )
+        orchestrator._resolve_wechat_miniprogram_robot = lambda project: 1
+        orchestrator._handle_push_to_github_command = (
+            lambda **kwargs: "已提交并推送当前项目到 GitHub\n项目：hello-mini"
+        )
+        orchestrator.project_deployment_manager.get_git_origin = (
+            lambda workspace_path: "git@github.com:kangaroo117/hello-mini.git"
+        )
+        orchestrator._parse_github_remote = lambda remote_url: ("kangaroo117", "hello-mini")
+        orchestrator._read_runtime_secret = lambda key: "private-key"
+        orchestrator.github_actions_secret_manager.seed_wechat_miniprogram_repository_secrets = (
+            lambda owner, repo, private_key: ["WECHAT_MINIPROGRAM_PRIVATE_KEY"]
+        )
+        orchestrator.project_deployment_manager.scaffold_wechat_miniprogram_upload = lambda **kwargs: SimpleNamespace(
+            deployment_type="wechat_miniprogram",
+            workflow_path=".github/workflows/upload-wechat-miniprogram.yml",
+            script_path=".github/scripts/upload-wechat-miniprogram.js",
+            files=[
+                SimpleNamespace(
+                    relative_path=".github/workflows/upload-wechat-miniprogram.yml",
+                    action="created",
+                )
+            ],
+            appid="wx1234567890ab",
+            project_path=".",
+            robot=1,
+        )
+        orchestrator.project_deployment_manager.commit_and_push_current_branch = (
+            lambda **kwargs: SimpleNamespace(branch_name="main")
+        )
+        orchestrator.project_registry.update_project = lambda *args, **kwargs: None
+
+        reply = orchestrator._handle_publish_wechat_miniprogram_command(
+            user_id="alice",
+            repository_name="hello-mini",
+            appid="",
+            project_path=".",
+            session_key="alice",
+        )
+
+        assert "已完成一键上传微信小程序的准备" in reply
+        assert "下一步：先查看 GitHub Actions 上传结果" in reply
+        assert "5.3 [配置文件]" in reply
+
+
+def test_query_wechat_miniprogram_status_reply_includes_next_step_hint():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"project_id": "proj_1", "name": "hello-mini"},
+            },
+            None,
+        )
+        orchestrator._resolve_wechat_miniprogram_appid = lambda project, explicit_appid="": (
+            "wx1234567890ab"
+        )
+        orchestrator._resolve_wechat_miniprogram_app_secret = lambda: "app-secret"
+        orchestrator._resolve_wechat_miniprogram_audit_id = (
+            lambda project, explicit_audit_id="": 123456
+        )
+        orchestrator.wechat_miniprogram_manager.get_audit_status = lambda **kwargs: {
+            "status": "approved",
+            "errmsg": "ok",
+        }
+        orchestrator.project_registry.update_project = lambda *args, **kwargs: None
+
+        reply = orchestrator._handle_query_wechat_miniprogram_audit_status_command(
+            user_id="alice",
+            audit_id="",
+            session_key="alice",
+        )
+
+        assert "微信小程序审核状态" in reply
+        assert "下一步：如已审核通过，可发送 5.6 正式发布" in reply
+
+
+def test_release_wechat_miniprogram_reply_includes_next_step_hint():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"project_id": "proj_1", "name": "hello-mini"},
+            },
+            None,
+        )
+        orchestrator._resolve_wechat_miniprogram_appid = lambda project, explicit_appid="": (
+            "wx1234567890ab"
+        )
+        orchestrator._resolve_wechat_miniprogram_app_secret = lambda: "app-secret"
+        orchestrator.wechat_miniprogram_manager.release = lambda **kwargs: {
+            "errcode": 0,
+            "errmsg": "ok",
+        }
+        orchestrator.project_registry.update_project = lambda *args, **kwargs: None
+
+        reply = orchestrator._handle_release_wechat_miniprogram_command(
+            user_id="alice",
+            session_key="alice",
+        )
+
+        assert "已触发微信小程序正式发布" in reply
+        assert "下一步：可在微信公众平台或客户端确认正式版是否已生效" in reply
 
 
 def test_create_github_repository_rejects_configured_owner_mismatch():
@@ -1767,7 +2366,7 @@ def test_push_to_github_rebinds_to_configured_owner():
             async def run_flow():
                 await orchestrator.handle_control_command(
                     "alice",
-                    "6 hello-world",
+                    "2 5 hello-world",
                     session_key="alice",
                 )
                 runtime_context, _ = orchestrator._ensure_single_runtime_context("alice", "alice")
@@ -1775,17 +2374,17 @@ def test_push_to_github_rebinds_to_configured_owner():
                 (workspace / "README.md").write_text("hello\n", encoding="utf-8")
                 await orchestrator.handle_control_command(
                     "alice",
-                    "11 kangaroo117 kangaroo117@users.noreply.github.com",
+                    "3 2 kangaroo117 kangaroo117@users.noreply.github.com",
                     session_key="alice",
                 )
                 await orchestrator.handle_control_command(
                     "alice",
-                    "23 git@github.com:other/hello-world.git",
+                    "3 12 git@github.com:other/hello-world.git",
                     session_key="alice",
                 )
                 return await orchestrator.handle_control_command(
                     "alice",
-                    "19",
+                    "3 10",
                     session_key="alice",
                 )
 

@@ -52,6 +52,8 @@ _CODEX_CLI_RECONNECT_HINT = (
 )
 _CODEX_CLI_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
 _HELP_MENU_TRIGGER_RE = re.compile(r"^\s*1[.、:：)]?\s*$")
+_LEADING_GROUP_MENTION_RE = re.compile(r"^(?:(?:<@[^>]+>|@[^\s@]+)\s+)+")
+_QUOTE_HINT_TOKENS = ("quote", "quoted", "reply", "refer", "reference", "citation")
 
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
@@ -211,6 +213,244 @@ class MessageDispatcher:
             logger.warning("[Dispatcher:%s] 检查控制命令失败: %s", self.bot_key, e)
             return False
 
+    def _normalize_text_content(self, content: str, chattype: str) -> str:
+        value = str(content or "").strip()
+        if not value:
+            return ""
+
+        if self.bot_name and value.startswith(f"@{self.bot_name} "):
+            value = value[len(f"@{self.bot_name} "):].strip()
+        elif self.bot_name and value.startswith(f"@{self.bot_name}"):
+            value = value[len(f"@{self.bot_name}"):].strip()
+
+        if chattype == "group":
+            stripped = _LEADING_GROUP_MENTION_RE.sub("", value).strip()
+            if stripped:
+                value = stripped
+
+        return value.strip()
+
+    @staticmethod
+    def _clean_message_fragment(value: str, limit: int = 280) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    @classmethod
+    def _is_quote_hint(cls, value: str) -> bool:
+        normalized = str(value or "").strip().lower()
+        return bool(normalized) and any(token in normalized for token in _QUOTE_HINT_TOKENS)
+
+    @classmethod
+    def _extract_text_fragments_from_node(cls, node, depth: int = 0) -> list[str]:
+        if depth > 4 or node is None:
+            return []
+        if isinstance(node, str):
+            cleaned = cls._clean_message_fragment(node)
+            return [cleaned] if cleaned else []
+        if isinstance(node, list):
+            fragments: list[str] = []
+            for item in node[:10]:
+                fragments.extend(cls._extract_text_fragments_from_node(item, depth + 1))
+            return fragments
+        if not isinstance(node, dict):
+            return []
+
+        fragments: list[str] = []
+        priority_keys = (
+            "content",
+            "text",
+            "body",
+            "message",
+            "title",
+            "desc",
+            "description",
+            "quote_text",
+            "quoted_text",
+            "reply_text",
+        )
+        skip_nested_keys = {
+            "aeskey",
+            "url",
+            "msgid",
+            "msg_id",
+            "message_id",
+            "chatid",
+            "chat_id",
+            "eventtype",
+            "msgtype",
+            "userid",
+            "user_id",
+            "username",
+            "nickname",
+            "name",
+            "id",
+            "key",
+            "from",
+            "sender",
+            "author",
+        }
+
+        for key in priority_keys:
+            value = node.get(key)
+            if isinstance(value, str):
+                cleaned = cls._clean_message_fragment(value)
+                if cleaned:
+                    fragments.append(cleaned)
+            elif isinstance(value, (dict, list)):
+                fragments.extend(cls._extract_text_fragments_from_node(value, depth + 1))
+
+        for key, value in node.items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key in priority_keys or normalized_key in skip_nested_keys:
+                continue
+            if isinstance(value, (dict, list)):
+                fragments.extend(cls._extract_text_fragments_from_node(value, depth + 1))
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for fragment in fragments:
+            normalized = fragment.strip()
+            if not normalized or normalized in seen:
+                continue
+            deduped.append(normalized)
+            seen.add(normalized)
+            if len(deduped) >= 3:
+                break
+        return deduped
+
+    @classmethod
+    def _extract_quote_speaker(cls, node) -> str:
+        if not isinstance(node, dict):
+            return ""
+
+        candidates = []
+        from_data = node.get("from")
+        if isinstance(from_data, dict):
+            candidates.extend(
+                [
+                    from_data.get("name"),
+                    from_data.get("nickname"),
+                    from_data.get("username"),
+                    from_data.get("userid"),
+                    from_data.get("user_id"),
+                ]
+            )
+
+        sender_data = node.get("sender")
+        if isinstance(sender_data, dict):
+            candidates.extend(
+                [
+                    sender_data.get("name"),
+                    sender_data.get("nickname"),
+                    sender_data.get("username"),
+                    sender_data.get("userid"),
+                    sender_data.get("user_id"),
+                ]
+            )
+
+        candidates.extend(
+            [
+                node.get("sender_name"),
+                node.get("nickname"),
+                node.get("name"),
+                node.get("username"),
+                node.get("userid"),
+                node.get("user_id"),
+            ]
+        )
+
+        for candidate in candidates:
+            cleaned = cls._clean_message_fragment(candidate, limit=80)
+            if cleaned:
+                return cleaned
+        return ""
+
+    @classmethod
+    def _collect_quote_nodes(cls, node, depth: int = 0) -> list:
+        if depth > 5 or node is None:
+            return []
+        if isinstance(node, list):
+            nodes = []
+            for item in node[:20]:
+                nodes.extend(cls._collect_quote_nodes(item, depth + 1))
+            return nodes
+        if not isinstance(node, dict):
+            return []
+
+        nodes = []
+        msgtype_value = node.get("msgtype")
+        if isinstance(msgtype_value, str) and cls._is_quote_hint(msgtype_value):
+            nodes.append(node)
+
+        for key, value in node.items():
+            normalized_key = str(key or "").strip().lower()
+            if cls._is_quote_hint(normalized_key):
+                nodes.append(value)
+            if isinstance(value, (dict, list)):
+                nodes.extend(cls._collect_quote_nodes(value, depth + 1))
+
+        return nodes
+
+    @classmethod
+    def _extract_quote_context(cls, body: dict) -> str:
+        fragments: list[str] = []
+        seen: set[str] = set()
+
+        for node in cls._collect_quote_nodes(body):
+            speaker = cls._extract_quote_speaker(node)
+            texts = cls._extract_text_fragments_from_node(node)
+            if not texts:
+                continue
+            snippet = "\n".join(texts)
+            if speaker and not snippet.startswith(f"{speaker}："):
+                snippet = f"{speaker}：{snippet}"
+            cleaned = cls._clean_message_fragment(snippet, limit=360)
+            if not cleaned or cleaned in seen:
+                continue
+            fragments.append(cleaned)
+            seen.add(cleaned)
+            if len(fragments) >= 2:
+                break
+
+        return "\n\n".join(fragments)
+
+    def _resolve_control_command_content(self, content: str, quote_context: str = "") -> str:
+        normalized = str(content or "").strip()
+        if not normalized:
+            return ""
+        if not quote_context or self._is_orchestrator_control_command(normalized):
+            return normalized
+
+        candidates = []
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        if lines:
+            candidates.append(lines[-1])
+        paragraphs = [item.strip() for item in re.split(r"\n\s*\n", normalized) if item.strip()]
+        if paragraphs:
+            candidates.append(paragraphs[-1])
+
+        for candidate in candidates:
+            if candidate and candidate != normalized and self._is_orchestrator_control_command(candidate):
+                return candidate
+        return normalized
+
+    @staticmethod
+    def _compose_message_with_quote(content: str, quote_context: str = "") -> str:
+        normalized_content = str(content or "").strip()
+        normalized_quote = str(quote_context or "").strip()
+        if not normalized_quote:
+            return normalized_content
+        if normalized_quote in normalized_content:
+            return normalized_content
+        if not normalized_content:
+            return f"【引用消息】\n{normalized_quote}"
+        return f"【引用消息】\n{normalized_quote}\n\n【当前消息】\n{normalized_content}"
+
     @staticmethod
     def _pending_interaction_notice() -> str:
         return "当前 Codex 正等待你的确认或补充信息，请直接发送文字回复。"
@@ -315,16 +555,16 @@ class MessageDispatcher:
 
     async def _handle_text(self, req_id: str, body: dict, user_id: str, session_key: str, chattype: str):
         """处理文本消息"""
-        content = body.get("text", {}).get("content", "").strip()
+        content = self._normalize_text_content(
+            body.get("text", {}).get("content", ""),
+            chattype,
+        )
         if not content:
             return
 
-        if self.bot_name and content.startswith(f"@{self.bot_name} "):
-            content = content[len(f"@{self.bot_name} "):].strip()
-        if self.bot_name and content.startswith(f"@{self.bot_name}"):
-            content = content[len(f"@{self.bot_name}"):].strip()
-
-        normalized = content.strip().lower()
+        quote_context = self._extract_quote_context(body)
+        command_content = self._resolve_control_command_content(content, quote_context)
+        normalized = command_content.strip().lower()
         log_context = self._build_log_context(body, chattype, "text")
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
 
@@ -348,7 +588,7 @@ class MessageDispatcher:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
             return
 
-        is_control_command = self._is_orchestrator_control_command(content)
+        is_control_command = self._is_orchestrator_control_command(command_content)
 
         if self.orchestrator.has_pending_interaction(runtime_session_key) and not is_control_command:
             interaction_result = await self.orchestrator.handle_interaction_text(runtime_session_key, content)
@@ -370,7 +610,7 @@ class MessageDispatcher:
 
         control_reply = await self.orchestrator.handle_control_command(
             user_id=user_id,
-            content=content,
+            content=command_content,
             session_key=session_key,
             log_context=log_context,
         )
@@ -378,11 +618,11 @@ class MessageDispatcher:
             await self._reply_text(req_id, control_reply, finish=True)
             return
 
-        handler = self.command_router.handlers.get(content) or self.command_router.handlers.get(normalized)
+        handler = self.command_router.handlers.get(command_content) or self.command_router.handlers.get(normalized)
         if handler:
             stream_id = uuid.uuid4().hex[:12]
             try:
-                msg_json, _ = handler.handle(content, stream_id, user_id)
+                msg_json, _ = handler.handle(command_content, stream_id, user_id)
                 import json as _json
                 msg_data = _json.loads(msg_json)
                 if msg_data.get("msgtype") == "stream":
@@ -407,7 +647,7 @@ class MessageDispatcher:
             runtime_session_key,
             self.orchestrator.handle_text_message(
                 user_id=user_id,
-                message=content,
+                message=self._compose_message_with_quote(content, quote_context),
                 stream_id=stream_id,
                 session_key=session_key,
                 log_context=log_context,
@@ -536,14 +776,19 @@ class MessageDispatcher:
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
 
+        quote_context = self._extract_quote_context(body)
         content_blocks = []
+        text_parts = []
+        has_non_text_content = False
         for item in items:
             item_type = item.get("msgtype", "")
             if item_type == "text":
                 text_value = item.get("text", {}).get("content", "")
                 if text_value:
+                    text_parts.append(text_value)
                     content_blocks.append({"type": "text", "text": text_value})
             elif item_type == "image":
+                has_non_text_content = True
                 image_url = item.get("image", {}).get("url", "")
                 aeskey = item.get("image", {}).get("aeskey", "")
                 if image_url and aeskey:
@@ -560,6 +805,16 @@ class MessageDispatcher:
 
         if not content_blocks:
             return
+
+        if text_parts and not has_non_text_content:
+            text_body = dict(body)
+            text_body["text"] = {"content": "\n".join(text_parts)}
+            text_body["_original_msgtype"] = "mixed"
+            await self._handle_text(req_id, text_body, user_id, session_key, chattype)
+            return
+
+        if quote_context:
+            content_blocks.insert(0, {"type": "text", "text": f"【引用消息】\n{quote_context}"})
 
         stream_id = uuid.uuid4().hex[:12]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
