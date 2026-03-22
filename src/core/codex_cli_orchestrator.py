@@ -60,6 +60,15 @@ from src.adapters.codex_app_server_adapter import (
     CodexInteractionRequest,
 )
 from src.utils.weixin_utils import TemplateCardBuilder
+from src.utils.quoted_handoff import (
+    split_structured_user_message,
+    looks_like_quoted_development_handoff,
+    rewrite_quoted_development_request,
+)
+from src.utils.quoted_requirement_doc import (
+    DEFAULT_REQUIREMENT_DOC_PATH,
+    parse_quoted_requirement_doc_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +461,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not self.enable_project_workspace_mode:
             return None
 
+        requirement_doc_request = parse_quoted_requirement_doc_request(content)
+        if requirement_doc_request:
+            return self._handle_save_requirement_doc_command(
+                user_id=user_id,
+                request_content=content,
+                session_key=session_key,
+                log_context=log_context,
+            )
+
         command = self._normalize_control_command_input(content)
         if not command:
             return None
@@ -697,6 +715,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
         return None
 
     def is_control_command(self, content: str) -> bool:
+        if parse_quoted_requirement_doc_request(content):
+            return True
         command = self._normalize_control_command_input(content)
         if not command:
             return False
@@ -772,7 +792,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
         )
         if preflight_reply:
             return await self._return_early_reply(preflight_reply, on_stream_delta)
-        inputs = [{"type": "text", "text": self._sanitize_user_input(message)}]
+        effective_message = self._rewrite_quoted_development_request(message)
+        inputs = [{"type": "text", "text": self._sanitize_user_input(effective_message)}]
         return await self._run_codex_turn(
             user_id=user_id,
             inputs=inputs,
@@ -781,7 +802,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             log_context=log_context,
             on_stream_delta=on_stream_delta,
             on_interaction_request=on_interaction_request,
-            message_content=message,
+            message_content=effective_message,
         )
 
     async def handle_multimodal_message(
@@ -3884,6 +3905,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
             for keyword in ("hello world", "helloworld", "project ")
         )
 
+    @classmethod
+    def _split_structured_user_message(cls, message: str) -> tuple[str, str, str]:
+        return split_structured_user_message(message)
+
+    @classmethod
+    def _looks_like_quoted_development_handoff(cls, current_message: str, quote_context: str) -> bool:
+        return looks_like_quoted_development_handoff(current_message, quote_context)
+
+    @classmethod
+    def _rewrite_quoted_development_request(cls, message: str) -> str:
+        return rewrite_quoted_development_request(message)
+
     def _maybe_handle_push_to_github_intent(
         self,
         user_id: str,
@@ -4525,6 +4558,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not command:
             return ""
 
+        _group_project_context, quote_context, current_message = cls._split_structured_user_message(command)
+        if current_message and (quote_context or command.startswith("【当前消息】") or command.startswith("【当前群项目上下文】")):
+            command = current_message.strip() or command
+
         shortcut_match = CONTROL_COMMAND_SHORTCUT_EXACT_RE.match(command)
         if shortcut_match:
             shortcut_id = shortcut_match.group(1)
@@ -4561,6 +4598,80 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not tail:
             return str(shortcut["command"])
         return f"{shortcut['command']} {tail}".strip()
+
+    @staticmethod
+    def _normalize_requirement_doc_content(content: str) -> str:
+        text = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return f"{text}\n"
+
+    @staticmethod
+    def _resolve_requirement_doc_path(workspace_path: str, relative_path: str) -> Path:
+        workspace_root = Path(workspace_path).expanduser().resolve()
+        normalized = str(relative_path or "").strip().replace("\\", "/")
+        if not normalized:
+            normalized = DEFAULT_REQUIREMENT_DOC_PATH
+        if normalized.startswith("/"):
+            raise ValueError("需求文档路径不能是绝对路径")
+
+        candidate = (workspace_root / normalized).resolve()
+        candidate.relative_to(workspace_root)
+        return candidate
+
+    def _handle_save_requirement_doc_command(
+        self,
+        user_id: str,
+        request_content: str,
+        session_key: str = "",
+        log_context: dict = None,
+    ) -> str:
+        request = parse_quoted_requirement_doc_request(request_content)
+        if not request:
+            return ""
+        if not str(request.quote_context or "").strip():
+            return (
+                "未检测到引用的需求内容。\n"
+                "请先引用一条需求消息，再发送：保存为需求文档\n"
+                f"默认会写入：{DEFAULT_REQUIREMENT_DOC_PATH}"
+            )
+
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+        if runtime_context is None:
+            return self._group_project_required_message()
+
+        workspace_path = runtime_context["working_dir"]
+        try:
+            doc_path = self._resolve_requirement_doc_path(workspace_path, request.target_path)
+        except ValueError:
+            return "需求文档路径必须位于当前项目工作区内，例如：docs/requirements.md"
+
+        content = self._normalize_requirement_doc_content(request.quote_context)
+        if not content:
+            return "引用消息里没有可保存的文本内容，请换一条需求消息再试。"
+
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        existed = doc_path.exists()
+        unchanged = False
+        if existed:
+            try:
+                unchanged = doc_path.read_text(encoding="utf-8") == content
+            except Exception:
+                unchanged = False
+
+        if not unchanged:
+            doc_path.write_text(content, encoding="utf-8")
+
+        workspace_root = Path(workspace_path).expanduser().resolve()
+        display_path = doc_path.relative_to(workspace_root).as_posix()
+        status_text = "需求文档内容未变化，已确认保存位置" if unchanged else ("已更新需求文档" if existed else "已保存需求文档")
+        return (
+            f"{status_text}：{display_path}\n"
+            f"下一步可直接发送：根据 {display_path} 开发"
+        )
 
     @staticmethod
     def _command_system_overview_lines() -> List[str]:
@@ -5133,6 +5244,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 "- `3.10`：推送到 GitHub；仓库名留空时默认当前项目名",
                 "- `4.2`：一键发布网站；参数留空时默认当前项目名 + `dist`",
                 "- `5.2`：一键上传微信小程序体验版",
+                "- 长需求先引用消息，再发：`保存为需求文档`，默认落到 `docs/requirements.md`",
                 "- `5.3` ~ `5.7`：小程序提审、查审核、正式发布、撤回审核",
                 "- `6.2`：查看部署状态，再决定下一步",
             ]

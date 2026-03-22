@@ -17,7 +17,13 @@ from src.core.base_orchestrator import BaseOrchestrator
 from src.transport.ws_client import WsClient
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.session_manager import SessionManager
+from src.core.group_project_context_resolver import (
+    GroupProjectContext,
+    GroupProjectContextResolver,
+)
 from src.handlers.command_handlers import CommandRouter
+from src.utils.quoted_handoff import rewrite_quoted_development_request
+from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 from src.utils.weixin_utils import ImageUtils, FileUtils
 
 logger = logging.getLogger(__name__)
@@ -84,6 +90,7 @@ class MessageDispatcher:
         ws_client: WsClient,
         bot_config: BotConfig,
         orchestrator: Optional[BaseOrchestrator] = None,
+        group_project_context_resolver: Optional[GroupProjectContextResolver] = None,
     ):
         self.ws = ws_client
         self.config = bot_config
@@ -97,6 +104,7 @@ class MessageDispatcher:
 
         # 会话管理
         self.session_manager = SessionManager()
+        self.group_project_context_resolver = group_project_context_resolver
 
         # 加载自定义命令
         self._load_custom_commands()
@@ -138,6 +146,84 @@ class MessageDispatcher:
             session_key=session_key,
             log_context=log_context or {},
         )
+
+    def _should_inherit_group_project_context(self, chattype: str) -> bool:
+        if chattype != "group":
+            return False
+        if self.config.bot_type == "codex_cli":
+            return False
+        if not self.group_project_context_resolver or not self.group_project_context_resolver.has_sources():
+            return False
+        provider_config = self.config.provider_config or {}
+        raw_value = provider_config.get("inherit_group_project_context")
+        if raw_value is None:
+            return True
+        return self._is_truthy_config(raw_value)
+
+    def _resolve_group_project_context(
+        self,
+        user_id: str,
+        session_key: str,
+        chattype: str,
+    ) -> Optional[GroupProjectContext]:
+        if not self._should_inherit_group_project_context(chattype):
+            return None
+        try:
+            return self.group_project_context_resolver.resolve(
+                bot_config=self.config,
+                chat_id=session_key,
+                user_id=user_id,
+            )
+        except Exception as e:
+            logger.warning("[Dispatcher:%s] 解析群项目上下文失败: %s", self.bot_key, e)
+            return None
+
+    @staticmethod
+    def _group_project_context_log_fields(context: Optional[GroupProjectContext]) -> dict:
+        if not context:
+            return {}
+        return {
+            "project_id": context.project_id,
+            "project_name": context.project_name,
+            "project_workspace_path": context.workspace_path,
+            "project_source_bot_key": context.source_bot_key,
+            "project_mode": context.mode,
+        }
+
+    @staticmethod
+    def _format_group_project_context(context: Optional[GroupProjectContext]) -> str:
+        if not context:
+            return ""
+
+        mode_text = "共享工作区" if context.mode == "shared_workspace" else "个人工作区"
+        workspace_kind = "共享" if context.workspace_type == "shared" else "个人"
+        lines = [
+            f"来源机器人：{context.source_bot_key}",
+            f"项目：{context.project_name} ({context.project_id})",
+            f"当前模式：{mode_text}",
+            f"当前工作区：{workspace_kind} / {context.workspace_path}",
+        ]
+        if context.project_root:
+            lines.append(f"项目目录：{context.project_root}")
+        if context.git_remote_url:
+            lines.append(f"仓库地址：{context.git_remote_url}")
+        elif context.publish_git_remote_url:
+            lines.append(f"发布仓库：{context.publish_git_remote_url}")
+        if context.deployment_type:
+            lines.append(f"部署类型：{context.deployment_type}")
+        lines.append("说明：这是当前群聊绑定的项目上下文。除非用户明确切换话题，否则请默认围绕这个项目回答。")
+        lines.append("如果当前机器人不具备该目录访问能力，请先明确说明限制，不要假装已经读取了项目文件。")
+        return "\n".join(lines)
+
+    @classmethod
+    def _compose_message_with_group_project_context(cls, content: str, context: Optional[GroupProjectContext]) -> str:
+        normalized_content = str(content or "").strip()
+        context_text = cls._format_group_project_context(context)
+        if not context_text:
+            return normalized_content
+        if not normalized_content:
+            return f"【当前群项目上下文】\n{context_text}"
+        return f"【当前群项目上下文】\n{context_text}\n\n{normalized_content}"
 
     def _make_orchestrator_call_kwargs(self, req_id: str) -> dict:
         if self.config.bot_type != "codex_cli":
@@ -241,21 +327,47 @@ class MessageDispatcher:
         return text[: max(0, limit - 3)] + "..."
 
     @classmethod
+    def _clean_document_fragment(cls, value: str, limit: int = 20000) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    @classmethod
     def _is_quote_hint(cls, value: str) -> bool:
         normalized = str(value or "").strip().lower()
         return bool(normalized) and any(token in normalized for token in _QUOTE_HINT_TOKENS)
 
     @classmethod
-    def _extract_text_fragments_from_node(cls, node, depth: int = 0) -> list[str]:
+    def _extract_text_fragments_from_node(
+        cls,
+        node,
+        depth: int = 0,
+        fragment_limit: int = 280,
+        max_fragments: int = 3,
+        preserve_formatting: bool = False,
+    ) -> list[str]:
         if depth > 4 or node is None:
             return []
         if isinstance(node, str):
-            cleaned = cls._clean_message_fragment(node)
+            cleaner = cls._clean_document_fragment if preserve_formatting else cls._clean_message_fragment
+            cleaned = cleaner(node, limit=fragment_limit)
             return [cleaned] if cleaned else []
         if isinstance(node, list):
             fragments: list[str] = []
             for item in node[:10]:
-                fragments.extend(cls._extract_text_fragments_from_node(item, depth + 1))
+                fragments.extend(
+                    cls._extract_text_fragments_from_node(
+                        item,
+                        depth + 1,
+                        fragment_limit=fragment_limit,
+                        max_fragments=max_fragments,
+                        preserve_formatting=preserve_formatting,
+                    )
+                )
             return fragments
         if not isinstance(node, dict):
             return []
@@ -298,18 +410,35 @@ class MessageDispatcher:
         for key in priority_keys:
             value = node.get(key)
             if isinstance(value, str):
-                cleaned = cls._clean_message_fragment(value)
+                cleaner = cls._clean_document_fragment if preserve_formatting else cls._clean_message_fragment
+                cleaned = cleaner(value, limit=fragment_limit)
                 if cleaned:
                     fragments.append(cleaned)
             elif isinstance(value, (dict, list)):
-                fragments.extend(cls._extract_text_fragments_from_node(value, depth + 1))
+                fragments.extend(
+                    cls._extract_text_fragments_from_node(
+                        value,
+                        depth + 1,
+                        fragment_limit=fragment_limit,
+                        max_fragments=max_fragments,
+                        preserve_formatting=preserve_formatting,
+                    )
+                )
 
         for key, value in node.items():
             normalized_key = str(key or "").strip().lower()
             if normalized_key in priority_keys or normalized_key in skip_nested_keys:
                 continue
             if isinstance(value, (dict, list)):
-                fragments.extend(cls._extract_text_fragments_from_node(value, depth + 1))
+                fragments.extend(
+                    cls._extract_text_fragments_from_node(
+                        value,
+                        depth + 1,
+                        fragment_limit=fragment_limit,
+                        max_fragments=max_fragments,
+                        preserve_formatting=preserve_formatting,
+                    )
+                )
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -319,7 +448,7 @@ class MessageDispatcher:
                 continue
             deduped.append(normalized)
             seen.add(normalized)
-            if len(deduped) >= 3:
+            if len(deduped) >= max_fragments:
                 break
         return deduped
 
@@ -415,6 +544,31 @@ class MessageDispatcher:
             fragments.append(cleaned)
             seen.add(cleaned)
             if len(fragments) >= 2:
+                break
+
+        return "\n\n".join(fragments)
+
+    @classmethod
+    def _extract_full_quote_context(cls, body: dict) -> str:
+        fragments: list[str] = []
+        seen: set[str] = set()
+
+        for node in cls._collect_quote_nodes(body):
+            texts = cls._extract_text_fragments_from_node(
+                node,
+                fragment_limit=20000,
+                max_fragments=10,
+                preserve_formatting=True,
+            )
+            if not texts:
+                continue
+            snippet = "\n\n".join(texts).strip()
+            cleaned = cls._clean_document_fragment(snippet, limit=20000)
+            if not cleaned or cleaned in seen:
+                continue
+            fragments.append(cleaned)
+            seen.add(cleaned)
+            if len(fragments) >= 1:
                 break
 
         return "\n\n".join(fragments)
@@ -563,9 +717,16 @@ class MessageDispatcher:
             return
 
         quote_context = self._extract_quote_context(body)
+        full_quote_context = self._extract_full_quote_context(body)
         command_content = self._resolve_control_command_content(content, quote_context)
         normalized = command_content.strip().lower()
-        log_context = self._build_log_context(body, chattype, "text")
+        group_project_context = self._resolve_group_project_context(user_id, session_key, chattype)
+        log_context = self._build_log_context(
+            body,
+            chattype,
+            "text",
+            **self._group_project_context_log_fields(group_project_context),
+        )
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
 
         if normalized in ("reset", "new", "clear", "重置", "清空"):
@@ -608,9 +769,15 @@ class MessageDispatcher:
         ):
             return
 
+        control_command_content = command_content
+        if (self.config.bot_type or "").strip() == "codex_cli" and full_quote_context:
+            quoted_control_message = self._compose_message_with_quote(command_content, full_quote_context)
+            if parse_quoted_requirement_doc_request(quoted_control_message):
+                control_command_content = quoted_control_message
+
         control_reply = await self.orchestrator.handle_control_command(
             user_id=user_id,
-            content=command_content,
+            content=control_command_content,
             session_key=session_key,
             log_context=log_context,
         )
@@ -647,7 +814,12 @@ class MessageDispatcher:
             runtime_session_key,
             self.orchestrator.handle_text_message(
                 user_id=user_id,
-                message=self._compose_message_with_quote(content, quote_context),
+                message=rewrite_quoted_development_request(
+                    self._compose_message_with_group_project_context(
+                        self._compose_message_with_quote(content, quote_context),
+                        group_project_context,
+                    )
+                ),
                 stream_id=stream_id,
                 session_key=session_key,
                 log_context=log_context,
@@ -666,7 +838,13 @@ class MessageDispatcher:
         if not image_url:
             return
 
-        log_context = self._build_log_context(body, chattype, "image")
+        group_project_context = self._resolve_group_project_context(user_id, session_key, chattype)
+        log_context = self._build_log_context(
+            body,
+            chattype,
+            "image",
+            **self._group_project_context_log_fields(group_project_context),
+        )
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
@@ -675,7 +853,13 @@ class MessageDispatcher:
         try:
             data_uri = await ImageUtils.download_and_decrypt_to_base64(image_url, aeskey)
             content_blocks = [
-                {"type": "text", "text": "[用户发送了一张图片] 请描述或分析这张图片"},
+                {
+                    "type": "text",
+                    "text": self._compose_message_with_group_project_context(
+                        "[用户发送了一张图片] 请描述或分析这张图片",
+                        group_project_context,
+                    ),
+                },
                 {"type": "image_url", "image_url": {"url": data_uri}},
             ]
         except Exception as e:
@@ -723,7 +907,13 @@ class MessageDispatcher:
         if not file_url:
             return
 
-        log_context = self._build_log_context(body, chattype, "file")
+        group_project_context = self._resolve_group_project_context(user_id, session_key, chattype)
+        log_context = self._build_log_context(
+            body,
+            chattype,
+            "file",
+            **self._group_project_context_log_fields(group_project_context),
+        )
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
@@ -743,7 +933,10 @@ class MessageDispatcher:
             return
 
         stream_id = uuid.uuid4().hex[:12]
-        message = f"[用户发送了文件: {file_name}] 请分析这个文件的内容。"
+        message = self._compose_message_with_group_project_context(
+            f"[用户发送了文件: {file_name}] 请分析这个文件的内容。",
+            group_project_context,
+        )
         log_context["file_info"] = [{"filename": file_name}]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
         on_stream_delta = self._make_stream_delta_callback(reply_state)
@@ -770,7 +963,13 @@ class MessageDispatcher:
         if not items:
             return
 
-        log_context = self._build_log_context(body, chattype, "mixed")
+        group_project_context = self._resolve_group_project_context(user_id, session_key, chattype)
+        log_context = self._build_log_context(
+            body,
+            chattype,
+            "mixed",
+            **self._group_project_context_log_fields(group_project_context),
+        )
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
@@ -813,6 +1012,14 @@ class MessageDispatcher:
             await self._handle_text(req_id, text_body, user_id, session_key, chattype)
             return
 
+        if group_project_context:
+            content_blocks.insert(
+                0,
+                {
+                    "type": "text",
+                    "text": f"【当前群项目上下文】\n{self._format_group_project_context(group_project_context)}",
+                },
+            )
         if quote_context:
             content_blocks.insert(0, {"type": "text", "text": f"【引用消息】\n{quote_context}"})
 

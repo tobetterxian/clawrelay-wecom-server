@@ -66,6 +66,9 @@ bots:
   #   provider_config:
   #     api_key: "${GEMINI_API_KEY}"
   #     enable_search: false  # 设置为 true 启用 Google Search 联网功能（需要 v1beta API）
+  #     inherit_group_project_context: true  # 群聊时自动继承 codex_cli 当前群项目上下文
+  #     # group_project_context_bot_key: "codex_cli_bot"  # 可选：固定从某个 codex_cli 机器人读取群项目
+  #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"  # 可选：显式指定项目状态目录
 
   # ========================================
   # OpenAI 机器人（直接调用 API）
@@ -81,6 +84,9 @@ bots:
   #   provider_config:
   #     api_key: "${OPENAI_API_KEY}"
   #     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"  # 可选，用于自定义端点或第三方兼容服务
+  #     inherit_group_project_context: true  # 群聊时自动继承 codex_cli 当前群项目上下文
+  #     # group_project_context_bot_key: "codex_cli_bot"
+  #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"
 
   # ========================================
   # Codex 机器人（通过 OpenAI Responses API）
@@ -97,6 +103,9 @@ bots:
   #     api_key: "${OPENAI_API_KEY}"
   #     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
   #     reasoning_effort: "medium"  # 可选: low | medium | high
+  #     inherit_group_project_context: true  # 群聊时自动继承 codex_cli 当前群项目上下文
+  #     # group_project_context_bot_key: "codex_cli_bot"
+  #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"
 
   # ========================================
   # Codex CLI 机器人（直接调用本地 codex CLI）

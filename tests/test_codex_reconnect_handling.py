@@ -527,6 +527,436 @@ def test_message_dispatcher_quote_command_uses_current_text_content():
     assert "命中控制命令：新建项目 quoted-demo" in payload["body"]["stream"]["content"]
 
 
+def test_message_dispatcher_rewrites_quoted_development_handoff_for_all_supported_bot_types():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.received_messages = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return False
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            return None
+
+        async def clear_session(self, session_key: str):
+            return None
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ):
+            self.received_messages.append(message)
+            if on_stream_delta:
+                await on_stream_delta("已收到", True)
+            return "已收到"
+
+    for bot_type in ("claude_code", "gemini", "openai", "codex", "codex_cli"):
+        orchestrator = FakeOrchestrator()
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key=f"{bot_type}_bot",
+                bot_id=f"{bot_type}_id",
+                secret="test_secret",
+                bot_type=bot_type,
+            ),
+            orchestrator=orchestrator,
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": f"req_{bot_type}"},
+                    "body": {
+                        "msgid": f"msg_{bot_type}",
+                        "msgtype": "text",
+                        "chattype": "group",
+                        "chatid": "group-handoff",
+                        "from": {"userid": "alice"},
+                        "text": {"content": "开发"},
+                        "reply_to": {
+                            "from": {"userid": "gemini_bot"},
+                            "text": {"content": "这是需求文档，先做一个 hello world 首页。"},
+                        },
+                    },
+                }
+            )
+        )
+
+        assert orchestrator.received_messages
+        message = orchestrator.received_messages[0]
+        assert "【引用需求文档】" in message
+        assert "这是需求文档，先做一个 hello world 首页。" in message
+        assert "用户正在引用上面的需求文档，并要求你在当前项目中直接开始开发" in message
+        assert "用户原话：开发" in message
+
+
+def test_message_dispatcher_non_codex_group_inherits_current_project_context():
+    from src.core.group_project_context_resolver import GroupProjectContextResolver
+    from src.core.project_registry import ProjectRegistry
+    from src.core.session_binding_manager import SessionBindingManager
+    from src.core.workspace_manager import WorkspaceManager
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.received_messages = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return False
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            return None
+
+        async def clear_session(self, session_key: str):
+            return None
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ):
+            self.received_messages.append((message, log_context or {}))
+            if on_stream_delta:
+                await on_stream_delta("已收到", True)
+            return "已收到"
+
+    with TemporaryDirectory() as tmpdir:
+        workspace_root = Path(tmpdir) / "shared-codex-data"
+        workspace_root.mkdir()
+        project_registry = ProjectRegistry(str(workspace_root))
+        workspace_manager = WorkspaceManager(str(workspace_root))
+        binding_manager = SessionBindingManager(str(workspace_root))
+
+        project = project_registry.create_project(
+            name="hello-mini",
+            kind="shared",
+            owner_user_id="alice",
+            owner_chat_id="group-project",
+        )
+        workspace = workspace_manager.get_or_create_shared_workspace(project, "group-project")
+        binding_manager.bind_session(
+            "codex_cli_bot",
+            "group-project",
+            project["project_id"],
+            workspace["workspace_id"],
+            "shared_workspace",
+        )
+
+        resolver = GroupProjectContextResolver.from_bot_configs(
+            {
+                "codex_cli_bot": BotConfig(
+                    bot_key="codex_cli_bot",
+                    bot_id="bot1",
+                    secret="secret1",
+                    bot_type="codex_cli",
+                    working_dir=str(Path(tmpdir) / "codex-working"),
+                    provider_config={
+                        "workspace_root": str(workspace_root),
+                        "enable_project_workspace_mode": True,
+                    },
+                ),
+                "gemini_bot": BotConfig(
+                    bot_key="gemini_bot",
+                    bot_id="bot2",
+                    secret="secret2",
+                    bot_type="gemini",
+                ),
+            }
+        )
+
+        orchestrator = FakeOrchestrator()
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="gemini_bot",
+                bot_id="bot2",
+                secret="secret2",
+                bot_type="gemini",
+            ),
+            orchestrator=orchestrator,
+            group_project_context_resolver=resolver,
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": "req_group_project_context"},
+                    "body": {
+                        "msgid": "msg_group_project_context",
+                        "msgtype": "text",
+                        "chattype": "group",
+                        "chatid": "group-project",
+                        "from": {"userid": "alice"},
+                        "text": {"content": "请继续分析这个项目的首页结构"},
+                    },
+                }
+            )
+        )
+
+        assert orchestrator.received_messages
+        message, log_context = orchestrator.received_messages[0]
+        assert "【当前群项目上下文】" in message
+        assert "来源机器人：codex_cli_bot" in message
+        assert "项目：hello-mini" in message
+        assert "请继续分析这个项目的首页结构" in message
+        assert log_context["project_name"] == "hello-mini"
+        assert log_context["project_source_bot_key"] == "codex_cli_bot"
+
+
+def test_message_dispatcher_forwards_full_quote_to_requirement_doc_command():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.control_messages = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return str(content or "").strip() == "保存为需求文档"
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            self.control_messages.append(content)
+            return "已保存"
+
+        async def clear_session(self, session_key: str):
+            return None
+
+    quoted_text = (
+        "# 需求文档\n\n"
+        "## 目标\n\n"
+        "做一个 hello world 首页。\n\n"
+        "## 功能\n\n"
+        "- 顶部标题\n"
+        "- 按钮\n"
+        "- 页脚说明\n\n"
+        + ("补充说明段落。\n" * 120)
+    ).strip()
+
+    orchestrator = FakeOrchestrator()
+    dispatcher = MessageDispatcher(
+        DummyWs(),
+        BotConfig(
+            bot_key="codex_cli_bot",
+            bot_id="bot1",
+            secret="secret",
+            bot_type="codex_cli",
+        ),
+        orchestrator=orchestrator,
+    )
+
+    asyncio.run(
+        dispatcher.on_msg_callback(
+            {
+                "headers": {"req_id": "req_save_doc"},
+                "body": {
+                    "msgid": "msg_save_doc",
+                    "msgtype": "text",
+                    "chattype": "single",
+                    "from": {"userid": "alice"},
+                    "text": {"content": "保存为需求文档"},
+                    "reply_to": {
+                        "from": {"userid": "gemini_bot"},
+                        "text": {"content": quoted_text},
+                    },
+                },
+            }
+        )
+    )
+
+    assert orchestrator.control_messages
+    control_message = orchestrator.control_messages[0]
+    assert "【引用消息】" in control_message
+    assert quoted_text in control_message
+    assert "补充说明段落。" in control_message
+    assert "【当前消息】\n保存为需求文档" in control_message
+
+
+def test_message_dispatcher_can_disable_group_project_context_inheritance():
+    from src.core.group_project_context_resolver import GroupProjectContextResolver
+    from src.core.project_registry import ProjectRegistry
+    from src.core.session_binding_manager import SessionBindingManager
+    from src.core.workspace_manager import WorkspaceManager
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.received_messages = []
+
+        def get_runtime_session_key(self, user_id: str, session_key: str, log_context: dict = None) -> str:
+            return session_key or user_id
+
+        def has_pending_interaction(self, runtime_session_key: str) -> bool:
+            return False
+
+        async def handle_interaction_text(self, runtime_session_key: str, content: str):
+            return None
+
+        def is_control_command(self, content: str) -> bool:
+            return False
+
+        async def handle_control_command(self, user_id: str, content: str, session_key: str = "", log_context: dict = None):
+            return None
+
+        async def clear_session(self, session_key: str):
+            return None
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ):
+            self.received_messages.append(message)
+            if on_stream_delta:
+                await on_stream_delta("已收到", True)
+            return "已收到"
+
+    with TemporaryDirectory() as tmpdir:
+        workspace_root = Path(tmpdir) / "shared-codex-data"
+        workspace_root.mkdir()
+        project_registry = ProjectRegistry(str(workspace_root))
+        workspace_manager = WorkspaceManager(str(workspace_root))
+        binding_manager = SessionBindingManager(str(workspace_root))
+
+        project = project_registry.create_project(
+            name="hello-mini",
+            kind="shared",
+            owner_user_id="alice",
+            owner_chat_id="group-project",
+        )
+        workspace = workspace_manager.get_or_create_shared_workspace(project, "group-project")
+        binding_manager.bind_session(
+            "codex_cli_bot",
+            "group-project",
+            project["project_id"],
+            workspace["workspace_id"],
+            "shared_workspace",
+        )
+
+        resolver = GroupProjectContextResolver.from_bot_configs(
+            {
+                "codex_cli_bot": BotConfig(
+                    bot_key="codex_cli_bot",
+                    bot_id="bot1",
+                    secret="secret1",
+                    bot_type="codex_cli",
+                    working_dir=str(Path(tmpdir) / "codex-working"),
+                    provider_config={
+                        "workspace_root": str(workspace_root),
+                        "enable_project_workspace_mode": True,
+                    },
+                ),
+            }
+        )
+
+        orchestrator = FakeOrchestrator()
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="gemini_bot",
+                bot_id="bot2",
+                secret="secret2",
+                bot_type="gemini",
+                provider_config={"inherit_group_project_context": False},
+            ),
+            orchestrator=orchestrator,
+            group_project_context_resolver=resolver,
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": "req_group_project_context_disabled"},
+                    "body": {
+                        "msgid": "msg_group_project_context_disabled",
+                        "msgtype": "text",
+                        "chattype": "group",
+                        "chatid": "group-project",
+                        "from": {"userid": "alice"},
+                        "text": {"content": "请继续分析这个项目的首页结构"},
+                    },
+                }
+            )
+        )
+
+        assert orchestrator.received_messages == ["请继续分析这个项目的首页结构"]
+
+
 def test_workspace_copy_ignores_codex_directory():
     with TemporaryDirectory() as tmpdir:
         source = Path(tmpdir) / "source"
@@ -1146,6 +1576,175 @@ def test_default_project_usage_hint_ignores_regular_request():
         runtime_context={"project": {"name": "default"}},
     )
     assert hint == ""
+
+
+def test_rewrite_quoted_development_request_expands_short_handoff():
+    message = (
+        "【当前群项目上下文】\n"
+        "来源机器人：codex_cli_bot\n"
+        "项目：hello-mini (proj_group_hello-mini)\n"
+        "当前模式：共享工作区\n"
+        "当前工作区：共享 / /tmp/hello-mini\n\n"
+        "【引用消息】\n"
+        "Gemini：这是首页改版需求文档，包含 Hero、功能区、底部 CTA。\n\n"
+        "【当前消息】\n"
+        "开发"
+    )
+
+    rewritten = CodexCliOrchestrator._rewrite_quoted_development_request(message)
+
+    assert "【引用需求文档】" in rewritten
+    assert "这是首页改版需求文档" in rewritten
+    assert "用户正在引用上面的需求文档，并要求你在当前项目中直接开始开发" in rewritten
+    assert "如果需求已经足够明确：直接开始实现" in rewritten
+    assert "用户原话：开发" in rewritten
+
+
+def test_handle_control_command_saves_quoted_requirement_doc_to_default_path():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"name": "hello-mini", "project_id": "proj_hello"},
+                "workspace": {"workspace_id": "ws_hello"},
+                "runtime_session_key": session_key or user_id,
+            },
+            "",
+        )
+
+        message = (
+            "【引用消息】\n"
+            "# 需求文档\n\n"
+            "## 页面目标\n\n"
+            "做一个 hello world 首页。\n\n"
+            "## 页面结构\n\n"
+            "- 标题\n"
+            "- 按钮\n"
+            "- 底部说明\n\n"
+            "【当前消息】\n"
+            "保存为需求文档"
+        )
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content=message,
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        requirement_doc = working_dir / "docs" / "requirements.md"
+        assert requirement_doc.exists()
+        assert requirement_doc.read_text(encoding="utf-8") == (
+            "# 需求文档\n\n"
+            "## 页面目标\n\n"
+            "做一个 hello world 首页。\n\n"
+            "## 页面结构\n\n"
+            "- 标题\n"
+            "- 按钮\n"
+            "- 底部说明\n"
+        )
+        assert "docs/requirements.md" in reply
+        assert "根据 docs/requirements.md 开发" in reply
+
+
+def test_handle_control_command_saves_quoted_requirement_doc_to_custom_path():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"name": "hello-mini", "project_id": "proj_hello"},
+                "workspace": {"workspace_id": "ws_hello"},
+                "runtime_session_key": session_key or user_id,
+            },
+            "",
+        )
+
+        message = (
+            "【引用消息】\n"
+            "这是 PRD 正文。\n\n"
+            "【当前消息】\n"
+            "根据引用消息生成 docs/prd.md"
+        )
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content=message,
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        prd_doc = working_dir / "docs" / "prd.md"
+        assert prd_doc.exists()
+        assert prd_doc.read_text(encoding="utf-8") == "这是 PRD 正文。\n"
+        assert "docs/prd.md" in reply
+        assert "根据 docs/prd.md 开发" in reply
+
+
+def test_handle_text_message_rewrites_quoted_development_handoff_before_codex_turn():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        captured = {}
+
+        async def fake_run_codex_turn(
+            user_id: str,
+            inputs,
+            stream_id: str,
+            session_key: str,
+            log_context: dict,
+            on_stream_delta,
+            on_interaction_request,
+            message_content: str,
+            runtime_context=None,
+        ) -> str:
+            captured["message_content"] = message_content
+            captured["input_text"] = inputs[0]["text"]
+            return "ok"
+
+        orchestrator._run_codex_turn = fake_run_codex_turn
+
+        message = (
+            "【引用消息】\n"
+            "Gemini：这是需求文档，先做一个 hello world 首页。\n\n"
+            "【当前消息】\n"
+            "开始开发"
+        )
+
+        asyncio.run(
+            orchestrator.handle_text_message(
+                user_id="alice",
+                message=message,
+                stream_id="stream1",
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        assert "【引用需求文档】" in captured["message_content"]
+        assert "用户原话：开始开发" in captured["message_content"]
+        assert "直接开始实现" in captured["input_text"]
 
 
 def test_json_state_store_recreates_missing_parent_directory():
