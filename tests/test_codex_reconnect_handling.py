@@ -17,6 +17,7 @@ from src.core.cloudflare_pages_manager import (
     CloudflareWorkerDeploymentInfo,
     CloudflareWorkerStatusInfo,
 )
+from src.core.base_orchestrator import BaseOrchestrator
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.github_repository_manager import (
     GitHubRepositoryInfo,
@@ -34,6 +35,8 @@ from src.core.workspace_init_modes import (
 )
 from src.core.workspace_manager import WorkspaceManager
 from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_check
+from src.utils.brochure_generation import rewrite_brochure_generation_request
+from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 
 
 def test_detects_transient_reconnect_message():
@@ -141,6 +144,29 @@ def test_help_topic_card_for_github_repository_topic():
     assert card["task_id"] == "menu@help@cx_bot@github_repository"
     assert "Git 与 GitHub" in card["main_title"]["title"]
     assert "设置 Git、选仓、建仓、推送" in card["main_title"]["desc"]
+
+
+def test_parse_quoted_requirement_doc_request_supports_brochure_alias():
+    request = parse_quoted_requirement_doc_request(
+        "【引用消息】\n这是产品画册需求。\n\n【当前消息】\n保存为画册需求文档"
+    )
+
+    assert request is not None
+    assert request.target_path == "docs/requirements.md"
+    assert request.workflow == "brochure"
+
+
+def test_rewrite_brochure_generation_request_expands_short_request():
+    rewritten = rewrite_brochure_generation_request(
+        "【引用消息】\n这是产品画册需求文档。\n\n【当前消息】\n生成画册"
+    )
+
+    assert "【引用需求文档】" in rewritten
+    assert "这是产品画册需求文档。" in rewritten
+    assert "【画册生成任务】" in rewritten
+    assert "HTML/H5 产品画册" in rewritten
+    assert "`brochure/index.html`" in rewritten
+    assert "`docs/image-prompts.md`" in rewritten
 
 
 def test_is_control_command_recognizes_help_subtopic():
@@ -1262,6 +1288,52 @@ def test_parse_deployment_commands():
         assert request["appid"] == ""
         assert request["project_path"] == "./miniprogram"
 
+        request, usage = orchestrator._parse_deployment_command("发布画册")
+        assert usage is None
+        assert request["action"] == "publish_brochure"
+        assert request["repository_name"] == ""
+        assert request["pages_project_name"] == ""
+        assert request["build_dir"] == "brochure"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "发布画册 hello-brochure hello-brochure-site"
+        )
+        assert usage is None
+        assert request["action"] == "publish_brochure"
+        assert request["repository_name"] == "hello-brochure"
+        assert request["pages_project_name"] == "hello-brochure-site"
+        assert request["build_dir"] == "brochure"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "导出画册PDF brochure/index.html dist/custom.pdf"
+        )
+        assert usage is None
+        assert request["action"] == "export_brochure_pdf"
+        assert request["html_path"] == "brochure/index.html"
+        assert request["output_path"] == "dist/custom.pdf"
+
+        request, usage = orchestrator._parse_deployment_command(
+            "导出画册图片 brochure/index.html dist/custom.png"
+        )
+        assert usage is None
+        assert request["action"] == "export_brochure_image"
+        assert request["html_path"] == "brochure/index.html"
+        assert request["output_path"] == "dist/custom.png"
+
+        request, usage = orchestrator._parse_deployment_command("回传画册图片")
+        assert usage is None
+        assert request["action"] == "return_brochure_image"
+        assert request["html_path"] == ""
+        assert request["output_path"] == ""
+
+        request, usage = orchestrator._parse_deployment_command(
+            "导出画册PPT docs/brochure-outline.md dist/custom.pptx"
+        )
+        assert usage is None
+        assert request["action"] == "export_brochure_ppt"
+        assert request["outline_path"] == "docs/brochure-outline.md"
+        assert request["output_path"] == "dist/custom.pptx"
+
 
 def test_orchestrator_reports_latest_pipeline_status():
     with TemporaryDirectory() as tmpdir:
@@ -1698,6 +1770,315 @@ def test_handle_control_command_saves_quoted_requirement_doc_to_custom_path():
         assert prd_doc.read_text(encoding="utf-8") == "这是 PRD 正文。\n"
         assert "docs/prd.md" in reply
         assert "根据 docs/prd.md 开发" in reply
+
+
+def test_handle_control_command_saves_brochure_requirement_doc_with_brochure_next_step():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"name": "hello-brochure", "project_id": "proj_brochure"},
+                "workspace": {"workspace_id": "ws_brochure"},
+                "runtime_session_key": session_key or user_id,
+            },
+            "",
+        )
+
+        message = (
+            "【引用消息】\n"
+            "这是产品画册需求文档。\n\n"
+            "【当前消息】\n"
+            "保存为画册需求文档"
+        )
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content=message,
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        requirement_doc = working_dir / "docs" / "requirements.md"
+        assert requirement_doc.exists()
+        assert "docs/requirements.md" in reply
+        assert "下一步可直接发送：生成画册" in reply
+
+
+def test_handle_text_message_rewrites_brochure_generation_request_before_codex_turn():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        captured = {}
+
+        async def fake_run_codex_turn(
+            user_id: str,
+            inputs,
+            stream_id: str,
+            session_key: str,
+            log_context: dict,
+            on_stream_delta,
+            on_interaction_request,
+            message_content: str,
+            runtime_context=None,
+        ) -> str:
+            captured["message_content"] = message_content
+            captured["input_text"] = inputs[0]["text"]
+            return "ok"
+
+        orchestrator._run_codex_turn = fake_run_codex_turn
+
+        asyncio.run(
+            orchestrator.handle_text_message(
+                user_id="alice",
+                message="生成画册",
+                stream_id="stream_brochure",
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        assert "【画册生成任务】" in captured["message_content"]
+        assert "`brochure/index.html`" in captured["message_content"]
+        assert "HTML/H5 产品画册" in captured["input_text"]
+
+
+def test_handle_control_command_publish_brochure_reuses_pages_flow():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        captured = {}
+
+        def fake_publish_pages(**kwargs):
+            captured.update(kwargs)
+            return "已完成一键发布 Cloudflare Pages\n项目：hello-brochure"
+
+        orchestrator._handle_publish_pages_command = fake_publish_pages
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content="发布画册 hello-brochure hello-brochure-site",
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        assert captured["repository_name"] == "hello-brochure"
+        assert captured["pages_project_name"] == "hello-brochure-site"
+        assert captured["build_dir"] == "brochure"
+        assert "画册目录：brochure" in reply
+
+
+def test_handle_control_command_exports_brochure_pdf_and_ppt():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"project_id": "proj_1", "name": "hello-brochure"},
+            },
+            None,
+        )
+        captured = {}
+
+        def fake_export_pdf(**kwargs):
+            captured["pdf"] = kwargs
+            return SimpleNamespace(
+                input_relative_path="brochure/index.html",
+                output_relative_path="dist/brochure.pdf",
+                output_path=str(working_dir / "dist" / "brochure.pdf"),
+            )
+
+        def fake_export_ppt(**kwargs):
+            captured["ppt"] = kwargs
+            return SimpleNamespace(
+                input_relative_path="docs/brochure-outline.md",
+                output_relative_path="dist/brochure.pptx",
+                output_path=str(working_dir / "dist" / "brochure.pptx"),
+            )
+
+        orchestrator.brochure_export_manager = SimpleNamespace(
+            export_pdf=fake_export_pdf,
+            export_ppt=fake_export_ppt,
+        )
+
+        pdf_reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content="导出画册PDF",
+                session_key="alice",
+                log_context={},
+            )
+        )
+        ppt_reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content="导出画册PPT",
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        assert captured["pdf"]["html_path"] == "brochure/index.html"
+        assert captured["pdf"]["output_path"] == "dist/brochure.pdf"
+        assert "已导出画册 PDF" in pdf_reply
+        assert "dist/brochure.pdf" in pdf_reply
+        assert captured["ppt"]["outline_path"] == ""
+        assert captured["ppt"]["output_path"] == "dist/brochure.pptx"
+        assert "已导出画册 PPT" in ppt_reply
+        assert "dist/brochure.pptx" in ppt_reply
+
+
+def test_handle_control_command_returns_brochure_preview_image_payload():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator._ensure_runtime_context = lambda user_id, session_key, log_context=None: (
+            {
+                "working_dir": str(working_dir),
+                "project": {"project_id": "proj_1", "name": "hello-brochure"},
+            },
+            None,
+        )
+        captured = {}
+
+        def fake_export_image(**kwargs):
+            captured["image"] = kwargs
+            return SimpleNamespace(
+                input_relative_path="brochure/index.html",
+                output_relative_path="dist/brochure-preview.png",
+                output_path=str(working_dir / "dist" / "brochure-preview.png"),
+            )
+
+        def fake_encode_image_file(output_path: str):
+            captured["encoded_path"] = output_path
+            return ("ZmFrZV9pbWFnZQ==", "fake-md5")
+
+        orchestrator.brochure_export_manager = SimpleNamespace(
+            export_image=fake_export_image,
+            encode_image_file=fake_encode_image_file,
+        )
+
+        reply = asyncio.run(
+            orchestrator.handle_control_command(
+                user_id="alice",
+                content="回传画册图片",
+                session_key="alice",
+                log_context={},
+            )
+        )
+
+        assert captured["image"]["html_path"] == "brochure/index.html"
+        assert captured["image"]["output_path"] == "dist/brochure-preview.png"
+        assert captured["encoded_path"].endswith("dist/brochure-preview.png")
+        assert isinstance(reply, dict)
+        assert reply["type"] == "image"
+        assert reply["image_base64"] == "ZmFrZV9pbWFnZQ=="
+        assert "已回传画册预览图" in reply["content"]
+
+
+def test_message_dispatcher_routes_structured_image_control_reply():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class DummyOrchestrator(BaseOrchestrator):
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+        async def handle_control_command(
+            self,
+            user_id: str,
+            content: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ):
+            return {
+                "type": "image",
+                "image_base64": "ZmFrZV9pbWFnZQ==",
+                "image_md5": "fake-md5",
+                "content": "已回传画册预览图",
+            }
+
+        def is_control_command(self, content: str) -> bool:
+            return True
+
+    dispatcher = MessageDispatcher(
+        DummyWs(),
+        BotConfig(
+            bot_key="cx_bot",
+            bot_id="test_bot_id",
+            secret="test_secret",
+            bot_type="codex_cli",
+        ),
+        orchestrator=DummyOrchestrator(),
+    )
+
+    asyncio.run(
+        dispatcher._handle_text(
+            "req_brochure_image",
+            {"msgtype": "text", "text": {"content": "回传画册图片"}},
+            "alice",
+            "alice",
+            "single",
+        )
+    )
+
+    payload = dispatcher.ws.payloads[-1]
+    assert payload["cmd"] == "aibot_respond_msg"
+    assert payload["body"]["stream"]["content"] == "已回传画册预览图"
+    assert payload["body"]["stream"]["msg_item"][0]["msgtype"] == "image"
+    assert payload["body"]["stream"]["msg_item"][0]["image"]["base64"] == "ZmFrZV9pbWFnZQ=="
 
 
 def test_handle_text_message_rewrites_quoted_development_handoff_before_codex_turn():

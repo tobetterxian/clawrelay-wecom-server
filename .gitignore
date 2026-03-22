@@ -137,6 +137,7 @@ site/
 # 反向文件临时存储
 storage/files/
 node_modules/
+scripts/brochure/package-lock.json
 
 # Claude Code
 .claude/

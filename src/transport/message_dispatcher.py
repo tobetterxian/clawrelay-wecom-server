@@ -782,7 +782,7 @@ class MessageDispatcher:
             log_context=log_context,
         )
         if control_reply:
-            await self._reply_text(req_id, control_reply, finish=True)
+            await self._reply_control_result(req_id, control_reply)
             return
 
         handler = self.command_router.handlers.get(command_content) or self.command_router.handlers.get(normalized)
@@ -1288,6 +1288,22 @@ class MessageDispatcher:
         stream_id = uuid.uuid4().hex[:12]
         await self._reply_stream(req_id, stream_id, content, finish)
 
+    async def _reply_control_result(self, req_id: str, control_reply: str | dict):
+        if isinstance(control_reply, dict):
+            reply_type = str(control_reply.get("type") or "").strip().lower()
+            if reply_type == "image":
+                await self._reply_image(
+                    req_id,
+                    str(control_reply.get("image_base64") or ""),
+                    str(control_reply.get("image_md5") or ""),
+                    str(control_reply.get("content") or ""),
+                )
+                return
+            if reply_type == "text":
+                await self._reply_text(req_id, str(control_reply.get("content") or ""), finish=True)
+                return
+        await self._reply_text(req_id, str(control_reply), finish=True)
+
     async def _reply_template_card(
         self,
         req_id: str,
@@ -1361,6 +1377,31 @@ class MessageDispatcher:
                     "id": stream_id,
                     "finish": finish,
                     "content": content,
+                },
+            },
+        }
+        await self.ws.send_reply(payload)
+
+    async def _reply_image(self, req_id: str, image_base64: str, image_md5: str, content: str = ""):
+        stream_id = uuid.uuid4().hex[:12]
+        payload = {
+            "cmd": "aibot_respond_msg",
+            "headers": {"req_id": req_id},
+            "body": {
+                "msgtype": "stream",
+                "stream": {
+                    "id": stream_id,
+                    "finish": True,
+                    "content": content,
+                    "msg_item": [
+                        {
+                            "msgtype": "image",
+                            "image": {
+                                "base64": image_base64,
+                                "md5": image_md5,
+                            },
+                        }
+                    ],
                 },
             },
         }

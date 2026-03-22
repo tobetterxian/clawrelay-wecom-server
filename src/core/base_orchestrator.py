@@ -116,7 +116,7 @@ class BaseOrchestrator(ABC):
         content: str,
         session_key: str = "",
         log_context: dict = None,
-    ) -> Optional[str]:
+    ) -> Optional[str | dict]:
         """处理编排器自带的控制命令（默认无）"""
         return None
 

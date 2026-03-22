@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 import re
 
+from src.utils.brochure_generation import looks_like_brochure_requirement_request
 from src.utils.quoted_handoff import split_structured_user_message
 
 DEFAULT_REQUIREMENT_DOC_PATH = "docs/requirements.md"
@@ -23,6 +24,9 @@ _DEFAULT_TARGET_ALIASES = {
     "requirements.md",
     "docs/requirements",
     "docs/requirements.md",
+    "画册需求文档",
+    "产品画册需求文档",
+    "画册文档",
 }
 _SAVE_REQUIREMENT_DOC_COMMANDS = {
     "保存为需求文档",
@@ -39,6 +43,12 @@ _SAVE_REQUIREMENT_DOC_COMMANDS = {
     "保存为prd",
     "生成 prd",
     "生成prd",
+    "保存为画册需求文档",
+    "保存成画册需求文档",
+    "写入画册需求文档",
+    "生成画册需求文档",
+    "保存为产品画册需求文档",
+    "生成产品画册需求文档",
 }
 _SAVE_REQUIREMENT_DOC_RE = re.compile(
     r"^(?:(?:请|麻烦|帮我|把|将|就|那就)\s*)?"
@@ -54,6 +64,7 @@ class QuotedRequirementDocRequest:
     group_project_context: str
     quote_context: str
     current_message: str
+    workflow: str = "generic"
 
 
 def _normalize_target_path(value: str) -> str:
@@ -118,4 +129,5 @@ def parse_quoted_requirement_doc_request(message: str) -> QuotedRequirementDocRe
         group_project_context=group_project_context,
         quote_context=quote_context,
         current_message=current_message.strip() or command_text.strip(),
+        workflow="brochure" if looks_like_brochure_requirement_request(current_message or command_text) else "generic",
     )

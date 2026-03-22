@@ -28,6 +28,7 @@ from .cloudflare_pages_manager import (
     CloudflarePagesProjectInfo,
     CloudflareWorkerStatusInfo,
 )
+from .brochure_export_manager import BrochureExportManager
 from .github_actions_secret_manager import GitHubActionsSecretManager
 from .github_repository_manager import (
     GitHubRepositoryInfo,
@@ -65,6 +66,7 @@ from src.utils.quoted_handoff import (
     looks_like_quoted_development_handoff,
     rewrite_quoted_development_request,
 )
+from src.utils.brochure_generation import rewrite_brochure_generation_request
 from src.utils.quoted_requirement_doc import (
     DEFAULT_REQUIREMENT_DOC_PATH,
     parse_quoted_requirement_doc_request,
@@ -272,6 +274,7 @@ HELP_MENU_TOPICS: Dict[str, dict] = {
             "- 静态网站优先用：`4.2`",
             "- Worker 服务优先用：`4.4`",
             "- 查网站流水线 / Cloudflare 状态：`4.5`、`4.6`",
+            "- 画册交付可直接发送：`发布画册`、`导出画册PDF`、`回传画册图片`",
         ),
     },
     "wechat_miniprogram": {
@@ -407,6 +410,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         self.github_actions_secret_manager = GitHubActionsSecretManager(env_vars=self.runtime_env_vars)
         self.cloudflare_pages_manager = CloudflarePagesManager(env_vars=self.runtime_env_vars)
         self.wechat_miniprogram_manager = WeChatMiniProgramManager(env_vars=self.runtime_env_vars)
+        self.brochure_export_manager = BrochureExportManager(env_vars=self.runtime_env_vars)
         self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
@@ -460,7 +464,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         content: str,
         session_key: str = "",
         log_context: dict = None,
-    ) -> Optional[str]:
+    ) -> Optional[str | dict]:
         if not self.enable_project_workspace_mode:
             return None
 
@@ -638,6 +642,47 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     session_key=session_key,
                     log_context=log_context,
                 )
+            if action == "publish_brochure":
+                return self._handle_publish_brochure_command(
+                    user_id=user_id,
+                    repository_name=deployment_request.get("repository_name", ""),
+                    pages_project_name=deployment_request.get("pages_project_name", ""),
+                    build_dir=deployment_request.get("build_dir", "brochure"),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "export_brochure_pdf":
+                return self._handle_export_brochure_pdf_command(
+                    user_id=user_id,
+                    html_path=deployment_request.get("html_path", ""),
+                    output_path=deployment_request.get("output_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "export_brochure_image":
+                return self._handle_export_brochure_image_command(
+                    user_id=user_id,
+                    html_path=deployment_request.get("html_path", ""),
+                    output_path=deployment_request.get("output_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "return_brochure_image":
+                return self._handle_return_brochure_image_command(
+                    user_id=user_id,
+                    html_path=deployment_request.get("html_path", ""),
+                    output_path=deployment_request.get("output_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "export_brochure_ppt":
+                return self._handle_export_brochure_ppt_command(
+                    user_id=user_id,
+                    outline_path=deployment_request.get("outline_path", ""),
+                    output_path=deployment_request.get("output_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
             if action == "publish_worker":
                 return self._handle_publish_worker_command(
                     user_id=user_id,
@@ -796,6 +841,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if preflight_reply:
             return await self._return_early_reply(preflight_reply, on_stream_delta)
         effective_message = self._rewrite_quoted_development_request(message)
+        effective_message = rewrite_brochure_generation_request(effective_message)
         inputs = [{"type": "text", "text": self._sanitize_user_input(effective_message)}]
         return await self._run_codex_turn(
             user_id=user_id,
@@ -2831,6 +2877,199 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Pages 部署")
         return "\n".join(lines)
 
+    def _handle_publish_brochure_command(
+        self,
+        user_id: str,
+        repository_name: str,
+        pages_project_name: str,
+        build_dir: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        normalized_build_dir = str(build_dir or "brochure").strip() or "brochure"
+        reply = self._handle_publish_pages_command(
+            user_id=user_id,
+            repository_name=repository_name,
+            pages_project_name=pages_project_name,
+            build_dir=normalized_build_dir,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        if reply.startswith("已完成一键发布 Cloudflare Pages"):
+            reply = (
+                f"{reply}\n"
+                f"画册目录：{normalized_build_dir}\n"
+                "下一步：等待 GitHub Actions 完成后，直接分享 Pages 链接即可预览画册"
+            )
+        return reply
+
+    def _handle_export_brochure_pdf_command(
+        self,
+        user_id: str,
+        html_path: str,
+        output_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.brochure_export_manager.export_pdf(
+                workspace_path=workspace_path,
+                html_path=html_path or "brochure/index.html",
+                output_path=output_path or "dist/brochure.pdf",
+            )
+        except Exception as exc:
+            return self._brochure_export_error_reply("导出画册 PDF", project, workspace_path, exc)
+        return self._brochure_export_success_reply(
+            title="已导出画册 PDF",
+            project=project,
+            workspace_path=workspace_path,
+            input_label="画册入口",
+            input_relative_path=result.input_relative_path,
+            output_relative_path=result.output_relative_path,
+            next_step="下一步：可继续发送 `导出画册PPT`、`回传画册图片` 或 `发布画册`",
+        )
+
+    def _handle_export_brochure_image_command(
+        self,
+        user_id: str,
+        html_path: str,
+        output_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.brochure_export_manager.export_image(
+                workspace_path=workspace_path,
+                html_path=html_path or "brochure/index.html",
+                output_path=output_path or "dist/brochure-preview.png",
+            )
+        except Exception as exc:
+            return self._brochure_export_error_reply("导出画册图片", project, workspace_path, exc)
+        return self._brochure_export_success_reply(
+            title="已导出画册图片",
+            project=project,
+            workspace_path=workspace_path,
+            input_label="画册入口",
+            input_relative_path=result.input_relative_path,
+            output_relative_path=result.output_relative_path,
+            next_step="下一步：可继续发送 `回传画册图片`、`导出画册PDF` 或 `发布画册`",
+        )
+
+    def _handle_return_brochure_image_command(
+        self,
+        user_id: str,
+        html_path: str,
+        output_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str | dict:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.brochure_export_manager.export_image(
+                workspace_path=workspace_path,
+                html_path=html_path or "brochure/index.html",
+                output_path=output_path or "dist/brochure-preview.png",
+            )
+            image_base64, image_md5 = self.brochure_export_manager.encode_image_file(result.output_path)
+        except Exception as exc:
+            return self._brochure_export_error_reply("回传画册图片", project, workspace_path, exc)
+        return {
+            "type": "image",
+            "image_base64": image_base64,
+            "image_md5": image_md5,
+            "content": "\n".join(
+                [
+                    "已回传画册预览图",
+                    f"项目：{(project or {}).get('name', '-')}",
+                    f"来源：{result.input_relative_path}",
+                    f"文件：{result.output_relative_path}",
+                ]
+            ),
+        }
+
+    def _handle_export_brochure_ppt_command(
+        self,
+        user_id: str,
+        outline_path: str,
+        output_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.brochure_export_manager.export_ppt(
+                workspace_path=workspace_path,
+                outline_path=outline_path or "",
+                output_path=output_path or "dist/brochure.pptx",
+            )
+        except Exception as exc:
+            return self._brochure_export_error_reply("导出画册 PPT", project, workspace_path, exc)
+        return self._brochure_export_success_reply(
+            title="已导出画册 PPT",
+            project=project,
+            workspace_path=workspace_path,
+            input_label="提纲来源",
+            input_relative_path=result.input_relative_path,
+            output_relative_path=result.output_relative_path,
+            next_step="下一步：可继续发送 `导出画册PDF`、`回传画册图片` 或 `发布画册`",
+        )
+
+    def _brochure_export_success_reply(
+        self,
+        title: str,
+        project: dict,
+        workspace_path: str,
+        input_label: str,
+        input_relative_path: str,
+        output_relative_path: str,
+        next_step: str,
+    ) -> str:
+        lines = [
+            title,
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"{input_label}：{input_relative_path}",
+            f"输出文件：{output_relative_path}",
+            next_step,
+        ]
+        return "\n".join(lines)
+
+    def _brochure_export_error_reply(
+        self,
+        action_name: str,
+        project: dict,
+        workspace_path: str,
+        error: Exception,
+    ) -> str:
+        return (
+            f"{action_name}失败\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"错误：{error}"
+        )
+
     def _handle_enable_worker_deployment_command(
         self,
         user_id: str,
@@ -4671,9 +4910,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
         workspace_root = Path(workspace_path).expanduser().resolve()
         display_path = doc_path.relative_to(workspace_root).as_posix()
         status_text = "需求文档内容未变化，已确认保存位置" if unchanged else ("已更新需求文档" if existed else "已保存需求文档")
+        next_step = (
+            "生成画册"
+            if str(request.workflow or "").strip() == "brochure"
+            else f"根据 {display_path} 开发"
+        )
         return (
             f"{status_text}：{display_path}\n"
-            f"下一步可直接发送：根据 {display_path} 开发"
+            f"下一步可直接发送：{next_step}"
         )
 
     @staticmethod
@@ -5026,6 +5270,52 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "repository_name": args[0] if len(args) >= 1 else "",
                     "pages_project_name": args[1] if len(args) >= 2 else "",
                     "build_dir": " ".join(args[2:]).strip() or "dist",
+                }, None
+
+        for prefix in ("发布画册", "一键发布画册", "部署画册"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "publish_brochure",
+                    "repository_name": args[0] if len(args) >= 1 else "",
+                    "pages_project_name": args[1] if len(args) >= 2 else "",
+                    "build_dir": " ".join(args[2:]).strip() or "brochure",
+                }, None
+
+        for prefix in ("导出画册PDF", "导出画册 pdf", "导出 brochure pdf"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "export_brochure_pdf",
+                    "html_path": args[0] if len(args) >= 1 else "",
+                    "output_path": " ".join(args[1:]).strip() if len(args) >= 2 else "",
+                }, None
+
+        for prefix in ("导出画册图片", "导出画册预览图", "导出 brochure image"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "export_brochure_image",
+                    "html_path": args[0] if len(args) >= 1 else "",
+                    "output_path": " ".join(args[1:]).strip() if len(args) >= 2 else "",
+                }, None
+
+        for prefix in ("回传画册图片", "发送画册图片", "回传画册预览图", "预览画册"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "return_brochure_image",
+                    "html_path": args[0] if len(args) >= 1 else "",
+                    "output_path": " ".join(args[1:]).strip() if len(args) >= 2 else "",
+                }, None
+
+        for prefix in ("导出画册PPT", "导出画册 ppt", "导出 brochure ppt"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "export_brochure_ppt",
+                    "outline_path": args[0] if len(args) >= 1 else "",
+                    "output_path": " ".join(args[1:]).strip() if len(args) >= 2 else "",
                 }, None
 
         for prefix in (
@@ -5451,11 +5741,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "发布部署怎么走：",
             "- 网站：优先用 `4.2` 发布；查状态看 `4.5`、`4.6`",
             "- 小程序：优先用 `5.2` 上传体验版；提审看 `5.3`、`5.4`、`5.5`、`5.6`",
+            "- 画册：先 `生成画册`，再 `导出画册PDF` / `导出画册PPT` / `回传画册图片` / `发布画册`",
             "- 排障：先看 `6.2 部署状态`，再进对应分类",
             "",
             "你现在如果要：",
             "- 发布网站：发送 `4` 或直接发 `4.2`",
             "- 发布小程序：发送 `5` 或直接发 `5.2`",
+            "- 交付画册：直接发 `导出画册PDF` 或 `发布画册`",
             "- 查问题：发送 `6` 或直接发 `6.2`",
             "",
             "补充：",

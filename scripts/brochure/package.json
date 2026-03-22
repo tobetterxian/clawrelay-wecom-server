@@ -1,0 +1,9 @@
+{
+  "name": "clawrelay-brochure-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.54.2",
+    "pptxgenjs": "^3.12.0"
+  }
+}

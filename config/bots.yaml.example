@@ -71,6 +71,32 @@ bots:
   #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"  # 可选：显式指定项目状态目录
 
   # ========================================
+  # 产品画册机器人（推荐：Gemini / OpenAI）
+  # ========================================
+  # brochure_bot:
+  #   bot_id: "YOUR_BROCHURE_BOT_ID"
+  #   secret: "YOUR_BROCHURE_BOT_SECRET"
+  #   bot_type: "gemini"
+  #   name: "产品画册"
+  #   description: "产品画册策划与文案机器人"
+  #   model: ""
+  #   system_prompt: |
+  #     你是一个专门负责产品画册策划的 AI 助手。
+  #     你的职责是把用户提供的产品资料、图片、参数、案例整理成适合销售和市场使用的产品画册方案。
+  #     输出时优先给出：
+  #     1. 画册定位与目标受众
+  #     2. 目录结构
+  #     3. 每页标题与文案
+  #     4. 配图建议
+  #     5. 版式建议
+  #     6. 如有必要，补充 H5 / 宣传页落地建议
+  #   provider_config:
+  #     api_key: "${GEMINI_API_KEY}"
+  #     inherit_group_project_context: true  # 群聊时自动继承 codex_cli 当前群项目上下文
+  #     # group_project_context_bot_key: "codex_cli_bot"
+  #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"
+
+  # ========================================
   # OpenAI 机器人（直接调用 API）
   # ========================================
   # openai_bot:
