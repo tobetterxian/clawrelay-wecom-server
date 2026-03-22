@@ -226,73 +226,76 @@ HELP_MENU_TOPIC_ORDER: Tuple[str, ...] = (
 HELP_MENU_TOPICS: Dict[str, dict] = {
     "quick_start": {
         "title": "新手开始",
-        "summary": "先看这里，按任务走最短路径",
+        "summary": "不知道发什么时先看这里",
         "command_ids": ("1 1", "1 2", "1 3", "1 4", "1 5"),
+        "recommended_command_ids": ("1 1", "1 2", "1 3", "1 4", "1 5"),
         "aliases": ("1", "新手", "开始", "快速开始", "新手开始", "入门"),
         "extra_lines": (
-            "最短使用路径：",
-            "- 做新项目：`1.1 hello-world`",
+            "最短路径：",
+            "- 新项目：`1.1 hello-world`",
             "- 从现有仓库开始：`1.2 hello-world <Git地址>`",
-            "- 写完后推 GitHub：`1.3` 或 `3.10`",
-            "- 发布网站：`1.4` 或进入 `4 网站发布`",
-            "- 发布小程序：`1.5` 或进入 `5 微信小程序`",
-            "- 想看所有功能：发送 `7`",
+            "- 写完推 GitHub：`1.3`",
+            "- 发布网站：`1.4`；发布小程序：`1.5`",
         ),
     },
     "project_workspace": {
         "title": "项目工作区",
-        "summary": "新建项目、切换项目、管理工作区",
+        "summary": "新建项目、切项目、切个人/共享工作区",
         "command_ids": ("2 1", "2 2", "2 3", "2 4", "2 5", "2 6", "2 7", "2 8", "2 9", "2 10"),
+        "recommended_command_ids": ("2 5", "2 6", "2 8", "2 9", "2 10"),
         "aliases": ("2", "项目", "工作区", "项目工作区", "项目与工作区"),
         "extra_lines": (
             "- 直接发开发需求时，会默认落在当前项目继续开发",
-            "- 想从远程仓库开始，优先使用：`2.6` 或 `2.7`",
-            "- 群聊可切换个人 / 共享工作区；单聊默认就是个人工作区",
+            "- 从远程仓库开始，优先用：`2.6` 或 `2.7`",
+            "- 群聊可切换个人 / 共享工作区；单聊默认个人工作区",
         ),
     },
     "github_repository": {
         "title": "Git 与 GitHub",
-        "summary": "Git 身份、选仓、建仓、推送与发布",
+        "summary": "设置 Git、选仓、建仓、推送",
         "command_ids": ("3 1", "3 2", "3 3", "3 4", "3 5", "3 6", "3 7", "3 8", "3 9", "3 10", "3 11", "3 12", "3 13", "3 14"),
+        "recommended_command_ids": ("3 2", "3 3", "3 5", "3 10", "3 14"),
         "aliases": ("3", "git", "github", "仓库", "git与github", "github仓库"),
         "extra_lines": (
             "- 首次提交前建议先执行：`3.2` 设置 Git 身份",
-            "- `3.10` 缺少远程时，会尝试自动建仓、绑定 origin 并推送",
-            "- 若配置了 `default_github_owner`，列仓 / 建仓 / 推送会统一使用该账号",
+            "- `3.10` 缺少远程时，会尝试自动建仓并推送",
+            "- 若配置了 `default_github_owner`，会统一使用该 GitHub 账号",
         ),
     },
     "website_publish": {
         "title": "网站发布",
-        "summary": "Pages / Worker / Cloudflare 网站上线",
+        "summary": "发布网站、查流水线、查 Cloudflare 状态",
         "command_ids": ("4 1", "4 2", "4 3", "4 4", "4 5", "4 6"),
+        "recommended_command_ids": ("4 2", "4 4", "4 5", "4 6"),
         "aliases": ("4", "网站", "网站发布", "pages", "worker", "cloudflare"),
         "extra_lines": (
-            "- 做静态网站，优先用：`4.2`",
-            "- 做 Worker 服务，优先用：`4.4`",
-            "- 查网站流水线 / Cloudflare 状态，优先看：`4.5`、`4.6`",
+            "- 静态网站优先用：`4.2`",
+            "- Worker 服务优先用：`4.4`",
+            "- 查网站流水线 / Cloudflare 状态：`4.5`、`4.6`",
         ),
     },
     "wechat_miniprogram": {
         "title": "微信小程序",
-        "summary": "体验版上传、提审、审核、正式发布",
+        "summary": "上传体验版、提审、查审核、正式发布",
         "command_ids": ("5 1", "5 2", "5 3", "5 4", "5 5", "5 6", "5 7"),
+        "recommended_command_ids": ("5 2", "5 3", "5 4", "5 5", "5 6"),
         "aliases": ("5", "小程序", "微信小程序", "miniprogram"),
         "extra_lines": (
             "- 先上传体验版：`5.1` 或 `5.2`",
-            "- 再准备提审资料：`5.3`",
-            "- 提交审核：`5.4`，查审核：`5.5`",
-            "- 审核通过后正式发布：`5.6`",
+            "- 再准备提审资料：`5.3`，提交审核：`5.4`",
+            "- 查审核：`5.5`，审核通过后正式发布：`5.6`",
         ),
     },
     "status_troubleshooting": {
         "title": "状态与排障",
-        "summary": "查看状态、判断下一步、处理常见报错",
+        "summary": "先查状态，再决定下一步",
         "command_ids": ("6 1", "6 2", "6 3", "6 4", "6 5", "6 6"),
+        "recommended_command_ids": ("6 2", "6 4", "6 5", "6 6"),
         "aliases": ("6", "状态", "排障", "故障", "诊断"),
         "extra_lines": (
-            "- 通用起手式：先看 `6.2 部署状态`，再看对应平台状态",
+            "- 通用起手式：先看 `6.2 部署状态`",
             "- 网站问题优先看：`6.4`、`6.5`",
-            "- 小程序问题优先看：`6.6`，并检查 `project.config.json`、`WECHAT_MINIPROGRAM_PRIVATE_KEY`、`WECHAT_MINIPROGRAM_APPSECRET`",
+            "- 小程序问题优先看：`6.6`，再检查 `project.config.json` 和相关 Secret",
         ),
     },
     "full_help": {
@@ -5206,63 +5209,60 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
     @classmethod
     def _project_command_help(cls) -> str:
-        lines = cls._command_system_overview_lines()
-        lines.extend(
-            [
-                "",
-                "帮助首页：",
-                "- 先看 `1 ~ 7` 这些大类编号，再进入对应分类",
-                "- 进入分类后，你会看到 `1.1`、`2.5`、`3.10` 这类子命令编号",
-                "",
-                "帮助中心：",
-                "- 直接发开发需求：会进入二级普通对话，并默认在当前项目继续开发",
-                "- 只有在切项目、推 GitHub、发布部署、查状态时，才需要发送一级命令",
-                "",
-                "帮助分类：",
-            ]
-        )
+        lines = [
+            "最简单的用法：",
+            "- 不用先记命令，直接发开发需求即可；默认会在当前项目继续开发",
+            "- 只有在切项目、推 GitHub、发布、查状态时，才需要编号命令",
+            "",
+            "新手先用这几个：",
+            "- `2.5 项目名`：新建项目",
+            "- `3.2`：设置默认 Git 身份；需要自定义时再发 `3.2 <name> <email>`",
+            "- `3.10 [仓库名]`：推送到 GitHub",
+            "- `4.2 [仓库名] [Pages项目名] [构建目录]`：发布网站",
+            "- `5.2 [仓库名] [AppID] [项目路径]`：上传小程序体验版",
+            "- 长需求先引用消息，再发：`保存为需求文档`",
+            "",
+            "按场景查看：",
+        ]
+        category_items: List[str] = []
         for index, topic_id in enumerate(HELP_MENU_TOPIC_ORDER, start=1):
             topic = HELP_MENU_TOPICS.get(topic_id) or {}
             title = str(topic.get("title") or topic_id).strip()
-            summary = str(topic.get("summary") or "").strip()
-            lines.append(f"- {index}. {title}：{summary}")
+            category_items.append(f"`{index}` {title}")
+        lines.append("- " + " / ".join(category_items[:3]))
+        lines.append("- " + " / ".join(category_items[3:]))
         lines.extend(
             [
                 "",
-                "查看分类：",
-                "- 发送：`1` / `帮助 新手开始`",
-                "- 发送：`2` / `帮助 项目工作区`",
-                "- 发送：`3` / `帮助 Git 与 GitHub`",
-                "- 发送：`4` / `帮助 网站发布`",
-                "- 发送：`5` / `帮助 微信小程序`",
-                "- 发送：`6` / `帮助 状态与排障`",
-                "- 发送：`7` / `帮助 全部`",
-                "",
-                "新手最常用：",
-                "- `2.5 项目名`：新建项目",
-                "- `3.2`：设置默认 Git 身份；如需自定义，再用 `3.2 <name> <email>`",
-                "- `3.10`：推送到 GitHub；仓库名留空时默认当前项目名",
-                "- `4.2`：一键发布网站；参数留空时默认当前项目名 + `dist`",
-                "- `5.2`：一键上传微信小程序体验版",
-                "- 长需求先引用消息，再发：`保存为需求文档`，默认落到 `docs/requirements.md`",
-                "- `5.3` ~ `5.7`：小程序提审、查审核、正式发布、撤回审核",
-                "- `6.2`：查看部署状态，再决定下一步",
+                "如果你只想看完整编号，再发：`7` / `帮助 全部`",
             ]
         )
         return "\n".join(lines)
 
     @classmethod
     def _help_category_overview_lines(cls, current_topic_id: str = "") -> List[str]:
-        lines = [
-            "分类导航：",
-            "- `1 ~ 7` 是帮助分类编号；`1.1 / 2.5 / 3.10` 是进入分类后的具体命令编号",
-        ]
+        lines = ["更多分类："]
+        compact_items: List[str] = []
+        current_label = ""
         for index, topic_id in enumerate(HELP_MENU_TOPIC_ORDER, start=1):
             topic = HELP_MENU_TOPICS.get(topic_id) or {}
             title = str(topic.get("title") or topic_id).strip()
-            prefix = "当前分类" if topic_id == current_topic_id else "可发送"
-            lines.append(f"- {prefix}：`{index}` / `帮助 {title}`")
+            compact_items.append(f"`{index}` {title}")
+            if topic_id == current_topic_id:
+                current_label = f"当前在：`{index}` {title}"
+        if compact_items:
+            lines.append("- " + " / ".join(compact_items))
+        if current_label:
+            lines.append(f"- {current_label}")
         return lines
+
+    @classmethod
+    def _recommended_topic_command_ids(cls, topic_id: str) -> Tuple[str, ...]:
+        topic = HELP_MENU_TOPICS.get(topic_id) or {}
+        command_ids = tuple(topic.get("recommended_command_ids") or ())
+        if command_ids:
+            return command_ids
+        return tuple(topic.get("command_ids") or ())
 
     @classmethod
     def _full_command_help(cls) -> str:
@@ -5387,19 +5387,19 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if not title:
             return cls._project_command_help()
 
-        lines = cls._command_system_overview_lines()
-        lines.extend([""])
+        lines: List[str] = []
         lines.extend(cls._help_category_overview_lines(normalized_topic_id))
         lines.extend(["", f"{title}："])
         if command_ids:
-            lines.extend(cls._format_numbered_command_lines(command_ids))
+            lines.append("先用这些：")
+            lines.extend(cls._format_numbered_command_lines(cls._recommended_topic_command_ids(normalized_topic_id)))
         if extra_lines:
             lines.append("")
             lines.extend(extra_lines)
         lines.extend(
             [
                 "",
-                "如需完整菜单，可发送：`7` / `帮助 全部`",
+                "想看完整编号，可发送：`7` / `帮助 全部`",
             ]
         )
         return "\n".join(lines)
@@ -5447,51 +5447,22 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
     @staticmethod
     def _deployment_command_help() -> str:
-        lines = CodexCliOrchestrator._command_system_overview_lines()
-        lines.extend(
-            [
-                "",
-                "发布部署现在分成三块：",
-                "- `4 网站发布`：Pages / Worker / Cloudflare 相关能力",
-                "- `5 微信小程序`：体验版上传、提审、审核、正式发布",
-                "- `6 状态与排障`：统一查看状态、判断下一步",
-                "",
-                "网站发布：",
-            ]
-        )
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("4 1", "4 2", "4 3", "4 4", "4 5", "4 6")))
-        lines.extend(
-            [
-                "",
-                "微信小程序：",
-            ]
-        )
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("5 1", "5 2", "5 3", "5 4", "5 5", "5 6", "5 7")))
-        lines.extend(
-            [
-                "",
-                "状态与排障：",
-            ]
-        )
-        lines.extend(CodexCliOrchestrator._format_numbered_command_lines(("6 1", "6 2", "6 3", "6 4", "6 5", "6 6")))
-        lines.extend(
-            [
-                "",
-                "补充说明：",
-                "- `4.2`：自动建仓、创建 Pages 项目、注入 GitHub Secrets、写入工作流并再次推送；若没有 `package.json`，也可直接发布现成静态目录",
-                "- `4.4`：自动建仓、注入 GitHub Secrets、写入 Worker 工作流与 `wrangler.toml`，并再次推送",
-                "- `5.1`：只写入微信小程序 GitHub Actions 工作流与上传脚本，不会自动建仓",
-                "- `5.2`：自动建仓/推送、写入 `WECHAT_MINIPROGRAM_PRIVATE_KEY` Secret、生成上传工作流，再次推送后触发体验版上传",
-                "- `5.3`：写入小程序提审 JSON 模板，便于后续直接在企业微信里完成提审",
-                "- `5.4`：机器人直接调用微信小程序 OpenAPI 提交审核，需要配置 `WECHAT_MINIPROGRAM_APPSECRET`",
-                "- `5.5`：查询指定或最近一次审核单的状态",
-                "- `5.6` / `5.7`：分别用于正式发布和撤回审核",
-                "- 若 bots.yaml 配置了 provider_config.default_github_owner，则企业微信里的 GitHub 列仓/建仓/推送都统一走该账号",
-                "- GitHub 推送凭证建议使用宿主机 SSH；Cloudflare 凭证只放 GitHub Actions Secrets",
-                "- 微信小程序体验版上传需要 `WECHAT_MINIPROGRAM_PRIVATE_KEY`；提审/发布阶段还需要 `WECHAT_MINIPROGRAM_APPSECRET`",
-                "- 如需完整命令列表，可发送：`帮助 全部`",
-            ]
-        )
+        lines = [
+            "发布部署怎么走：",
+            "- 网站：优先用 `4.2` 发布；查状态看 `4.5`、`4.6`",
+            "- 小程序：优先用 `5.2` 上传体验版；提审看 `5.3`、`5.4`、`5.5`、`5.6`",
+            "- 排障：先看 `6.2 部署状态`，再进对应分类",
+            "",
+            "你现在如果要：",
+            "- 发布网站：发送 `4` 或直接发 `4.2`",
+            "- 发布小程序：发送 `5` 或直接发 `5.2`",
+            "- 查问题：发送 `6` 或直接发 `6.2`",
+            "",
+            "补充：",
+            "- `5.1`：只配置小程序上传工作流；`5.2`：一键上传体验版",
+            "- 小程序体验版上传需要 `WECHAT_MINIPROGRAM_PRIVATE_KEY`；提审/发布还需要 `WECHAT_MINIPROGRAM_APPSECRET`",
+            "- 如需完整命令列表，可发送：`7` / `帮助 全部`",
+        ]
         return "\n".join(lines)
 
     @staticmethod

@@ -99,18 +99,21 @@ def test_help_menu_card_contains_expected_topics():
 def test_help_menu_reply_for_github_repository_topic():
     reply = CodexCliOrchestrator.build_help_menu_reply("github_repository")
 
-    assert "分类导航：" in reply
-    assert "`1 ~ 7` 是帮助分类编号" in reply
+    assert "更多分类：" in reply
+    assert "当前在：`3` Git 与 GitHub" in reply
     assert "Git 与 GitHub：" in reply
+    assert "先用这些：" in reply
+    assert "3.2 设置Git身份 [name] [email]" in reply
     assert "3.3 GitHub仓库列表 [关键词]" in reply
     assert "3.10 推送到GitHub [仓库名]" in reply
     assert "default_github_owner" in reply
+    assert "3.7 创建GitHub仓库 <仓库名>" not in reply
 
 
 def test_help_menu_reply_for_quick_start_topic():
     reply = CodexCliOrchestrator.build_help_menu_reply("quick_start")
 
-    assert "当前分类：`1` / `帮助 新手开始`" in reply
+    assert "当前在：`1` 新手开始" in reply
     assert "新手开始" in reply
     assert "`1.1 hello-world`" in reply
     assert "`1.2 hello-world <Git地址>`" in reply
@@ -122,10 +125,10 @@ def test_help_menu_reply_for_quick_start_topic():
 def test_help_menu_reply_for_deployment_topic_mentions_wechat_miniprogram():
     reply = CodexCliOrchestrator.build_help_menu_reply("deployment")
 
-    assert "发布部署现在分成三块" in reply
+    assert "发布部署怎么走" in reply
     assert "5.1" in reply
     assert "5.2" in reply
-    assert "体验版上传" in reply
+    assert "上传体验版" in reply
 
 
 def test_help_topic_card_for_github_repository_topic():
@@ -137,7 +140,7 @@ def test_help_topic_card_for_github_repository_topic():
     assert card["card_type"] == "text_notice"
     assert card["task_id"] == "menu@help@cx_bot@github_repository"
     assert "Git 与 GitHub" in card["main_title"]["title"]
-    assert "Git 身份、选仓、建仓、推送与发布" in card["main_title"]["desc"]
+    assert "设置 Git、选仓、建仓、推送" in card["main_title"]["desc"]
 
 
 def test_is_control_command_recognizes_help_subtopic():
@@ -1094,20 +1097,19 @@ def test_project_create_command_supports_new_modes():
 
 def test_project_help_mentions_default_project_flow():
     help_text = CodexCliOrchestrator._project_command_help()
-    assert "帮助首页" in help_text
-    assert "`1 ~ 7`" in help_text
-    assert "`1.1`、`2.5`、`3.10`" in help_text
-    assert "帮助中心" in help_text
-    assert "二级普通对话" in help_text
-    assert "default" in help_text
-    assert "帮助 新手开始" in help_text
-    assert "帮助 状态与排障" in help_text
-    assert "帮助 全部" in help_text
+    assert "最简单的用法" in help_text
+    assert "不用先记命令" in help_text
+    assert "当前项目继续开发" in help_text
+    assert "按场景查看" in help_text
+    assert "`1` 新手开始" in help_text
+    assert "`6` 状态与排障" in help_text
+    assert "`7` / `帮助 全部`" in help_text
     assert "`2.5 项目名`" in help_text
     assert "`3.2`" in help_text
     assert "`3.10`" in help_text
     assert "`4.2`" in help_text
     assert "`5.2`" in help_text
+    assert len(help_text.splitlines()) <= 20
     assert "`6.2`" in help_text
 
 
