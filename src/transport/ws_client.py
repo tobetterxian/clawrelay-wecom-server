@@ -18,6 +18,7 @@ import os
 import socket
 import ssl
 import uuid
+import time
 
 import certifi
 from typing import Callable, Awaitable, Dict, Optional
@@ -55,6 +56,7 @@ class WsClient:
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reconnect_count = 0
         self._running = False
+        self._ready_event = asyncio.Event()
 
     @staticmethod
     def _generate_req_id() -> str:
@@ -68,6 +70,7 @@ class WsClient:
                 await self._connect()
                 await self._subscribe()
                 self._reconnect_count = 0
+                self._ready_event.set()
                 logger.info("[WsClient:%s] 连接就绪，开始收消息和心跳", self.bot_key)
                 await asyncio.gather(
                     self._heartbeat_loop(),
@@ -83,17 +86,44 @@ class WsClient:
     async def stop(self):
         """停止连接"""
         self._running = False
+        self._ready_event.clear()
         if self._ws:
             await self._ws.close()
 
-    async def send_reply(self, payload: dict):
-        """发送消息（不等待响应，fire-and-forget）"""
-        if not self._ws:
-            logger.error("[WsClient:%s] 连接未建立，无法发送消息", self.bot_key)
-            return
+    async def send_reply(self, payload: dict, timeout: float = 15.0):
+        """发送消息（不等待响应，fire-and-forget）
+
+        在连接短暂重连期间，会等待连接恢复后再发送，避免静默丢失长任务进度/结果。
+        """
         raw = json.dumps(payload, ensure_ascii=False)
-        await self._ws.send(raw)
-        logger.debug("[WsClient:%s] 发送消息: cmd=%s", self.bot_key, payload.get("cmd"))
+        deadline = time.monotonic() + max(float(timeout or 0.0), 0.0)
+        last_error: Exception | None = None
+
+        while self._running:
+            current_ws = self._ws
+            if current_ws and self._ready_event.is_set():
+                try:
+                    await current_ws.send(raw)
+                    logger.debug("[WsClient:%s] 发送消息: cmd=%s", self.bot_key, payload.get("cmd"))
+                    return
+                except Exception as e:
+                    last_error = e
+                    logger.warning("[WsClient:%s] 发送消息失败，等待重连后重试: %s", self.bot_key, e)
+                    if self._ws is current_ws:
+                        self._ready_event.clear()
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=min(remaining, 1.0))
+            except asyncio.TimeoutError:
+                continue
+
+        if last_error:
+            raise ConnectionError(f"WebSocket reply send failed after reconnect wait: {last_error}") from last_error
+        raise ConnectionError("WebSocket reply send failed: connection not ready")
 
     async def send_and_wait(self, payload: dict, timeout: float = 10.0) -> dict:
         """发送消息并等待响应（通过req_id关联）"""
@@ -267,6 +297,7 @@ class WsClient:
 
     async def _reconnect(self):
         """指数退避重连"""
+        self._ready_event.clear()
         if self._ws:
             try:
                 logger.info("[WsClient:%s] 正在关闭旧连接...", self.bot_key)

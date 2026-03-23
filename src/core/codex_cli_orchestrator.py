@@ -1102,24 +1102,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 allow_keepalive: bool = True,
             ) -> str:
                 display_text = response_text if override_text is None else override_text
-                rendered_thinking_lines = list(thinking_lines)
                 elapsed_seconds = self._runtime_elapsed_seconds(task_started_at)
-                if (
-                    allow_keepalive
-                    and self.long_task_keepalive_after_seconds > 0
-                    and not finished
-                    and elapsed_seconds >= self.long_task_keepalive_after_seconds
-                    and not runtime.has_pending_interaction()
-                ):
-                    elapsed_line = (
-                        "⏳ 状态：仍在处理中"
-                        f"（已运行 {self._format_runtime_elapsed_duration(elapsed_seconds)}；"
-                        "可回复“停止”）"
-                    )
-                    if rendered_thinking_lines:
-                        rendered_thinking_lines.insert(1, elapsed_line)
-                    else:
-                        rendered_thinking_lines.append(elapsed_line)
+                rendered_thinking_lines = self._render_runtime_thinking_lines(
+                    thinking_lines,
+                    elapsed_seconds=elapsed_seconds,
+                    finished=finished,
+                    allow_keepalive=allow_keepalive,
+                    has_pending_interaction=runtime.has_pending_interaction(),
+                    keepalive_after_seconds=self.long_task_keepalive_after_seconds,
+                )
                 return self._build_display_content(
                     rendered_thinking_lines,
                     str(display_text or ""),
@@ -5127,6 +5118,52 @@ class CodexCliOrchestrator(BaseOrchestrator):
             return 0.0
         elapsed = cls._runtime_elapsed_seconds(started_at, now=now)
         return max(threshold - elapsed, 0.0)
+
+    @classmethod
+    def _render_runtime_thinking_lines(
+        cls,
+        thinking_lines: List[str],
+        *,
+        elapsed_seconds: float,
+        finished: bool = False,
+        allow_keepalive: bool = True,
+        has_pending_interaction: bool = False,
+        keepalive_after_seconds: Optional[float] = None,
+    ) -> List[str]:
+        rendered_lines = list(thinking_lines or [])
+        if rendered_lines:
+            first_line = rendered_lines[0]
+            if "Codex 正在处理" in first_line or "Codex 已完成" in first_line:
+                rendered_lines[0] = "✅ Codex 已完成" if finished else "🤖 Codex 正在处理..."
+        elif finished:
+            rendered_lines.append("✅ Codex 已完成")
+
+        status_line = ""
+        if finished:
+            status_line = (
+                "✅ 状态：已完成"
+                f"（总耗时 {cls._format_runtime_elapsed_duration(elapsed_seconds)}）"
+            )
+        else:
+            threshold = max(float(keepalive_after_seconds or 0.0), 0.0)
+            if (
+                allow_keepalive
+                and threshold > 0
+                and elapsed_seconds >= threshold
+                and not has_pending_interaction
+            ):
+                status_line = (
+                    "⏳ 状态：仍在处理中"
+                    f"（已运行 {cls._format_runtime_elapsed_duration(elapsed_seconds)}；"
+                    "可回复“停止”）"
+                )
+
+        if status_line:
+            if rendered_lines:
+                rendered_lines.insert(1, status_line)
+            else:
+                rendered_lines.append(status_line)
+        return rendered_lines
 
     def _preferred_repository_publish_url(self, repository: GitHubRepositoryInfo) -> str:
         ssh_url = repository.ssh_url or repository.clone_url

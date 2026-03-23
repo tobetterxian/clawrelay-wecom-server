@@ -16,6 +16,12 @@ from src.utils.brochure_canva_state import (
     summarize_canva_brochure_state,
     write_canva_brochure_state,
 )
+from src.utils.brochure_source_materials import (
+    load_brochure_source_materials,
+    source_materials_path_for_workspace,
+    summarize_brochure_source_materials,
+    write_brochure_source_materials,
+)
 from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 
 
@@ -144,6 +150,32 @@ def test_canva_brochure_state_roundtrip():
         summary = summarize_canva_brochure_state(loaded)
         assert "设计标题：Hello Brochure" in summary
         assert "设计ID：DAG123" in summary
+
+
+def test_brochure_source_materials_roundtrip():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        payload = {
+            "version": 1,
+            "project_name": "hello-brochure",
+            "generated_at": "2026-03-23T12:00:00Z",
+            "material_count": 2,
+            "image_count": 1,
+            "document_count": 1,
+            "materials": [
+                {"kind": "image", "relative_path": "brochure/assets/cover.png"},
+                {"kind": "document", "relative_path": "docs/source-materials/specs.pdf"},
+            ],
+        }
+        manifest_path = write_brochure_source_materials(str(workspace), payload)
+
+        assert manifest_path == source_materials_path_for_workspace(str(workspace))
+        loaded = load_brochure_source_materials(str(workspace))
+        assert loaded == payload
+        summary = summarize_brochure_source_materials(loaded)
+        assert "图片素材：1" in summary
+        assert "参数文档：1" in summary
+        assert "brochure/assets/cover.png" in summary
 
 
 def test_generate_canva_command_not_parsed_as_requirement_doc():

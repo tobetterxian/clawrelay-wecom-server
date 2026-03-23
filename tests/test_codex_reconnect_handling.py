@@ -38,6 +38,7 @@ from src.core.workspace_manager import WorkspaceManager
 from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_check
 from src.utils.brochure_generation import rewrite_brochure_generation_request
 from src.utils.brochure_delegate import parse_brochure_delegate_request
+from src.utils.brochure_source_materials import load_brochure_source_materials
 from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 
 
@@ -118,6 +119,64 @@ def test_runtime_keepalive_initial_delay_does_not_restart_after_retry():
         CodexCliOrchestrator._runtime_keepalive_initial_delay(100.0, 20.0, now=105.0) - 15.0
     ) < 1e-6
     assert CodexCliOrchestrator._runtime_keepalive_initial_delay(100.0, 20.0, now=121.0) == 0.0
+
+
+def test_render_runtime_thinking_lines_includes_running_elapsed_status():
+    lines = CodexCliOrchestrator._render_runtime_thinking_lines(
+        ["🤖 Codex 正在处理...", "📁 项目：demo"],
+        elapsed_seconds=21.0,
+        finished=False,
+        allow_keepalive=True,
+        has_pending_interaction=False,
+        keepalive_after_seconds=20.0,
+    )
+
+    assert lines[0] == "🤖 Codex 正在处理..."
+    assert "⏳ 状态：仍在处理中（已运行 21 秒；可回复“停止”）" in lines
+
+
+def test_render_runtime_thinking_lines_marks_completion_with_total_duration():
+    lines = CodexCliOrchestrator._render_runtime_thinking_lines(
+        ["🤖 Codex 正在处理...", "📁 项目：demo"],
+        elapsed_seconds=42.0,
+        finished=True,
+        allow_keepalive=False,
+        has_pending_interaction=False,
+        keepalive_after_seconds=20.0,
+    )
+
+    assert lines[0] == "✅ Codex 已完成"
+    assert "✅ 状态：已完成（总耗时 42 秒）" in lines
+
+
+def test_ws_client_send_reply_waits_for_reconnect_ready():
+    from src.transport.ws_client import WsClient
+
+    class DummyWs:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, raw: str):
+            self.sent.append(raw)
+
+    async def run_flow():
+        client = WsClient("bot-id", "secret", bot_key="cx_bot")
+        client._running = True
+        dummy_ws = DummyWs()
+
+        async def delayed_ready():
+            await asyncio.sleep(0.05)
+            client._ws = dummy_ws
+            client._ready_event.set()
+
+        waiter = asyncio.create_task(client.send_reply({"cmd": "aibot_respond_msg"}))
+        notifier = asyncio.create_task(delayed_ready())
+        await asyncio.gather(waiter, notifier)
+        return dummy_ws.sent
+
+    sent_payloads = asyncio.run(run_flow())
+    assert len(sent_payloads) == 1
+    assert '"cmd": "aibot_respond_msg"' in sent_payloads[0]
 
 
 def test_codex_cli_uses_shared_home_directory():
@@ -492,6 +551,98 @@ def test_message_dispatcher_stream_reply_failure_marks_task_without_crashing():
         registry.forget(task_key)
 
 
+def test_message_dispatcher_final_stream_failure_uses_proactive_reply_fallback():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+    from src.utils.weixin_utils import ProactiveReplyClient
+
+    class FailingWs:
+        async def send_reply(self, payload: dict):
+            raise RuntimeError("websocket closed")
+
+    async def run_flow(dispatcher: MessageDispatcher, task_key: str):
+        registry = get_task_registry()
+
+        async def sleeper():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(sleeper())
+        registry.register(
+            task_key,
+            task,
+            "stream_fail",
+            req_id="req_fail",
+            reply_state={
+                "req_id": "req_fail",
+                "stream_id": "stream_fail",
+                "prefix": "",
+                "response_url": "https://example.com/response",
+            },
+        )
+
+        callback = dispatcher._make_stream_delta_callback(
+            {
+                "req_id": "req_fail",
+                "stream_id": "stream_fail",
+                "prefix": "",
+                "response_url": "https://example.com/response",
+            },
+            task_key=task_key,
+        )
+        await callback("final result", True)
+
+        _task, _stream_id, extra = registry.get(task_key)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0)
+        return extra
+
+    sent_payloads = []
+
+    async def fake_send_markdown(response_url: str, content: str) -> bool:
+        sent_payloads.append((response_url, content))
+        return True
+
+    original_send_markdown = ProactiveReplyClient.send_markdown
+    ProactiveReplyClient.send_markdown = staticmethod(fake_send_markdown)
+    try:
+        with TemporaryDirectory() as tmpdir:
+            working_dir = Path(tmpdir) / "project"
+            working_dir.mkdir()
+            orchestrator = CodexCliOrchestrator(
+                bot_key="cx_bot",
+                working_dir=str(working_dir),
+            )
+            dispatcher = MessageDispatcher(
+                FailingWs(),
+                BotConfig(
+                    bot_key="cx_bot",
+                    bot_id="test_bot_id",
+                    secret="test_secret",
+                    bot_type="codex_cli",
+                ),
+                orchestrator=orchestrator,
+            )
+            task_key = dispatcher._task_registry_key("session-proactive-fallback")
+            registry = get_task_registry()
+            registry.forget(task_key)
+
+            extra = asyncio.run(run_flow(dispatcher, task_key))
+
+            assert extra["reply_delivery_failed"] is True
+            assert extra["proactive_reply_sent"] is True
+            assert sent_payloads == [
+                ("https://example.com/response", "final result")
+            ]
+            registry.forget(task_key)
+    finally:
+        ProactiveReplyClient.send_markdown = original_send_markdown
+
+
 def test_running_task_status_reply_reports_recent_terminal_status():
     from src.core.task_registry import get_task_registry
     from src.transport.message_dispatcher import MessageDispatcher
@@ -545,6 +696,62 @@ def test_running_task_status_reply_reports_recent_terminal_status():
         assert "最近一次任务已于" in reply
         assert "结果可能没有成功送达" in reply
         assert "最近输出：任务已经完成" in reply
+        registry.forget(task_key)
+
+
+def test_running_task_status_reply_reports_proactive_reply_recovery():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        async def send_reply(self, payload: dict):
+            return None
+
+    async def run_flow(task_key: str):
+        registry = get_task_registry()
+        task = asyncio.create_task(asyncio.sleep(0))
+        registry.register(
+            task_key,
+            task,
+            "stream_done",
+            req_id="req_done",
+            last_preview="画册已生成",
+            reply_delivery_failed=True,
+            proactive_reply_sent=True,
+        )
+        await task
+        await asyncio.sleep(0)
+        return registry.get_recent(task_key)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        dispatcher = MessageDispatcher(
+            DummyWs(),
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-proactive-status")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        recent = asyncio.run(run_flow(task_key))
+        reply = dispatcher._running_task_status_reply("session-proactive-status")
+
+        assert recent["terminal_status"] == "completed"
+        assert recent["proactive_reply_sent"] is True
+        assert "当前没有正在运行的任务。" in reply
+        assert "系统已通过主动回复补发结果" in reply
+        assert "最近输出：画册已生成" in reply
         registry.forget(task_key)
 
 
@@ -2608,6 +2815,531 @@ def test_message_dispatcher_brochure_internal_delegate_forwards_pending_interact
     payload = ws.payloads[-1]
     assert payload["cmd"] == "aibot_respond_msg"
     assert payload["body"]["stream"]["content"] == "已提交给后台画册任务"
+
+
+def test_message_dispatcher_brochure_image_upload_is_saved_into_delegate_workspace():
+    from src.transport.message_dispatcher import MessageDispatcher
+    from src.utils.weixin_utils import FileUtils
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        async def handle_text_message(self, user_id: str, message: str, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+        async def handle_multimodal_message(self, user_id: str, content_blocks, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self, workspace_path: str):
+            self.workspace_path = workspace_path
+
+        def _ensure_runtime_context(self, user_id: str, session_key: str = "", log_context: dict = None):
+            return (
+                {
+                    "working_dir": self.workspace_path,
+                    "project": {"project_id": "proj_1", "name": "hello-brochure"},
+                },
+                None,
+            )
+
+        async def handle_text_message(self, user_id: str, message: str, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None, **kwargs) -> str:
+            return ""
+
+        async def handle_multimodal_message(self, user_id: str, content_blocks, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+    with TemporaryDirectory() as tmpdir:
+        workspace_path = Path(tmpdir) / "workspace"
+        workspace_path.mkdir()
+
+        brochure_config = BotConfig(
+            bot_key="brochure_bot",
+            bot_id="bot_brochure",
+            secret="secret_brochure",
+            bot_type="gemini",
+            provider_config={
+                "enable_brochure_internal_delegate": True,
+                "delegate_execution_bot_key": "cx_bot",
+            },
+        )
+        codex_config = BotConfig(
+            bot_key="cx_bot",
+            bot_id="bot_cx",
+            secret="secret_cx",
+            bot_type="codex_cli",
+            working_dir=str(workspace_path),
+        )
+        delegate_manager = BotDelegateManager(
+            {"brochure_bot": brochure_config, "cx_bot": codex_config},
+            {"cx_bot": CodexDelegateOrchestrator(str(workspace_path))},
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            brochure_config,
+            orchestrator=BrochureOrchestrator(),
+            delegate_manager=delegate_manager,
+        )
+
+        original_download = FileUtils.download_and_decrypt
+
+        async def fake_download(url: str, aes_key: str, timeout: int = 30, key_format: str = "auto"):
+            return (b"\x89PNG\r\n\x1a\nfakepng", "")
+
+        FileUtils.download_and_decrypt = staticmethod(fake_download)
+        try:
+            asyncio.run(
+                dispatcher._handle_image(
+                    "req_brochure_image",
+                    {"image": {"url": "https://example.com/image", "aeskey": "abc"}},
+                    "alice",
+                    "alice",
+                    "single",
+                )
+            )
+        finally:
+            FileUtils.download_and_decrypt = original_download
+
+        payload = ws.payloads[-1]
+        assert "已接收画册图片素材" in payload["body"]["stream"]["content"]
+        manifest = load_brochure_source_materials(str(workspace_path))
+        assert manifest
+        assert manifest["image_count"] == 1
+        entry = manifest["materials"][0]
+        assert entry["kind"] == "image"
+        assert entry["relative_path"].startswith("brochure/assets/")
+        assert (workspace_path / entry["relative_path"]).exists()
+
+
+def test_message_dispatcher_brochure_file_upload_is_saved_into_delegate_workspace():
+    from src.transport.message_dispatcher import MessageDispatcher
+    from src.utils.weixin_utils import FileUtils
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        async def handle_text_message(self, user_id: str, message: str, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+        async def handle_multimodal_message(self, user_id: str, content_blocks, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self, workspace_path: str):
+            self.workspace_path = workspace_path
+
+        def _ensure_runtime_context(self, user_id: str, session_key: str = "", log_context: dict = None):
+            return (
+                {
+                    "working_dir": self.workspace_path,
+                    "project": {"project_id": "proj_1", "name": "hello-brochure"},
+                },
+                None,
+            )
+
+        async def handle_text_message(self, user_id: str, message: str, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None, **kwargs) -> str:
+            return ""
+
+        async def handle_multimodal_message(self, user_id: str, content_blocks, stream_id: str, session_key: str = "", log_context: dict = None, on_stream_delta=None) -> str:
+            return ""
+
+    with TemporaryDirectory() as tmpdir:
+        workspace_path = Path(tmpdir) / "workspace"
+        workspace_path.mkdir()
+
+        brochure_config = BotConfig(
+            bot_key="brochure_bot",
+            bot_id="bot_brochure",
+            secret="secret_brochure",
+            bot_type="gemini",
+            provider_config={
+                "enable_brochure_internal_delegate": True,
+                "delegate_execution_bot_key": "cx_bot",
+            },
+        )
+        codex_config = BotConfig(
+            bot_key="cx_bot",
+            bot_id="bot_cx",
+            secret="secret_cx",
+            bot_type="codex_cli",
+            working_dir=str(workspace_path),
+        )
+        delegate_manager = BotDelegateManager(
+            {"brochure_bot": brochure_config, "cx_bot": codex_config},
+            {"cx_bot": CodexDelegateOrchestrator(str(workspace_path))},
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            brochure_config,
+            orchestrator=BrochureOrchestrator(),
+            delegate_manager=delegate_manager,
+        )
+
+        original_download = FileUtils.download_and_decrypt
+
+        async def fake_download(url: str, aes_key: str, timeout: int = 30, key_format: str = "auto"):
+            return ("型号,重量\nL1,2kg\n".encode("utf-8"), "specs.csv")
+
+        FileUtils.download_and_decrypt = staticmethod(fake_download)
+        try:
+            asyncio.run(
+                dispatcher._handle_file(
+                    "req_brochure_file",
+                    {"file": {"url": "https://example.com/file", "aeskey": "abc", "filename": "specs.csv"}},
+                    "alice",
+                    "alice",
+                    "single",
+                )
+            )
+        finally:
+            FileUtils.download_and_decrypt = original_download
+
+        payload = ws.payloads[-1]
+        assert "已接收产品参数文档" in payload["body"]["stream"]["content"]
+        manifest = load_brochure_source_materials(str(workspace_path))
+        assert manifest
+        assert manifest["document_count"] == 1
+        entry = manifest["materials"][0]
+        assert entry["kind"] == "document"
+        assert entry["relative_path"].startswith("docs/source-materials/")
+        assert "型号,重量" in entry["summary"]
+        assert (workspace_path / entry["relative_path"]).exists()
+
+
+def test_message_dispatcher_brochure_delegate_planning_prompt_includes_uploaded_materials():
+    from src.transport.message_dispatcher import MessageDispatcher
+    from src.utils.brochure_source_materials import write_brochure_source_materials
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        def __init__(self):
+            self.messages = []
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            self.messages.append(message)
+            if on_stream_delta:
+                await on_stream_delta("# 画册需求\n\n- 首页", True)
+            return "# 画册需求\n\n- 首页"
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self, workspace_path: str):
+            self.workspace_path = workspace_path
+
+        def _ensure_runtime_context(self, user_id: str, session_key: str = "", log_context: dict = None):
+            return (
+                {
+                    "working_dir": self.workspace_path,
+                    "project": {"project_id": "proj_1", "name": "hello-brochure"},
+                },
+                None,
+            )
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ) -> str:
+            if on_stream_delta:
+                await on_stream_delta("已生成画册", True)
+            return "已生成画册"
+
+        async def handle_control_command(
+            self,
+            user_id: str,
+            content: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ):
+            return "已导出预览图"
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    with TemporaryDirectory() as tmpdir:
+        workspace_path = Path(tmpdir) / "workspace"
+        workspace_path.mkdir()
+        write_brochure_source_materials(
+            str(workspace_path),
+            {
+                "version": 1,
+                "project_name": "hello-brochure",
+                "generated_at": "2026-03-23T12:00:00Z",
+                "material_count": 2,
+                "image_count": 1,
+                "document_count": 1,
+                "materials": [
+                    {"kind": "image", "relative_path": "brochure/assets/cover.png"},
+                    {"kind": "document", "relative_path": "docs/source-materials/specs.csv", "summary": "型号,重量"},
+                ],
+            },
+        )
+
+        brochure_config = BotConfig(
+            bot_key="brochure_bot",
+            bot_id="bot_brochure",
+            secret="secret_brochure",
+            bot_type="gemini",
+            provider_config={
+                "enable_brochure_internal_delegate": True,
+                "delegate_execution_bot_key": "cx_bot",
+            },
+        )
+        codex_config = BotConfig(
+            bot_key="cx_bot",
+            bot_id="bot_cx",
+            secret="secret_cx",
+            bot_type="codex_cli",
+            working_dir=str(workspace_path),
+        )
+        brochure_orchestrator = BrochureOrchestrator()
+        delegate_manager = BotDelegateManager(
+            {"brochure_bot": brochure_config, "cx_bot": codex_config},
+            {"cx_bot": CodexDelegateOrchestrator(str(workspace_path))},
+        )
+        dispatcher = MessageDispatcher(
+            DummyWs(),
+            brochure_config,
+            orchestrator=brochure_orchestrator,
+            delegate_manager=delegate_manager,
+        )
+
+        asyncio.run(
+            dispatcher._handle_text(
+                "req_brochure_materials_context",
+                {"msgtype": "text", "text": {"content": "做完整画册并回传图片"}},
+                "alice",
+                "alice",
+                "single",
+            )
+        )
+
+        assert brochure_orchestrator.messages
+        planning_prompt = brochure_orchestrator.messages[0]
+        assert "【当前已上传画册资料】" in planning_prompt
+        assert "brochure/assets/cover.png" in planning_prompt
+        assert "docs/source-materials/specs.csv" in planning_prompt
+
+
+def test_message_dispatcher_brochure_internal_delegate_resumes_recent_interrupted_workflow():
+    from src.transport.message_dispatcher import MessageDispatcher
+    from src.core.task_registry import get_task_registry
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self):
+            self.messages = []
+            self.control_commands = []
+
+        def get_runtime_session_key(
+            self,
+            user_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ) -> str:
+            return f"delegate::{session_key or user_id}"
+
+        def has_pending_interaction(self, session_key: str) -> bool:
+            return False
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ) -> str:
+            self.messages.append(message)
+            if on_stream_delta:
+                await on_stream_delta("继续生成中", True)
+            return "继续生成完成"
+
+        async def handle_control_command(
+            self,
+            user_id: str,
+            content: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ):
+            self.control_commands.append(content)
+            return "已导出PDF"
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    async def seed_recent_failure(task_key: str):
+        registry = get_task_registry()
+
+        async def fail():
+            raise RuntimeError("delegate interrupted")
+
+        task = asyncio.create_task(fail())
+        registry.register(
+            task_key,
+            task,
+            "stream_old",
+            req_id="req_old",
+            brochure_delegate_resume={
+                "resumable": True,
+                "mode": "full_flow",
+                "planning_needed": True,
+                "final_control_command": "导出画册PDF",
+                "composed_message": "【当前消息】\n做完整画册并导出PDF",
+                "target_bot_key": "cx_bot",
+                "stage": "generate",
+                "plan_text": "# 画册需求\n\n- 首页\n- 产品亮点",
+            },
+        )
+        try:
+            await task
+        except RuntimeError:
+            pass
+        await asyncio.sleep(0)
+
+    brochure_config = BotConfig(
+        bot_key="brochure_bot",
+        bot_id="bot_brochure",
+        secret="secret_brochure",
+        bot_type="gemini",
+        name="产品画册",
+        description="产品画册策划与文案机器人",
+        provider_config={
+            "enable_brochure_internal_delegate": True,
+            "delegate_execution_bot_key": "cx_bot",
+        },
+    )
+    codex_config = BotConfig(
+        bot_key="cx_bot",
+        bot_id="bot_cx",
+        secret="secret_cx",
+        bot_type="codex_cli",
+        working_dir="C:/next",
+    )
+    delegate_orchestrator = CodexDelegateOrchestrator()
+    delegate_manager = BotDelegateManager(
+        {"brochure_bot": brochure_config, "cx_bot": codex_config},
+        {"cx_bot": delegate_orchestrator},
+    )
+    ws = DummyWs()
+    dispatcher = MessageDispatcher(
+        ws,
+        brochure_config,
+        orchestrator=BrochureOrchestrator(),
+        delegate_manager=delegate_manager,
+    )
+
+    task_key = dispatcher._task_registry_key("alice")
+    registry = get_task_registry()
+    registry.forget(task_key)
+    asyncio.run(seed_recent_failure(task_key))
+
+    asyncio.run(
+        dispatcher._handle_text(
+            "req_delegate_resume",
+            {"msgtype": "text", "text": {"content": "继续"}},
+            "alice",
+            "alice",
+            "single",
+        )
+    )
+
+    assert len(delegate_orchestrator.messages) == 1
+    assert "继续上次画册自动落地任务" in delegate_orchestrator.messages[0]
+    assert "不要从头重做" in delegate_orchestrator.messages[0]
+    assert "# 画册需求" in delegate_orchestrator.messages[0]
+    assert delegate_orchestrator.control_commands == ["导出画册PDF"]
+    assert ws.payloads
+    assert "已恢复上次中断的画册自动落地流程" in ws.payloads[-1]["body"]["stream"]["content"]
+    registry.forget(task_key)
 
 
 def test_handle_text_message_rewrites_quoted_development_handoff_before_codex_turn():

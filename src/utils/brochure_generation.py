@@ -89,6 +89,8 @@ def rewrite_brochure_generation_request(message: str) -> str:
         f"{BROCHURE_OUTPUTS_HEADER}"
         "- `docs/brochure-outline.md`：画册目录、每页目标与文案摘要。\n"
         "- `docs/image-prompts.md`：每页配图建议、出图提示词、缺失素材说明。\n"
+        "- `docs/source-materials/`：用户上传的产品参数文档、说明书、表格等原始资料。\n"
+        "- `docs/brochure-source-materials.json`：用户上传资料清单与路径索引。\n"
         "- `brochure/index.html`：可直接预览的 HTML 画册入口。\n"
         "- `brochure/styles.css`：画册样式文件。\n"
         "- `brochure/assets/`：图片、图标、占位素材。"
@@ -96,6 +98,7 @@ def rewrite_brochure_generation_request(message: str) -> str:
     parts.append(
         "【执行要求】\n"
         "- 默认优先读取 `docs/requirements.md`；如果当前消息引用了需求文档，也要一并使用。\n"
+        "- 如果存在 `docs/brochure-source-materials.json`，优先阅读其中记录的图片素材和参数文档，并按路径打开原文件。\n"
         "- 如果存在 `docs/brochure-assets.json`，优先使用其中的素材 URL、标签和说明来安排封面图与内页配图。\n"
         "- 先做可运行、可预览的 V1，不要只停留在策划说明。\n"
         "- 画册默认采用 HTML/H5 形式，兼顾移动端和 PC 端。\n"
