@@ -14,6 +14,8 @@ from src.utils.quoted_handoff import split_structured_user_message
 DEFAULT_REQUIREMENT_DOC_PATH = "docs/requirements.md"
 
 _DEFAULT_TARGET_ALIASES = {
+    "需求",
+    "产品需求",
     "需求文档",
     "需求说明",
     "需求文件",
@@ -110,7 +112,26 @@ def _parse_requirement_doc_target(command_text: str) -> str | None:
     match = _SAVE_REQUIREMENT_DOC_RE.match(normalized)
     if not match:
         return None
-    return _normalize_target_path(match.group("target") or "")
+    raw_target = match.group("target") or ""
+    if not _looks_like_requirement_doc_target(raw_target):
+        return None
+    return _normalize_target_path(raw_target)
+
+
+def _looks_like_requirement_doc_target(value: str) -> bool:
+    target = str(value or "").strip().strip("`'\"")
+    if not target:
+        return True
+
+    normalized = re.sub(r"\s+", "", target).lower()
+    if any(re.sub(r"\s+", "", alias).lower() in normalized for alias in _DEFAULT_TARGET_ALIASES):
+        return True
+
+    path_like = target.replace("\\", "/").strip()
+    if "/" in path_like or path_like.lower().endswith(".md"):
+        return True
+
+    return False
 
 
 def parse_quoted_requirement_doc_request(message: str) -> QuotedRequirementDocRequest | None:

@@ -397,8 +397,15 @@ bots:
 说明：
 - `@产品画册 做完整画册`：先生成需求文档，再后台委托 `cx_bot` 保存文档、生成画册、回传预览图
 - `@产品画册 做完整画册并导出PDF`：完整生成后自动导出 PDF
+- `@产品画册 同步画册素材到Cloudinary`：扫描当前项目图片并写入 `docs/brochure-assets.json`
+- `@产品画册 查看画册素材状态`：查看当前素材清单是否已生成
+- `@产品画册 生成Canva精修版`：基于 Canva Brand Template 自动生成一版可继续精修的品牌画册，并写入 `docs/canva-brochure.json`
+- `@产品画册 获取Canva编辑链接`：查看当前 Canva 设计状态和编辑链接
+- `@产品画册 导出Canva画册PDF`：把当前 Canva 精修版导出到项目内 `dist/canva-brochure.pdf`
 - `@产品画册 回传画册图片` / `导出画册PDF` / `导出画册PPT` / `发布画册`：会直接委托后台执行机器人处理
 - 如果后台 `codex_cli` 在执行中需要确认或补充信息，继续在当前 `@产品画册` 会话里直接回复文字即可，无需再单独 `@cx_bot`
+
+Canva 精修版能力需要在 `codex_cli` 的 `env_vars` 中额外配置 `CANVA_ACCESS_TOKEN` 或 `CANVA_CLIENT_ID` / `CANVA_CLIENT_SECRET` / `CANVA_REFRESH_TOKEN`，以及 `CANVA_BRAND_TEMPLATE_ID`。
 
 ### 多机器人配置示例
 

@@ -29,6 +29,8 @@ from .cloudflare_pages_manager import (
     CloudflareWorkerStatusInfo,
 )
 from .brochure_export_manager import BrochureExportManager
+from .canva_design_manager import CanvaDesignManager
+from .cloudinary_asset_manager import CloudinaryAssetManager
 from .github_actions_secret_manager import GitHubActionsSecretManager
 from .github_repository_manager import (
     GitHubRepositoryInfo,
@@ -67,6 +69,15 @@ from src.utils.quoted_handoff import (
     rewrite_quoted_development_request,
 )
 from src.utils.brochure_generation import rewrite_brochure_generation_request
+from src.utils.brochure_asset_manifest import (
+    DEFAULT_BROCHURE_ASSET_MANIFEST_PATH,
+    manifest_path_for_workspace,
+    summarize_brochure_asset_manifest,
+)
+from src.utils.brochure_canva_state import (
+    DEFAULT_CANVA_BROCHURE_STATE_PATH,
+    summarize_canva_brochure_state,
+)
 from src.utils.quoted_requirement_doc import (
     DEFAULT_REQUIREMENT_DOC_PATH,
     parse_quoted_requirement_doc_request,
@@ -274,6 +285,8 @@ HELP_MENU_TOPICS: Dict[str, dict] = {
             "- 静态网站优先用：`4.2`",
             "- Worker 服务优先用：`4.4`",
             "- 查网站流水线 / Cloudflare 状态：`4.5`、`4.6`",
+            "- 画册做图前可先发：`同步画册素材到Cloudinary`",
+            "- 需要品牌精修版可发：`生成Canva精修版`、`获取Canva编辑链接`",
             "- 画册交付可直接发送：`发布画册`、`导出画册PDF`、`回传画册图片`",
         ),
     },
@@ -411,6 +424,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
         self.cloudflare_pages_manager = CloudflarePagesManager(env_vars=self.runtime_env_vars)
         self.wechat_miniprogram_manager = WeChatMiniProgramManager(env_vars=self.runtime_env_vars)
         self.brochure_export_manager = BrochureExportManager(env_vars=self.runtime_env_vars)
+        self.cloudinary_asset_manager = CloudinaryAssetManager(env_vars=self.runtime_env_vars)
+        self.canva_design_manager = CanvaDesignManager(env_vars=self.runtime_env_vars)
         self.project_deployment_manager = ProjectDeploymentManager()
         self.workspace_manager = WorkspaceManager(
             self.workspace_root,
@@ -679,6 +694,38 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 return self._handle_export_brochure_ppt_command(
                     user_id=user_id,
                     outline_path=deployment_request.get("outline_path", ""),
+                    output_path=deployment_request.get("output_path", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "sync_brochure_assets":
+                return self._handle_sync_brochure_assets_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "brochure_assets_status":
+                return self._handle_brochure_assets_status_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "generate_canva_brochure":
+                return self._handle_generate_canva_brochure_command(
+                    user_id=user_id,
+                    design_title=deployment_request.get("design_title", ""),
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "canva_brochure_link":
+                return self._handle_canva_brochure_link_command(
+                    user_id=user_id,
+                    session_key=session_key,
+                    log_context=log_context,
+                )
+            if action == "export_canva_brochure_pdf":
+                return self._handle_export_canva_brochure_pdf_command(
+                    user_id=user_id,
                     output_path=deployment_request.get("output_path", ""),
                     session_key=session_key,
                     log_context=log_context,
@@ -3070,6 +3117,216 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"错误：{error}"
         )
 
+    def _cloudinary_unavailable_reply(self) -> str:
+        missing = ", ".join(self.cloudinary_asset_manager.missing_configuration_items())
+        return (
+            "当前未完成 Cloudinary 配置，暂时无法同步画册素材。\n"
+            f"缺少环境变量：{missing}\n"
+            "请先在 `env_vars` 或服务环境中配置后再重试。"
+        )
+
+    def _canva_unavailable_reply(self) -> str:
+        missing = ", ".join(self.canva_design_manager.missing_configuration_items())
+        return (
+            "当前未完成 Canva 配置，暂时无法生成精修版。\n"
+            f"缺少环境变量：{missing}\n"
+            "请先在 `env_vars` 或服务环境中配置后再重试。"
+        )
+
+    def _handle_sync_brochure_assets_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        if not self.cloudinary_asset_manager.is_enabled():
+            return self._cloudinary_unavailable_reply()
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.cloudinary_asset_manager.sync_workspace_assets(
+                workspace_path=workspace_path,
+                project_name=(project or {}).get("name", ""),
+            )
+        except Exception as exc:
+            return (
+                "同步画册素材失败\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        return (
+            "已同步画册素材到 Cloudinary\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"扫描图片：{result.source_count} 张\n"
+            f"已写入素材：{result.asset_count} 张\n"
+            f"Manifest：{result.manifest_relative_path}\n"
+            "下一步：可直接发送 `生成画册`"
+        )
+
+    def _handle_brochure_assets_status_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        payload = self.cloudinary_asset_manager.load_manifest(workspace_path)
+        if not payload:
+            return (
+                "当前还没有画册素材清单\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"默认清单：{DEFAULT_BROCHURE_ASSET_MANIFEST_PATH}\n"
+                "下一步：可直接发送 `同步画册素材到Cloudinary`"
+            )
+
+        workspace_root = Path(workspace_path).expanduser().resolve()
+        manifest_relative_path = manifest_path_for_workspace(workspace_path).relative_to(workspace_root).as_posix()
+        return (
+            "当前画册素材状态\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"Manifest：{manifest_relative_path}\n"
+            f"{summarize_brochure_asset_manifest(payload)}\n"
+            "下一步：可直接发送 `生成画册` 或 `同步画册素材到Cloudinary`"
+        )
+
+    def _handle_generate_canva_brochure_command(
+        self,
+        user_id: str,
+        design_title: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        if not self.canva_design_manager.is_enabled():
+            return self._canva_unavailable_reply()
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.canva_design_manager.generate_polished_brochure(
+                workspace_path=workspace_path,
+                project_name=(project or {}).get("name", ""),
+                design_title=design_title or (project or {}).get("name", ""),
+            )
+        except Exception as exc:
+            return (
+                "生成 Canva 精修版失败\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        lines = [
+            "已生成 Canva 精修版",
+            f"项目：{(project or {}).get('name', '-')}",
+            f"工作区：{self._display_path(workspace_path)}",
+            f"设计标题：{result.design_title or '-'}",
+            f"设计ID：{result.design_id}",
+            f"编辑链接：{result.edit_url or '-'}",
+        ]
+        if result.view_url:
+            lines.append(f"预览链接：{result.view_url}")
+        lines.extend(
+            [
+                f"状态文件：{result.state_relative_path}",
+                f"模板字段：{result.dataset_field_count} 个",
+                f"已填充字段：{result.autofill_field_count} 个",
+                f"已上传素材：{result.asset_upload_count} 张",
+                "下一步：可直接发送 `获取Canva编辑链接` 或 `导出Canva画册PDF`",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _handle_canva_brochure_link_command(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        payload = self.canva_design_manager.load_state(workspace_path)
+        if not payload:
+            return (
+                "当前还没有 Canva 画册状态\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"默认状态文件：{DEFAULT_CANVA_BROCHURE_STATE_PATH}\n"
+                "下一步：可直接发送 `生成Canva精修版`"
+            )
+
+        return (
+            "当前 Canva 画册状态\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"状态文件：{DEFAULT_CANVA_BROCHURE_STATE_PATH}\n"
+            f"{summarize_canva_brochure_state(payload)}\n"
+            f"编辑链接：{str(payload.get('edit_url') or '-').strip() or '-'}\n"
+            f"预览链接：{str(payload.get('view_url') or '-').strip() or '-'}\n"
+            "下一步：可直接发送 `导出Canva画册PDF` 或继续在 Canva 编辑"
+        )
+
+    def _handle_export_canva_brochure_pdf_command(
+        self,
+        user_id: str,
+        output_path: str,
+        session_key: str,
+        log_context: dict = None,
+    ) -> str:
+        runtime_context, early_reply = self._ensure_runtime_context(user_id, session_key, log_context)
+        if early_reply:
+            return early_reply
+
+        if not self.canva_design_manager.is_enabled():
+            return self._canva_unavailable_reply()
+
+        project = runtime_context.get("project")
+        workspace_path = runtime_context["working_dir"]
+        try:
+            result = self.canva_design_manager.export_design_pdf(
+                workspace_path=workspace_path,
+                output_path=output_path or "",
+            )
+        except Exception as exc:
+            return (
+                "导出 Canva 画册 PDF 失败\n"
+                f"项目：{(project or {}).get('name', '-')}\n"
+                f"工作区：{self._display_path(workspace_path)}\n"
+                f"错误：{exc}"
+            )
+
+        return (
+            "已导出 Canva 画册 PDF\n"
+            f"项目：{(project or {}).get('name', '-')}\n"
+            f"工作区：{self._display_path(workspace_path)}\n"
+            f"设计ID：{result.design_id}\n"
+            f"输出文件：{result.output_relative_path}\n"
+            f"状态文件：{result.state_relative_path}\n"
+            "下一步：可直接发送 `获取Canva编辑链接` 或把 PDF 发给客户/同事"
+        )
+
     def _handle_enable_worker_deployment_command(
         self,
         user_id: str,
@@ -5318,6 +5575,40 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     "output_path": " ".join(args[1:]).strip() if len(args) >= 2 else "",
                 }, None
 
+        for prefix in ("同步画册素材到Cloudinary", "同步画册素材到cloudinary", "同步画册素材", "同步素材到Cloudinary", "同步素材到cloudinary"):
+            if command.startswith(prefix):
+                return {
+                    "action": "sync_brochure_assets",
+                }, None
+
+        for prefix in ("查看画册素材状态", "画册素材状态", "素材状态"):
+            if command.startswith(prefix):
+                return {
+                    "action": "brochure_assets_status",
+                }, None
+
+        for prefix in ("生成Canva精修版", "生成canva精修版", "生成 Canva 精修版", "Canva精修版", "canva精修版"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "generate_canva_brochure",
+                    "design_title": " ".join(args).strip() if args else "",
+                }, None
+
+        for prefix in ("获取Canva编辑链接", "查看Canva画册状态", "Canva画册状态", "canva画册状态"):
+            if command.startswith(prefix):
+                return {
+                    "action": "canva_brochure_link",
+                }, None
+
+        for prefix in ("导出Canva画册PDF", "导出Canva pdf", "导出canva画册pdf", "导出 canva pdf"):
+            if command.startswith(prefix):
+                args = self._split_command_args(command[len(prefix) :].strip())
+                return {
+                    "action": "export_canva_brochure_pdf",
+                    "output_path": " ".join(args).strip() if args else "",
+                }, None
+
         for prefix in (
             "一键发布Worker",
             "一键部署Worker",
@@ -5741,12 +6032,13 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "发布部署怎么走：",
             "- 网站：优先用 `4.2` 发布；查状态看 `4.5`、`4.6`",
             "- 小程序：优先用 `5.2` 上传体验版；提审看 `5.3`、`5.4`、`5.5`、`5.6`",
-            "- 画册：先 `生成画册`，再 `导出画册PDF` / `导出画册PPT` / `回传画册图片` / `发布画册`",
+            "- 画册：先 `生成画册`；品牌精修可发 `生成Canva精修版`；交付再 `导出画册PDF` / `发布画册`",
             "- 排障：先看 `6.2 部署状态`，再进对应分类",
             "",
             "你现在如果要：",
             "- 发布网站：发送 `4` 或直接发 `4.2`",
             "- 发布小程序：发送 `5` 或直接发 `5.2`",
+            "- 做品牌精修版：直接发 `生成Canva精修版`",
             "- 交付画册：直接发 `导出画册PDF` 或 `发布画册`",
             "- 查问题：发送 `6` 或直接发 `6.2`",
             "",

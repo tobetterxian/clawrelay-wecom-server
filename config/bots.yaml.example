@@ -152,6 +152,15 @@ bots:
   #     GITHUB_TOKEN: "${GITHUB_TOKEN}"  # 一键发布到 GitHub / Cloudflare 时推荐提供
   #     CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN}"  # 一键发布 Pages 时推荐提供
   #     CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID}"  # 一键发布 Pages 时推荐提供
+  #     CLOUDINARY_CLOUD_NAME: "${CLOUDINARY_CLOUD_NAME:-}"  # 可选：同步画册素材到 Cloudinary
+  #     CLOUDINARY_API_KEY: "${CLOUDINARY_API_KEY:-}"  # 可选：同步画册素材到 Cloudinary
+  #     CLOUDINARY_API_SECRET: "${CLOUDINARY_API_SECRET:-}"  # 可选：同步画册素材到 Cloudinary
+  #     CLOUDINARY_UPLOAD_FOLDER: "${CLOUDINARY_UPLOAD_FOLDER:-clawrelay-brochure}"  # 可选：Cloudinary 上传目录
+  #     CANVA_ACCESS_TOKEN: "${CANVA_ACCESS_TOKEN:-}"  # 可选：已手动获取的 Canva Access Token
+  #     CANVA_CLIENT_ID: "${CANVA_CLIENT_ID:-}"  # 可选：Canva Connect OAuth Client ID
+  #     CANVA_CLIENT_SECRET: "${CANVA_CLIENT_SECRET:-}"  # 可选：Canva Connect OAuth Client Secret
+  #     CANVA_REFRESH_TOKEN: "${CANVA_REFRESH_TOKEN:-}"  # 可选：Canva Connect OAuth Refresh Token
+  #     CANVA_BRAND_TEMPLATE_ID: "${CANVA_BRAND_TEMPLATE_ID:-}"  # 可选：Canva Brand Template ID
   #     WECHAT_MINIPROGRAM_APPID: "${WECHAT_MINIPROGRAM_APPID:-}"  # 可选：默认小程序 AppID，`35/36` 留空时可自动使用
   #     WECHAT_MINIPROGRAM_PRIVATE_KEY: "${WECHAT_MINIPROGRAM_PRIVATE_KEY:-}"  # 可选：`36` 一键上传小程序时写入 GitHub Actions Secret
   #     WECHAT_MINIPROGRAM_APPSECRET: "${WECHAT_MINIPROGRAM_APPSECRET:-}"  # 可选：`38/39/40/41` 小程序提审/发布阶段需要

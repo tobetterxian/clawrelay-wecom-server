@@ -145,5 +145,6 @@ scripts/brochure/package-lock.json
 # 测试脚本（开发用）
 test_*.py
 !tests/test_codex_reconnect_handling.py
+!tests/test_brochure_asset_manifest.py
 !tests/test_wechat_miniprogram_second_phase.py
 check_*.py

@@ -96,6 +96,7 @@ def rewrite_brochure_generation_request(message: str) -> str:
     parts.append(
         "【执行要求】\n"
         "- 默认优先读取 `docs/requirements.md`；如果当前消息引用了需求文档，也要一并使用。\n"
+        "- 如果存在 `docs/brochure-assets.json`，优先使用其中的素材 URL、标签和说明来安排封面图与内页配图。\n"
         "- 先做可运行、可预览的 V1，不要只停留在策划说明。\n"
         "- 画册默认采用 HTML/H5 形式，兼顾移动端和 PC 端。\n"
         "- 如素材不足，可先用可替换占位内容，但要在 `docs/image-prompts.md` 中写清楚待补素材。\n"
