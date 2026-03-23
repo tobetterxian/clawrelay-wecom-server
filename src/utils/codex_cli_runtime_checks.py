@@ -312,6 +312,13 @@ def _create_codex_cli_orchestrator(bot_config: BotConfig) -> CodexCliOrchestrato
         default_github_owner=provider_config.get("default_github_owner", ""),
         session_timeout_seconds=provider_config.get("session_timeout_seconds", 7200),
         enable_project_workspace_mode=provider_config.get("enable_project_workspace_mode", True),
+        long_task_keepalive_after_seconds=provider_config.get(
+            "long_task_keepalive_after_seconds",
+            20,
+        ),
+        long_task_keepalive_interval_seconds=provider_config.get(
+            "long_task_keepalive_interval_seconds"
+        ),
     )
 
 

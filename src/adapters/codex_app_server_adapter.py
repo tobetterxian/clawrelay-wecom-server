@@ -176,6 +176,7 @@ class CodexAppServerSession:
         )
         turn = (response or {}).get("turn") or {}
         self.turn_id = turn.get("id", "") or self.turn_id
+        turn_completed = False
 
         while True:
             message = await self._events.get()
@@ -300,7 +301,13 @@ class CodexAppServerSession:
                 turn_error = turn.get("error")
                 if turn_error and turn_error.get("message"):
                     raise CodexAppServerError(turn_error["message"])
+                turn_completed = True
                 break
+
+        if not turn_completed and not self._closed:
+            if self._process_return_code not in (None, 0):
+                raise CodexAppServerError(self._build_process_error())
+            raise CodexAppServerError(self._build_unexpected_stream_end_error())
 
         if self._process_return_code not in (None, 0) and not self._closed:
             raise CodexAppServerError(self._build_process_error())
@@ -538,6 +545,11 @@ class CodexAppServerSession:
         stderr_text = "\n".join(self._stderr_lines[-20:]).strip()
         detail = stderr_text or f"Codex app-server 进程异常退出（code={self._process_return_code}）"
         return f"[CodexCLI] Process exited: {detail}"
+
+    def _build_unexpected_stream_end_error(self) -> str:
+        stderr_text = "\n".join(self._stderr_lines[-20:]).strip()
+        detail = stderr_text or f"stdout ended before turn/completed（code={self._process_return_code}）"
+        return f"[CodexCLI] Turn interrupted before completion: {detail}"
 
 
 class CodexAppServerAdapter:

@@ -94,7 +94,13 @@ GITHUB_REPOSITORY_SELECTION_TTL_SECONDS = 600
 MODE_PERSONAL = "personal_workspace"
 MODE_SHARED = "shared_workspace"
 CODEX_TRANSIENT_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
+CODEX_INTERRUPTED_TURN_RE = re.compile(
+    r"^\[CodexCLI\] Turn interrupted before completion:",
+    re.IGNORECASE,
+)
 CODEX_TRANSIENT_RETRY_LIMIT = 2
+CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS = 20
+CODEX_LONG_TASK_KEEPALIVE_INTERVAL_SECONDS = 20
 DEFAULT_PROJECT_REQUEST_RE = re.compile(
     r"(新建|创建|搭建|做(?:一个|个)?|开发|实现|生成).{0,24}项目",
     re.IGNORECASE,
@@ -368,6 +374,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
         default_github_owner: str = "",
         session_timeout_seconds: int = 7200,
         enable_project_workspace_mode: bool = True,
+        long_task_keepalive_after_seconds: int = CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS,
+        long_task_keepalive_interval_seconds: Optional[int] = None,
     ):
         self.bot_key = bot_key
         self.system_prompt = system_prompt or ""
@@ -394,6 +402,20 @@ class CodexCliOrchestrator(BaseOrchestrator):
             else MODE_PERSONAL
         )
         self.enable_project_workspace_mode = bool(enable_project_workspace_mode)
+        self.long_task_keepalive_after_seconds = self._normalize_optional_non_negative_int(
+            long_task_keepalive_after_seconds,
+            default=CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS,
+        )
+        normalized_keepalive_interval_seconds = self._normalize_optional_non_negative_int(
+            long_task_keepalive_interval_seconds,
+            default=self.long_task_keepalive_after_seconds or CODEX_LONG_TASK_KEEPALIVE_INTERVAL_SECONDS,
+        )
+        if self.long_task_keepalive_after_seconds <= 0:
+            self.long_task_keepalive_interval_seconds = 0
+        else:
+            self.long_task_keepalive_interval_seconds = (
+                normalized_keepalive_interval_seconds or self.long_task_keepalive_after_seconds
+            )
         self.base_add_dirs = [str(Path(item).expanduser().resolve()) for item in (add_dirs or []) if item]
 
         Path(self.workspace_root).mkdir(parents=True, exist_ok=True)
@@ -1057,10 +1079,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 thinking_lines.append(usage_hint)
 
         reconnect_retry_count = 0
+        response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
+        commands_seen: List[str] = []
+        turn_inputs = list(inputs or [])
+        task_started_at = time.monotonic()
 
         while True:
-            response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
-            commands_seen: List[str] = []
             turn_progressed = False
             runtime = self.adapter.create_session(
                 working_dir=runtime_context["working_dir"],
@@ -1068,8 +1092,89 @@ class CodexCliOrchestrator(BaseOrchestrator):
             )
             self._active_sessions[effective_key] = runtime
             self._active_runtime_contexts[effective_key] = runtime_context
+            stream_lock = asyncio.Lock()
+            keepalive_task = None
+
+            def _build_live_display_content(
+                override_text: Optional[str] = None,
+                *,
+                finished: bool = False,
+                allow_keepalive: bool = True,
+            ) -> str:
+                display_text = response_text if override_text is None else override_text
+                rendered_thinking_lines = list(thinking_lines)
+                elapsed_seconds = self._runtime_elapsed_seconds(task_started_at)
+                if (
+                    allow_keepalive
+                    and self.long_task_keepalive_after_seconds > 0
+                    and not finished
+                    and elapsed_seconds >= self.long_task_keepalive_after_seconds
+                    and not runtime.has_pending_interaction()
+                ):
+                    elapsed_line = (
+                        "⏳ 状态：仍在处理中"
+                        f"（已运行 {self._format_runtime_elapsed_duration(elapsed_seconds)}；"
+                        "可回复“停止”）"
+                    )
+                    if rendered_thinking_lines:
+                        rendered_thinking_lines.insert(1, elapsed_line)
+                    else:
+                        rendered_thinking_lines.append(elapsed_line)
+                return self._build_display_content(
+                    rendered_thinking_lines,
+                    str(display_text or ""),
+                    finished=finished,
+                )
+
+            async def _emit_stream_update(
+                override_text: Optional[str] = None,
+                *,
+                finished: bool = False,
+                allow_keepalive: bool = True,
+            ) -> None:
+                if not on_stream_delta:
+                    return
+                async with stream_lock:
+                    await on_stream_delta(
+                        _build_live_display_content(
+                            override_text,
+                            finished=finished,
+                            allow_keepalive=allow_keepalive,
+                        ),
+                        finished,
+                    )
+
+            async def _keepalive_loop() -> None:
+                try:
+                    if self.long_task_keepalive_after_seconds <= 0:
+                        return
+                    initial_delay = self._runtime_keepalive_initial_delay(
+                        task_started_at,
+                        self.long_task_keepalive_after_seconds,
+                    )
+                    if initial_delay > 0:
+                        await asyncio.sleep(initial_delay)
+                    while True:
+                        if runtime.has_pending_interaction():
+                            await asyncio.sleep(self.long_task_keepalive_interval_seconds)
+                            continue
+                        await _emit_stream_update()
+                        await asyncio.sleep(self.long_task_keepalive_interval_seconds)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "[CodexCLI] 保活提示发送失败: bot=%s, user=%s",
+                        self.bot_key,
+                        user_id,
+                        exc_info=True,
+                    )
 
             try:
+                await _emit_stream_update()
+                if on_stream_delta:
+                    keepalive_task = asyncio.create_task(_keepalive_loop())
+
                 current_thread_id = await runtime.start(
                     thread_id=current_thread_id,
                     developer_instructions=self._build_effective_system_prompt(user_id, runtime_context),
@@ -1081,54 +1186,32 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         current_thread_id,
                     )
 
-                if on_stream_delta:
-                    await on_stream_delta(
-                        self._build_display_content(thinking_lines, response_text),
-                        False,
-                    )
-
-                async for event in runtime.stream_turn(inputs):
+                async for event in runtime.stream_turn(turn_inputs):
                     if isinstance(event, CodexCommandExecutionStart):
                         turn_progressed = True
                         short_command = self._short_command(event.command)
                         commands_seen.append(short_command)
                         thinking_lines.append(f"🔧 `{short_command}`")
-                        if on_stream_delta:
-                            await on_stream_delta(
-                                self._build_display_content(thinking_lines, response_text),
-                                False,
-                            )
+                        await _emit_stream_update()
                     elif isinstance(event, CodexCommandExecutionComplete):
                         turn_progressed = True
                         failure_line = self._format_command_result(event)
                         if failure_line:
                             thinking_lines.append(failure_line)
-                            if on_stream_delta:
-                                await on_stream_delta(
-                                    self._build_display_content(thinking_lines, response_text),
-                                    False,
-                                )
+                            await _emit_stream_update()
                     elif isinstance(event, CodexFileChangeStart):
                         turn_progressed = True
                         file_count = len(event.changes or [])
                         if file_count:
                             thinking_lines.append(f"📝 提议修改 {file_count} 个文件")
-                            if on_stream_delta:
-                                await on_stream_delta(
-                                    self._build_display_content(thinking_lines, response_text),
-                                    False,
-                                )
+                            await _emit_stream_update()
                     elif isinstance(event, CodexAgentMessage):
                         turn_progressed = True
                         if event.text:
                             if event.is_new_message and response_text.strip():
                                 response_text += "\n\n"
                             response_text += event.text
-                            if on_stream_delta:
-                                await on_stream_delta(
-                                    self._build_display_content(thinking_lines, response_text),
-                                    False,
-                                )
+                            await _emit_stream_update()
                     elif isinstance(event, CodexInteractionRequest):
                         turn_progressed = True
                         visible_prompt = self._build_interaction_text_prompt(event)
@@ -1140,11 +1223,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
                                     pending_text = f"{pending_text}\n\n{visible_prompt}"
                             else:
                                 pending_text = visible_prompt
-                        if on_stream_delta:
-                            await on_stream_delta(
-                                self._build_display_content(thinking_lines, pending_text),
-                                False,
-                            )
+                        await _emit_stream_update(
+                            pending_text,
+                            allow_keepalive=False,
+                        )
                         if on_interaction_request:
                             await on_interaction_request(
                                 self._build_interaction_payload(event, effective_key)
@@ -1154,13 +1236,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     response_text = "Codex 已完成处理，但未生成文本回复。"
 
                 thinking_lines.append("✨ 回复完成")
-                final_text = self._build_display_content(
-                    thinking_lines,
-                    response_text,
-                    finished=True,
-                )
-                if on_stream_delta:
-                    await on_stream_delta(final_text, True)
+                await _emit_stream_update(finished=True, allow_keepalive=False)
 
                 latency_ms = int((time.time() - start_time) * 1000)
                 log_context["session_key"] = session_key or user_id
@@ -1206,6 +1282,26 @@ class CodexCliOrchestrator(BaseOrchestrator):
             except Exception as e:
                 error_message = self._normalize_codex_error_message(str(e))
                 if (
+                    self._is_interrupted_turn_message(str(e))
+                    and current_thread_id
+                    and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
+                ):
+                    reconnect_retry_count += 1
+                    thinking_lines.append(
+                        f"🔄 Codex 执行通道中断，正在继续（{reconnect_retry_count}/{CODEX_TRANSIENT_RETRY_LIMIT}）"
+                    )
+                    turn_inputs = [
+                        {
+                            "type": "text",
+                            "text": self._sanitize_user_input(
+                                self._build_interrupted_turn_resume_prompt(message_content)
+                            ),
+                        }
+                    ]
+                    await _emit_stream_update()
+                    await asyncio.sleep(reconnect_retry_count)
+                    continue
+                if (
                     self._is_transient_reconnect_message(str(e))
                     and not turn_progressed
                     and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
@@ -1214,11 +1310,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     thinking_lines.append(
                         f"🔄 Codex 连接短暂中断，正在重试（{reconnect_retry_count}/{CODEX_TRANSIENT_RETRY_LIMIT}）"
                     )
-                    if on_stream_delta:
-                        await on_stream_delta(
-                            self._build_display_content(thinking_lines, response_text),
-                            False,
-                        )
+                    await _emit_stream_update()
                     await asyncio.sleep(reconnect_retry_count)
                     continue
 
@@ -1243,6 +1335,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     raise CodexAppServerError(error_message) from e
                 raise
             finally:
+                if keepalive_task:
+                    keepalive_task.cancel()
+                    try:
+                        await keepalive_task
+                    except asyncio.CancelledError:
+                        pass
                 self._active_sessions.pop(effective_key, None)
                 self._active_runtime_contexts.pop(effective_key, None)
                 await runtime.close()
@@ -1275,11 +1373,28 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _is_transient_reconnect_message(message: str) -> bool:
         return bool(CODEX_TRANSIENT_RECONNECT_RE.match((message or "").strip()))
 
+    @staticmethod
+    def _is_interrupted_turn_message(message: str) -> bool:
+        return bool(CODEX_INTERRUPTED_TURN_RE.match((message or "").strip()))
+
     @classmethod
     def _normalize_codex_error_message(cls, message: str) -> str:
         if cls._is_transient_reconnect_message(message):
             return "[CodexCLI] Reconnecting in progress"
         return message
+
+    @staticmethod
+    def _build_interrupted_turn_resume_prompt(original_message: str) -> str:
+        original = str(original_message or "").strip()
+        parts = [
+            "上一轮开发任务的执行通道意外中断。",
+            "请基于当前线程上下文、当前工作区文件状态和已完成步骤，继续完成同一个任务。",
+            "不要重复已经完成的修改；只继续未完成部分。",
+        ]
+        if original:
+            parts.append(f"原始任务：{original}")
+        parts.append("完成后请继续正常输出结果。")
+        return "\n".join(parts)
 
     async def _stage_and_build_inputs(
         self,
@@ -2506,6 +2621,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"工作区：{self._display_path(workspace_path)}",
             "Cloudflare 类型：Pages",
             f"Pages 项目：{pages_project_name}",
+            f"应用目录：{str(deployment_config.get('app_dir') or '.').strip() or '.'}",
             f"构建目录：{str(deployment_config.get('build_dir') or '-').strip() or '-'}",
             f"Pages 域名：{self._cloudflare_pages_public_url(configured_project)}",
             f"生产分支：{configured_project.production_branch or '-'}",
@@ -2733,6 +2849,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 deployment_config={
                     "workflow_path": result.workflow_path,
                     "pages_project_name": result.pages_project_name,
+                    "app_dir": result.app_dir,
                     "build_dir": result.build_dir,
                 },
             )
@@ -2746,6 +2863,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"项目：{(project or {}).get('name', '-')}",
             f"工作区：{self._display_path(workspace_path)}",
             f"Pages 项目名：{result.pages_project_name}",
+            f"应用目录：{result.app_dir}",
             f"构建目录：{result.build_dir}",
             f"工作流：{result.workflow_path}",
             f"写入文件：{file_summaries}",
@@ -2753,6 +2871,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             "GitHub Secrets：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID",
             "推送到 main 后会自动触发 GitHub Actions 部署",
         ]
+        lines.extend(f"提示：{warning}" for warning in result.warnings)
         if not current_origin:
             lines.append("提示：当前工作区还未配置 origin，可先发送：准备GitHub仓库 <Git地址>")
         lines.append("提示：Cloudflare Pages 项目需提前在控制台或 wrangler 中创建")
@@ -2874,6 +2993,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 deployment_config={
                     "workflow_path": result.workflow_path,
                     "pages_project_name": result.pages_project_name,
+                    "app_dir": result.app_dir,
                     "build_dir": result.build_dir,
                     "pages_subdomain": pages_project.subdomain,
                     "production_branch": pages_project.production_branch or "main",
@@ -2916,11 +3036,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"Pages 项目：{pages_project.name}",
             f"Pages 状态：{'已自动创建' if pages_project.created else '已存在，直接复用'}",
             f"Pages 域名：{self._cloudflare_pages_public_url(pages_project)}",
+            f"应用目录：{result.app_dir}",
+            f"构建目录：{result.build_dir}",
             f"工作流：{result.workflow_path}",
             f"写入文件：{file_summaries}",
             f"GitHub Secrets：{', '.join(secret_names)}",
             f"最终推送：origin/{push_result.branch_name}",
         ]
+        lines.extend(f"提示：{warning}" for warning in result.warnings)
         lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Pages 部署")
         return "\n".join(lines)
 
@@ -4840,6 +4963,16 @@ class CodexCliOrchestrator(BaseOrchestrator):
             raise RuntimeError(f"审核单号无效：{raw_value}") from exc
 
     @staticmethod
+    def _normalize_optional_non_negative_int(value: object, default: int) -> int:
+        if value is None or value == "":
+            return int(default)
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return int(default)
+        return max(normalized, 0)
+
+    @staticmethod
     def _normalize_github_repository_name(value: str) -> str:
         normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-_.")
         return normalized[:100]
@@ -4962,6 +5095,38 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if len(value) <= limit:
             return value
         return value[: max(0, limit - 3)] + "..."
+
+    @staticmethod
+    def _format_runtime_elapsed_duration(seconds: float) -> str:
+        total_seconds = max(int(seconds), 0)
+        if total_seconds < 60:
+            return f"{total_seconds} 秒"
+        minutes, remain_seconds = divmod(total_seconds, 60)
+        if minutes < 60:
+            if remain_seconds:
+                return f"{minutes} 分 {remain_seconds} 秒"
+            return f"{minutes} 分钟"
+        hours, remain_minutes = divmod(minutes, 60)
+        if remain_minutes:
+            return f"{hours} 小时 {remain_minutes} 分"
+        return f"{hours} 小时"
+
+    @staticmethod
+    def _runtime_elapsed_seconds(started_at: float, now: Optional[float] = None) -> float:
+        return max((time.monotonic() if now is None else now) - float(started_at or 0.0), 0.0)
+
+    @classmethod
+    def _runtime_keepalive_initial_delay(
+        cls,
+        started_at: float,
+        after_seconds: float,
+        now: Optional[float] = None,
+    ) -> float:
+        threshold = max(float(after_seconds or 0.0), 0.0)
+        if threshold <= 0:
+            return 0.0
+        elapsed = cls._runtime_elapsed_seconds(started_at, now=now)
+        return max(threshold - elapsed, 0.0)
 
     def _preferred_repository_publish_url(self, repository: GitHubRepositoryInfo) -> str:
         ssh_url = repository.ssh_url or repository.clone_url

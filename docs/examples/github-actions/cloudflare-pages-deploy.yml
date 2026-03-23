@@ -23,7 +23,7 @@ jobs:
         id: node_project
         shell: bash
         run: |
-          if [ -f package.json ]; then
+          if [ -f "__CF_PAGES_PACKAGE_JSON__" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -36,15 +36,18 @@ jobs:
           node-version: 24
 
       - name: Install dependencies with lockfile
-        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('package-lock.json', 'npm-shrinkwrap.json') != '' }}
+        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('__CF_PAGES_PACKAGE_LOCK__', '__CF_PAGES_NPM_SHRINKWRAP__') != '' }}
+        working-directory: __CF_PAGES_APP_DIR__
         run: npm ci
 
       - name: Install dependencies without lockfile
-        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('package-lock.json', 'npm-shrinkwrap.json') == '' }}
+        if: ${{ steps.node_project.outputs.exists == 'true' && hashFiles('__CF_PAGES_PACKAGE_LOCK__', '__CF_PAGES_NPM_SHRINKWRAP__') == '' }}
+        working-directory: __CF_PAGES_APP_DIR__
         run: npm install
 
       - name: Build
         if: ${{ steps.node_project.outputs.exists == 'true' }}
+        working-directory: __CF_PAGES_APP_DIR__
         run: npm run build --if-present
 
       - name: Verify deploy directory

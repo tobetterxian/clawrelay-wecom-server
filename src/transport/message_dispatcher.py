@@ -80,12 +80,15 @@ def _friendly_error(e: Exception) -> str:
         return _CODEX_CLI_SANDBOX_HINT
     if "[CodexCLI] Reconnecting in progress" in msg or _CODEX_CLI_RECONNECT_RE.match(msg.strip()):
         return _CODEX_CLI_RECONNECT_HINT
+    if "[CodexCLI] Turn interrupted before completion" in msg:
+        return _CODEX_CLI_EXEC_HINT
     if "[CodexCLI] Process exited" in msg or "Codex app-server 进程异常退出" in msg:
         return _CODEX_CLI_EXEC_HINT
     return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
 
 # 节流间隔(秒)
 STREAM_THROTTLE_INTERVAL = 0.3
+RUNNING_TASK_SILENT_WARNING_SECONDS = 90
 
 
 class MessageDispatcher:
@@ -308,6 +311,60 @@ class MessageDispatcher:
             and callable(getattr(self.orchestrator, "build_help_menu_card", None))
             and callable(getattr(self.orchestrator, "build_help_menu_reply", None))
         )
+
+    def _is_brochure_specialist_bot(self) -> bool:
+        candidates = [
+            str(self.config.bot_key or "").strip().lower(),
+            str(self.config.name or "").strip().lower(),
+            str(self.config.description or "").strip().lower(),
+        ]
+        return any(("brochure" in value or "画册" in value) for value in candidates if value)
+
+    def _build_specialized_help_reply(self) -> Optional[str]:
+        provider_config = self.config.provider_config or {}
+        custom_help = str(provider_config.get("help_text") or "").strip()
+        if custom_help:
+            return custom_help
+
+        if not self._is_brochure_specialist_bot():
+            return None
+
+        lines = [
+            "📘 产品画册机器人使用说明",
+            "",
+            "你可以直接这样发：",
+            "- 发产品名、网址、卖点、参数、适用场景、竞品信息、参考链接或图片资料",
+            "- 例如：`帮我做一版智能灯具产品画册方案`",
+            "",
+            "常用说法：",
+            "- `帮我出一版产品画册方案`",
+            "- `做完整画册`",
+            "- `做完整画册并导出PDF`",
+            "- `做完整画册并发布画册`",
+            "",
+            "推荐流程：",
+            "- 第一步：先把产品资料或网址发给我",
+            "- 第二步：我先输出画册结构、每页文案和配图建议",
+            "- 第三步：你确认后，可直接发 `做完整画册` 继续自动落地",
+        ]
+
+        if self._supports_brochure_internal_delegate():
+            delegate_bot_key = self._preferred_delegate_bot_key() or "cx_bot"
+            lines.extend(
+                [
+                    "",
+                    f"当前已支持后台自动落地：我会把执行委托给 `{delegate_bot_key}` 继续完成 HTML/PDF/发布。",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "如需自动生成 HTML、PDF 或发布，请联系管理员启用画册后台执行机器人。",
+                ]
+            )
+
+        return "\n".join(lines)
 
     @staticmethod
     def _is_help_menu_trigger(content: str) -> bool:
@@ -660,6 +717,206 @@ class MessageDispatcher:
         return "当前 Codex 正等待你的确认或补充信息，请直接发送文字回复。"
 
     @staticmethod
+    def _is_running_task_status_command(content: str) -> bool:
+        normalized = re.sub(r"[^\w\u4e00-\u9fff]", "", str(content or "").strip().lower())
+        return normalized in {"当前任务", "当前任务状态", "任务状态", "开发状态"}
+
+    @staticmethod
+    def _format_elapsed_duration(seconds: float) -> str:
+        total_seconds = max(int(seconds), 0)
+        if total_seconds < 60:
+            return f"{total_seconds} 秒"
+        minutes, remain_seconds = divmod(total_seconds, 60)
+        if minutes < 60:
+            if remain_seconds:
+                return f"{minutes} 分 {remain_seconds} 秒"
+            return f"{minutes} 分钟"
+        hours, remain_minutes = divmod(minutes, 60)
+        if remain_minutes:
+            return f"{hours} 小时 {remain_minutes} 分"
+        return f"{hours} 小时"
+
+    @staticmethod
+    def _summarize_stream_preview(content: str, limit: int = 120) -> str:
+        normalized = re.sub(r"</?think>", " ", str(content or ""))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(limit - 1, 0)].rstrip() + "…"
+
+    def _task_registry_key(self, runtime_session_key: str) -> str:
+        return f"{self.bot_key}:{runtime_session_key}"
+
+    def _running_task_status_reply(self, runtime_session_key: str) -> str:
+        from src.core.task_registry import get_task_registry
+
+        registry = get_task_registry()
+        task, _stream_id, extra = registry.get(self._task_registry_key(runtime_session_key))
+        if not task or task.done():
+            recent = registry.get_recent(self._task_registry_key(runtime_session_key))
+            if not recent:
+                return "当前没有正在运行的任务。"
+
+            now = time.time()
+            finished_at = float((recent or {}).get("finished_at") or now)
+            preview = self._summarize_stream_preview((recent or {}).get("last_preview") or "")
+            terminal_status = str((recent or {}).get("terminal_status") or "completed").strip().lower()
+            reply_delivery_failed = bool((recent or {}).get("reply_delivery_failed"))
+            terminal_error = self._summarize_stream_preview(
+                str((recent or {}).get("terminal_error") or ""),
+                limit=180,
+            )
+
+            if terminal_status == "cancelled":
+                status_line = f"最近一次任务已于 {self._format_elapsed_duration(now - finished_at)} 前停止。"
+            elif terminal_status == "error":
+                status_line = f"最近一次任务已于 {self._format_elapsed_duration(now - finished_at)} 前异常结束。"
+            else:
+                status_line = f"最近一次任务已于 {self._format_elapsed_duration(now - finished_at)} 前完成。"
+
+            lines = ["当前没有正在运行的任务。", status_line]
+            if reply_delivery_failed:
+                lines.append("提示：执行期间回复通道异常，最终结果可能没有成功送达。")
+            if terminal_error and terminal_status == "error":
+                lines.append(f"最近错误：{terminal_error}")
+            if preview:
+                lines.append(f"最近输出：{preview}")
+            return "\n".join(lines)
+
+        now = time.time()
+        started_at = float((extra or {}).get("started_at") or now)
+        last_activity_at = float((extra or {}).get("last_activity_at") or started_at)
+        running_seconds = max(now - started_at, 0)
+        silent_seconds = max(now - last_activity_at, 0)
+        preview = self._summarize_stream_preview((extra or {}).get("last_preview") or "")
+
+        stale_after_seconds = RUNNING_TASK_SILENT_WARNING_SECONDS
+        keepalive_after_seconds = int(
+            max(getattr(self.orchestrator, "long_task_keepalive_after_seconds", 0) or 0, 0)
+        )
+        keepalive_interval_seconds = int(
+            max(getattr(self.orchestrator, "long_task_keepalive_interval_seconds", 0) or 0, 0)
+        )
+        if keepalive_after_seconds > 0:
+            stale_after_seconds = max(
+                stale_after_seconds,
+                keepalive_after_seconds + max(keepalive_interval_seconds, keepalive_after_seconds) + 15,
+            )
+
+        lines = ["当前任务状态"]
+        if self.orchestrator.has_pending_interaction(runtime_session_key):
+            lines.append("状态：等待你的确认或补充信息")
+            lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
+            lines.append("下一步：请直接回复答案；如需取消请回复“停止”")
+        elif silent_seconds >= stale_after_seconds:
+            lines.append(f"状态：疑似卡住（已静默 {self._format_elapsed_duration(silent_seconds)}）")
+            lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
+            lines.append("建议：可回复“停止”后重新发送需求")
+        else:
+            lines.append("状态：运行中")
+            lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
+            lines.append(f"最近进度：{self._format_elapsed_duration(silent_seconds)}前")
+            lines.append("如需中断可回复：停止")
+
+        if preview:
+            lines.append(f"最近输出：{preview}")
+        return "\n".join(lines)
+
+    async def _maybe_handoff_running_task(self, runtime_session_key: str, req_id: str) -> bool:
+        from src.core.task_registry import get_task_registry
+
+        task, _stream_id, _extra = get_task_registry().get(self._task_registry_key(runtime_session_key))
+        if not task or task.done():
+            return False
+
+        ack = (
+            "⏳ 当前任务仍在处理中，本条消息未新开任务；"
+            "已把进度切到这里继续显示。\n"
+            "可回复“停止”中断，或发送“当前任务”查看状态。"
+        )
+        if await self._handoff_running_reply(runtime_session_key, req_id, ack):
+            return True
+        await self._reply_text(req_id, ack, finish=True)
+        return True
+
+    def _normalize_control_command_for_ack(self, content: str) -> str:
+        command = str(content or "").strip()
+        normalizer = getattr(self.orchestrator, "_normalize_control_command_input", None)
+        if callable(normalizer):
+            try:
+                normalized = str(normalizer(command) or "").strip()
+                if normalized:
+                    return normalized
+            except Exception:
+                logger.debug("[Dispatcher:%s] 归一化控制命令失败，回退原文", self.bot_key, exc_info=True)
+        return command
+
+    def _should_ack_control_command(self, content: str) -> bool:
+        command = self._normalize_control_command_for_ack(content)
+        if not command:
+            return False
+        long_running_prefixes = (
+            "新建仓库项目",
+            "从仓库派生项目",
+            "从选中仓库派生项目",
+            "创建GitHub仓库",
+            "创建GitHub公开仓库",
+            "创建GitHub仓库并发布",
+            "推送到GitHub",
+            "推送到GitHub公开",
+            "准备GitHub仓库",
+            "发布到新仓库",
+            "同步上游",
+            "启用Pages部署",
+            "一键发布Pages",
+            "一键部署Pages",
+            "一键发布Cloudflare Pages",
+            "一键部署Cloudflare Pages",
+            "发布流水线状态",
+            "流水线状态",
+            "CI状态",
+            "GitHub Actions状态",
+            "Cloudflare项目状态",
+            "Cloudflare状态",
+            "Cloudflare部署状态",
+            "启用Worker部署",
+            "一键发布Worker",
+            "一键部署Worker",
+            "启用小程序上传",
+            "一键上传小程序",
+            "启用小程序提审",
+            "提交小程序审核",
+            "正式发布小程序",
+            "撤回小程序审核",
+            "回退小程序版本",
+        )
+        return any(command.startswith(prefix) for prefix in long_running_prefixes)
+
+    def _control_command_processing_ack(self, content: str) -> str:
+        command = self._normalize_control_command_for_ack(content)
+        if command.startswith(("一键发布Pages", "一键部署Pages", "一键发布Cloudflare Pages", "一键部署Cloudflare Pages")):
+            return "⏳ 已收到，正在处理 Cloudflare Pages 发布，请稍候。"
+        if command.startswith(("启用Pages部署",)):
+            return "⏳ 已收到，正在写入 Cloudflare Pages 部署配置，请稍候。"
+        if command.startswith(("发布流水线状态", "流水线状态", "CI状态", "GitHub Actions状态")):
+            return "⏳ 已收到，正在查询 GitHub Actions 状态，请稍候。"
+        if command.startswith(("Cloudflare项目状态", "Cloudflare状态", "Cloudflare部署状态")):
+            return "⏳ 已收到，正在查询 Cloudflare 部署状态，请稍候。"
+        if command.startswith(("一键发布Worker", "一键部署Worker")):
+            return "⏳ 已收到，正在处理 Cloudflare Worker 发布，请稍候。"
+        if command.startswith(("启用Worker部署",)):
+            return "⏳ 已收到，正在写入 Cloudflare Worker 部署配置，请稍候。"
+        if command.startswith(("一键上传小程序",)):
+            return "⏳ 已收到，正在处理微信小程序上传，请稍候。"
+        if command.startswith(("启用小程序上传", "启用小程序提审", "提交小程序审核", "正式发布小程序", "撤回小程序审核", "回退小程序版本")):
+            return "⏳ 已收到，正在处理微信小程序发布流程，请稍候。"
+        if command.startswith(("推送到GitHub", "推送到GitHub公开", "创建GitHub仓库", "创建GitHub公开仓库", "创建GitHub仓库并发布", "准备GitHub仓库", "发布到新仓库", "同步上游")):
+            return "⏳ 已收到，正在处理 GitHub 仓库与推送，请稍候。"
+        if command.startswith(("新建仓库项目", "从仓库派生项目", "从选中仓库派生项目")):
+            return "⏳ 已收到，正在准备项目工作区，请稍候。"
+        return "⏳ 已收到，正在处理中，请稍候。"
+
+    @staticmethod
     def _compose_stream_content(reply_state: dict, content: str) -> str:
         prefix = ((reply_state or {}).get("prefix") or "").strip()
         if prefix and content:
@@ -924,7 +1181,10 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
-        on_stream_delta = self._make_stream_delta_callback(reply_state)
+        on_stream_delta = self._make_stream_delta_callback(
+            reply_state,
+            task_key=self._task_registry_key(runtime_session_key),
+        )
 
         await self._run_with_task_registry(
             req_id,
@@ -1062,6 +1322,8 @@ class MessageDispatcher:
             await self.session_manager.clear_session(self.bot_key, runtime_session_key)
             await self.orchestrator.clear_session(runtime_session_key)
             await self._clear_brochure_delegate_session(user_id, session_key, log_context)
+            from src.core.task_registry import get_task_registry
+            get_task_registry().forget(self._task_registry_key(runtime_session_key))
             await self._reply_text(req_id, "会话已重置，可以开始新的对话。", finish=True)
             return
 
@@ -1078,6 +1340,14 @@ class MessageDispatcher:
                 await self._reply_text(req_id, "⏹ 已停止当前任务。", finish=True)
             else:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
+            return
+
+        if self._is_running_task_status_command(content):
+            await self._reply_text(
+                req_id,
+                self._running_task_status_reply(runtime_session_key),
+                finish=True,
+            )
             return
 
         is_control_command = self._is_orchestrator_control_command(command_content)
@@ -1135,12 +1405,21 @@ class MessageDispatcher:
                 )
                 return
 
+        if not is_control_command and await self._maybe_handoff_running_task(runtime_session_key, req_id):
+            return
+
         if (
             not self.orchestrator.has_pending_interaction(runtime_session_key)
             and self._is_help_menu_trigger(content)
             and await self._reply_help_menu_card(req_id)
         ):
             return
+
+        if self._is_help_menu_trigger(content) and not is_control_command:
+            specialized_help = self._build_specialized_help_reply()
+            if specialized_help:
+                await self._reply_text(req_id, specialized_help, finish=True)
+                return
 
         if await self._maybe_handle_brochure_internal_delegate(
             req_id=req_id,
@@ -1160,14 +1439,34 @@ class MessageDispatcher:
             if parse_quoted_requirement_doc_request(quoted_control_message):
                 control_command_content = quoted_control_message
 
-        control_reply = await self.orchestrator.handle_control_command(
-            user_id=user_id,
-            content=control_command_content,
-            session_key=session_key,
-            log_context=log_context,
-        )
+        control_stream_id: Optional[str] = None
+        try:
+            if self._should_ack_control_command(control_command_content):
+                control_stream_id = uuid.uuid4().hex[:12]
+                await self._reply_stream(
+                    req_id,
+                    control_stream_id,
+                    self._control_command_processing_ack(control_command_content),
+                    finish=False,
+                )
+
+            control_reply = await self.orchestrator.handle_control_command(
+                user_id=user_id,
+                content=control_command_content,
+                session_key=session_key,
+                log_context=log_context,
+            )
+        except Exception as e:
+            logger.error("[Dispatcher:%s] 控制命令处理失败: %s", self.bot_key, e, exc_info=True)
+            error_message = _friendly_error(e)
+            if control_stream_id:
+                await self._reply_stream(req_id, control_stream_id, error_message, finish=True)
+            else:
+                await self._reply_text(req_id, error_message, finish=True)
+            return
+
         if control_reply:
-            await self._reply_control_result(req_id, control_reply)
+            await self._reply_control_result(req_id, control_reply, stream_id=control_stream_id)
             return
 
         handler = self.command_router.handlers.get(command_content) or self.command_router.handlers.get(normalized)
@@ -1191,7 +1490,10 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
-        on_stream_delta = self._make_stream_delta_callback(reply_state)
+        on_stream_delta = self._make_stream_delta_callback(
+            reply_state,
+            task_key=self._task_registry_key(runtime_session_key),
+        )
 
         await self._run_with_task_registry(
             req_id,
@@ -1234,6 +1536,8 @@ class MessageDispatcher:
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
+        if await self._maybe_handoff_running_task(runtime_session_key, req_id):
+            return
 
         try:
             data_uri = await ImageUtils.download_and_decrypt_to_base64(image_url, aeskey)
@@ -1254,7 +1558,10 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
-        on_stream_delta = self._make_stream_delta_callback(reply_state)
+        on_stream_delta = self._make_stream_delta_callback(
+            reply_state,
+            task_key=self._task_registry_key(runtime_session_key),
+        )
 
         await self._run_with_task_registry(
             req_id, stream_id, runtime_session_key,
@@ -1303,6 +1610,8 @@ class MessageDispatcher:
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
             return
+        if await self._maybe_handoff_running_task(runtime_session_key, req_id):
+            return
 
         try:
             file_bytes, header_filename = await FileUtils.download_and_decrypt(file_url, aeskey)
@@ -1324,7 +1633,10 @@ class MessageDispatcher:
         )
         log_context["file_info"] = [{"filename": file_name}]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
-        on_stream_delta = self._make_stream_delta_callback(reply_state)
+        on_stream_delta = self._make_stream_delta_callback(
+            reply_state,
+            task_key=self._task_registry_key(runtime_session_key),
+        )
 
         await self._run_with_task_registry(
             req_id, stream_id, runtime_session_key,
@@ -1358,6 +1670,8 @@ class MessageDispatcher:
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            return
+        if await self._maybe_handoff_running_task(runtime_session_key, req_id):
             return
 
         quote_context = self._extract_quote_context(body)
@@ -1410,7 +1724,10 @@ class MessageDispatcher:
 
         stream_id = uuid.uuid4().hex[:12]
         reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
-        on_stream_delta = self._make_stream_delta_callback(reply_state)
+        on_stream_delta = self._make_stream_delta_callback(
+            reply_state,
+            task_key=self._task_registry_key(runtime_session_key),
+        )
 
         await self._run_with_task_registry(
             req_id, stream_id, runtime_session_key,
@@ -1465,7 +1782,7 @@ class MessageDispatcher:
                 "text": {"content": welcome},
             },
         }
-        await self.ws.send_reply(payload)
+        await self._send_reply_payload(payload)
 
     async def _handle_template_card_event(self, req_id: str, body: dict, user_id: str):
         """处理模板卡片点击事件"""
@@ -1564,7 +1881,7 @@ class MessageDispatcher:
 
     # ---- 流式推送 ----
 
-    def _make_stream_delta_callback(self, reply_state: dict):
+    def _make_stream_delta_callback(self, reply_state: dict, task_key: str = ""):
         """创建带节流的on_stream_delta回调"""
         state = {
             'last_pushed_text': "",
@@ -1573,7 +1890,21 @@ class MessageDispatcher:
         }
         push_lock = asyncio.Lock()
 
+        def _mark_delivery_failed():
+            if not task_key:
+                return
+            from src.core.task_registry import get_task_registry
+
+            get_task_registry().touch(task_key, reply_delivery_failed=True)
+
         async def on_stream_delta(accumulated_text: str, finish: bool):
+            if task_key:
+                from src.core.task_registry import get_task_registry
+
+                get_task_registry().touch(
+                    task_key,
+                    last_preview=self._summarize_stream_preview(accumulated_text),
+                )
             if finish:
                 # 完成时立即推送最终内容
                 if state['throttle_task'] and not state['throttle_task'].done():
@@ -1583,12 +1914,14 @@ class MessageDispatcher:
                 if not target_req_id or not target_stream_id:
                     logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过最终推送", self.bot_key)
                     return
-                await self._reply_stream(
+                sent = await self._reply_stream(
                     target_req_id,
                     target_stream_id,
                     self._compose_stream_content(reply_state, accumulated_text),
                     finish=True,
                 )
+                if not sent:
+                    _mark_delivery_failed()
                 state['last_pushed_text'] = accumulated_text
                 return
 
@@ -1603,12 +1936,14 @@ class MessageDispatcher:
                     if not target_req_id or not target_stream_id:
                         logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过增量推送", self.bot_key)
                         return
-                    await self._reply_stream(
+                    sent = await self._reply_stream(
                         target_req_id,
                         target_stream_id,
                         self._compose_stream_content(reply_state, accumulated_text),
                         finish=False,
                     )
+                    if not sent:
+                        _mark_delivery_failed()
                     state['last_pushed_text'] = accumulated_text
                     state['last_push_time'] = time.monotonic()
             elif state['throttle_task'] is None or state['throttle_task'].done():
@@ -1623,12 +1958,14 @@ class MessageDispatcher:
                             if not target_req_id or not target_stream_id:
                                 logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过延迟推送", self.bot_key)
                                 return
-                            await self._reply_stream(
+                            sent = await self._reply_stream(
                                 target_req_id,
                                 target_stream_id,
                                 self._compose_stream_content(reply_state, captured_text),
                                 finish=False,
                             )
+                            if not sent:
+                                _mark_delivery_failed()
                             state['last_pushed_text'] = captured_text
                             state['last_push_time'] = time.monotonic()
 
@@ -1671,12 +2008,24 @@ class MessageDispatcher:
     async def _reply_text(self, req_id: str, content: str, finish: bool = True):
         """回复纯文本消息"""
         stream_id = uuid.uuid4().hex[:12]
-        await self._reply_stream(req_id, stream_id, content, finish)
+        return await self._reply_stream(req_id, stream_id, content, finish)
 
-    async def _reply_control_result(self, req_id: str, control_reply: str | dict):
+    async def _reply_control_result(
+        self,
+        req_id: str,
+        control_reply: str | dict,
+        stream_id: Optional[str] = None,
+    ):
         if isinstance(control_reply, dict):
             reply_type = str(control_reply.get("type") or "").strip().lower()
             if reply_type == "image":
+                if stream_id:
+                    await self._reply_stream(
+                        req_id,
+                        stream_id,
+                        str(control_reply.get("content") or "操作已完成。"),
+                        finish=True,
+                    )
                 await self._reply_image(
                     req_id,
                     str(control_reply.get("image_base64") or ""),
@@ -1685,9 +2034,20 @@ class MessageDispatcher:
                 )
                 return
             if reply_type == "text":
-                await self._reply_text(req_id, str(control_reply.get("content") or ""), finish=True)
+                if stream_id:
+                    await self._reply_stream(
+                        req_id,
+                        stream_id,
+                        str(control_reply.get("content") or ""),
+                        finish=True,
+                    )
+                else:
+                    await self._reply_text(req_id, str(control_reply.get("content") or ""), finish=True)
                 return
-        await self._reply_text(req_id, str(control_reply), finish=True)
+        if stream_id:
+            await self._reply_stream(req_id, stream_id, str(control_reply), finish=True)
+        else:
+            await self._reply_text(req_id, str(control_reply), finish=True)
 
     async def _reply_template_card(
         self,
@@ -1721,7 +2081,7 @@ class MessageDispatcher:
             "headers": {"req_id": req_id},
             "body": body,
         }
-        await self.ws.send_reply(payload)
+        return await self._send_reply_payload(payload)
 
     async def _reply_update_template_card(self, req_id: str, response_code: str, template_card: dict):
         payload = {
@@ -1732,7 +2092,7 @@ class MessageDispatcher:
                 "template_card": template_card,
             },
         }
-        await self.ws.send_reply(payload)
+        return await self._send_reply_payload(payload)
 
     @staticmethod
     def _extract_template_card_response_code(body: dict) -> str:
@@ -1765,7 +2125,7 @@ class MessageDispatcher:
                 },
             },
         }
-        await self.ws.send_reply(payload)
+        return await self._send_reply_payload(payload)
 
     async def _reply_image(self, req_id: str, image_base64: str, image_md5: str, content: str = ""):
         stream_id = uuid.uuid4().hex[:12]
@@ -1790,7 +2150,24 @@ class MessageDispatcher:
                 },
             },
         }
-        await self.ws.send_reply(payload)
+        return await self._send_reply_payload(payload)
+
+    async def _send_reply_payload(self, payload: dict) -> bool:
+        req_id = str((payload or {}).get("headers", {}).get("req_id") or "")
+        cmd = str((payload or {}).get("cmd") or "")
+        try:
+            await self.ws.send_reply(payload)
+            return True
+        except Exception as e:
+            logger.warning(
+                "[Dispatcher:%s] 回复发送失败: cmd=%s, req_id=%s, err=%s",
+                self.bot_key,
+                cmd,
+                req_id,
+                e,
+                exc_info=True,
+            )
+            return False
 
     # ---- 工具方法 ----
 

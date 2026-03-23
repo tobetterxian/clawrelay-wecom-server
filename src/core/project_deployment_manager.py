@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,7 @@ class CloudflareDeployScaffoldResult:
     files: List[FileWriteResult] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     pages_project_name: str = ""
+    app_dir: str = "."
     build_dir: str = ""
     worker_name: str = ""
     entry_file: str = ""
@@ -280,12 +281,46 @@ class ProjectDeploymentManager:
     ) -> CloudflareDeployScaffoldResult:
         root = self._resolve_workspace(workspace_path)
         normalized_project_name = _slugify(pages_project_name, "pages-project")
-        normalized_build_dir = str(build_dir or "dist").strip() or "dist"
+        pages_app_dir, normalized_build_dir, warnings = self._resolve_cloudflare_pages_paths(
+            root,
+            build_dir,
+        )
+        package_json_path = (
+            "package.json"
+            if pages_app_dir == "."
+            else f"{pages_app_dir}/package.json"
+        )
+        package_lock_path = (
+            "package-lock.json"
+            if pages_app_dir == "."
+            else f"{pages_app_dir}/package-lock.json"
+        )
+        shrinkwrap_path = (
+            "npm-shrinkwrap.json"
+            if pages_app_dir == "."
+            else f"{pages_app_dir}/npm-shrinkwrap.json"
+        )
 
         workflow_content = self._load_text("github-actions/cloudflare-pages-deploy.yml")
         deploy_command = (
             f"pages deploy {shlex.quote(normalized_build_dir)} "
             f"--project-name={shlex.quote(normalized_project_name)}"
+        )
+        workflow_content = workflow_content.replace(
+            "__CF_PAGES_PACKAGE_JSON__",
+            package_json_path,
+        )
+        workflow_content = workflow_content.replace(
+            "__CF_PAGES_PACKAGE_LOCK__",
+            package_lock_path,
+        )
+        workflow_content = workflow_content.replace(
+            "__CF_PAGES_NPM_SHRINKWRAP__",
+            shrinkwrap_path,
+        )
+        workflow_content = workflow_content.replace(
+            "__CF_PAGES_APP_DIR__",
+            pages_app_dir,
         )
         workflow_content = workflow_content.replace(
             "__CF_PAGES_BUILD_DIR__",
@@ -304,7 +339,9 @@ class ProjectDeploymentManager:
             deployment_type="cloudflare_pages",
             workflow_path=".github/workflows/deploy-cloudflare-pages.yml",
             files=[file_result],
+            warnings=warnings,
             pages_project_name=normalized_project_name,
+            app_dir=pages_app_dir,
             build_dir=normalized_build_dir,
         )
 
@@ -681,6 +718,52 @@ class ProjectDeploymentManager:
         if any(part == ".." for part in parts):
             raise ValueError("项目路径不能包含 ..")
         return "/".join(parts) or "."
+
+    def _resolve_cloudflare_pages_paths(
+        self,
+        workspace_root: Path,
+        build_dir: str,
+    ) -> Tuple[str, str, List[str]]:
+        normalized_build_dir = self._normalize_repo_relative_path(build_dir, fallback="dist")
+        build_parts = [part for part in normalized_build_dir.split("/") if part and part != "."]
+        explicit_app_dir = "/".join(build_parts[:-1]) if len(build_parts) > 1 else "."
+        if explicit_app_dir and explicit_app_dir != ".":
+            return explicit_app_dir, normalized_build_dir, []
+
+        if (workspace_root / "package.json").exists():
+            return ".", normalized_build_dir, []
+
+        app_dir_candidates = self._discover_node_project_dirs(workspace_root)
+        if len(app_dir_candidates) != 1:
+            return ".", normalized_build_dir, []
+
+        app_dir = app_dir_candidates[0]
+        effective_build_dir = (
+            app_dir
+            if normalized_build_dir == "."
+            else f"{app_dir}/{normalized_build_dir}"
+        )
+        return (
+            app_dir,
+            effective_build_dir,
+            [f"检测到前端项目位于子目录 {app_dir}，已自动使用构建目录 {effective_build_dir}"],
+        )
+
+    @staticmethod
+    def _discover_node_project_dirs(workspace_root: Path) -> List[str]:
+        candidates: set[str] = set()
+        for package_json in workspace_root.rglob("package.json"):
+            try:
+                relative_path = package_json.relative_to(workspace_root)
+            except ValueError:
+                continue
+            parent_parts = relative_path.parts[:-1]
+            if not parent_parts:
+                continue
+            if any(part in {".git", "node_modules"} for part in parent_parts):
+                continue
+            candidates.add("/".join(parent_parts))
+        return sorted(candidates)
 
     def _run_git(self, cwd: Path, *args: str) -> str:
         completed = self._run_git_process(cwd, *args)

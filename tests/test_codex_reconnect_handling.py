@@ -46,6 +46,13 @@ def test_detects_transient_reconnect_message():
     assert not CodexCliOrchestrator._is_transient_reconnect_message("Process exited")
 
 
+def test_detects_interrupted_turn_message():
+    assert CodexCliOrchestrator._is_interrupted_turn_message(
+        "[CodexCLI] Turn interrupted before completion: stdout ended before turn/completed（code=0）"
+    )
+    assert not CodexCliOrchestrator._is_interrupted_turn_message("Reconnecting... 1/5")
+
+
 def test_normalizes_transient_reconnect_error_message():
     assert (
         CodexCliOrchestrator._normalize_codex_error_message("Reconnecting... 1/5")
@@ -64,6 +71,53 @@ def test_friendly_error_maps_reconnect_messages():
         _friendly_error(Exception("[CodexCLI] Reconnecting in progress"))
         == _CODEX_CLI_RECONNECT_HINT
     )
+
+
+def test_build_interrupted_turn_resume_prompt_mentions_continue_without_repeating():
+    prompt = CodexCliOrchestrator._build_interrupted_turn_resume_prompt("继续开发企业官网")
+
+    assert "执行通道意外中断" in prompt
+    assert "继续完成同一个任务" in prompt
+    assert "不要重复已经完成的修改" in prompt
+    assert "继续开发企业官网" in prompt
+
+
+def test_codex_app_session_raises_when_stream_ends_before_turn_completed():
+    from src.adapters.codex_app_server_adapter import CodexAppServerError, CodexAppServerSession
+
+    async def run_flow():
+        session = CodexAppServerSession(model="", working_dir=".")
+        session.thread_id = "thread_1"
+        session.process = SimpleNamespace(returncode=0)
+
+        async def fake_rpc_request(method: str, params: dict):
+            assert method == "turn/start"
+            return {"turn": {"id": "turn_1"}}
+
+        session._rpc_request = fake_rpc_request
+        await session._events.put(None)
+
+        try:
+            async for _event in session.stream_turn([{"type": "text", "text": "hello"}]):
+                pass
+        except CodexAppServerError as exc:
+            return str(exc)
+        raise AssertionError("expected CodexAppServerError")
+
+    message = asyncio.run(run_flow())
+    assert "Turn interrupted before completion" in message
+
+
+def test_runtime_elapsed_seconds_uses_whole_task_clock():
+    assert abs(CodexCliOrchestrator._runtime_elapsed_seconds(100.0, now=121.8) - 21.8) < 1e-6
+    assert CodexCliOrchestrator._runtime_elapsed_seconds(100.0, now=99.0) == 0.0
+
+
+def test_runtime_keepalive_initial_delay_does_not_restart_after_retry():
+    assert abs(
+        CodexCliOrchestrator._runtime_keepalive_initial_delay(100.0, 20.0, now=105.0) - 15.0
+    ) < 1e-6
+    assert CodexCliOrchestrator._runtime_keepalive_initial_delay(100.0, 20.0, now=121.0) == 0.0
 
 
 def test_codex_cli_uses_shared_home_directory():
@@ -296,6 +350,202 @@ def test_message_dispatcher_help_menu_click_updates_template_card():
         assert payload["body"]["response_code"] == "response_help_123"
         assert payload["body"]["template_card"]["card_type"] == "text_notice"
         assert "GitHub 仓库" in payload["body"]["template_card"]["main_title"]["title"]
+
+
+def test_message_dispatcher_brochure_bot_help_uses_specialized_reply():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class StubOrchestrator(BaseOrchestrator):
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            raise AssertionError("help should not fall through to text handling")
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks: list[dict],
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            raise AssertionError("help should not fall through to multimodal handling")
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="brochure_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="gemini",
+                name="产品画册",
+                description="产品画册策划与文案机器人",
+                provider_config={
+                    "enable_brochure_internal_delegate": True,
+                    "delegate_execution_bot_key": "cx_bot",
+                },
+            ),
+            orchestrator=StubOrchestrator(),
+        )
+
+        asyncio.run(
+            dispatcher.on_msg_callback(
+                {
+                    "headers": {"req_id": "req_brochure_help"},
+                    "body": {
+                        "msgid": "msg_brochure_help",
+                        "msgtype": "text",
+                        "chattype": "single",
+                        "from": {"userid": "alice"},
+                        "text": {"content": "帮助"},
+                    },
+                }
+            )
+        )
+
+        assert len(ws.payloads) == 1
+        payload = ws.payloads[0]
+        assert payload["cmd"] == "aibot_respond_msg"
+        content = payload["body"]["stream"]["content"]
+        assert "产品画册机器人使用说明" in content
+        assert "做完整画册" in content
+        assert "`cx_bot`" in content
+        assert "ClawRelay Bot - Demo Commands" not in content
+
+
+def test_message_dispatcher_stream_reply_failure_marks_task_without_crashing():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class FailingWs:
+        async def send_reply(self, payload: dict):
+            raise RuntimeError("websocket closed")
+
+    async def run_flow(dispatcher: MessageDispatcher, task_key: str):
+        registry = get_task_registry()
+
+        async def sleeper():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(sleeper())
+        registry.register(task_key, task, "stream_fail", req_id="req_fail")
+
+        callback = dispatcher._make_stream_delta_callback(
+            {"req_id": "req_fail", "stream_id": "stream_fail", "prefix": ""},
+            task_key=task_key,
+        )
+        await callback("hello world", False)
+
+        _task, _stream_id, extra = registry.get(task_key)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0)
+        return extra
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        dispatcher = MessageDispatcher(
+            FailingWs(),
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-reply-fail")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        extra = asyncio.run(run_flow(dispatcher, task_key))
+
+        assert extra["reply_delivery_failed"] is True
+        assert extra["last_preview"] == "hello world"
+        registry.forget(task_key)
+
+
+def test_running_task_status_reply_reports_recent_terminal_status():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        async def send_reply(self, payload: dict):
+            return None
+
+    async def run_flow(task_key: str):
+        registry = get_task_registry()
+        task = asyncio.create_task(asyncio.sleep(0))
+        registry.register(
+            task_key,
+            task,
+            "stream_done",
+            req_id="req_done",
+            last_preview="任务已经完成",
+            reply_delivery_failed=True,
+        )
+        await task
+        await asyncio.sleep(0)
+        return registry.get_recent(task_key)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        dispatcher = MessageDispatcher(
+            DummyWs(),
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-terminal-status")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        recent = asyncio.run(run_flow(task_key))
+        reply = dispatcher._running_task_status_reply("session-terminal-status")
+
+        assert recent["terminal_status"] == "completed"
+        assert recent["reply_delivery_failed"] is True
+        assert "当前没有正在运行的任务。" in reply
+        assert "最近一次任务已于" in reply
+        assert "结果可能没有成功送达" in reply
+        assert "最近输出：任务已经完成" in reply
+        registry.forget(task_key)
 
 
 def test_message_dispatcher_group_text_command_strips_leading_mention():
@@ -3675,15 +3925,48 @@ def test_scaffold_cloudflare_pages_writes_workflow():
 
         assert result.deployment_type == "cloudflare_pages"
         assert result.pages_project_name == "hello-pages"
+        assert result.app_dir == "."
         assert result.build_dir == "build-output"
         assert workflow_path.exists()
         assert "Detect Node.js project" in content
+        assert 'if [ -f "package.json" ]; then' in content
         assert "Install dependencies with lockfile" in content
         assert "Install dependencies without lockfile" in content
+        assert "working-directory: ." in content
         assert "npm run build --if-present" in content
         assert "Cloudflare Pages build directory not found: build-output" in content
         assert "Cloudflare Pages build directory is empty: build-output" in content
         assert "pages deploy build-output --project-name=hello-pages" in content
+
+
+def test_scaffold_cloudflare_pages_infers_single_subdirectory_node_project():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        app_dir = workspace / "xiaodaka"
+        app_dir.mkdir(parents=True)
+        (app_dir / "package.json").write_text('{"name":"xiaodaka"}', encoding="utf-8")
+
+        manager = ProjectDeploymentManager()
+        result = manager.scaffold_cloudflare_pages(
+            str(workspace),
+            pages_project_name="Hello Pages",
+            build_dir="dist",
+        )
+
+        workflow_path = workspace / ".github" / "workflows" / "deploy-cloudflare-pages.yml"
+        content = workflow_path.read_text(encoding="utf-8")
+
+        assert result.deployment_type == "cloudflare_pages"
+        assert result.pages_project_name == "hello-pages"
+        assert result.app_dir == "xiaodaka"
+        assert result.build_dir == "xiaodaka/dist"
+        assert "检测到前端项目位于子目录 xiaodaka" in "\n".join(result.warnings)
+        assert 'if [ -f "xiaodaka/package.json" ]; then' in content
+        assert "hashFiles('xiaodaka/package-lock.json', 'xiaodaka/npm-shrinkwrap.json')" in content
+        assert "working-directory: xiaodaka" in content
+        assert "Cloudflare Pages build directory not found: xiaodaka/dist" in content
+        assert "Cloudflare Pages build directory is empty: xiaodaka/dist" in content
+        assert "pages deploy xiaodaka/dist --project-name=hello-pages" in content
 
 
 def test_scaffold_cloudflare_worker_writes_workflow_and_wrangler():

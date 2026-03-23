@@ -32,3 +32,5 @@ bots:
       default_github_owner: "${DEFAULT_GITHUB_OWNER:-}"
       session_timeout_seconds: 7200
       enable_project_workspace_mode: true
+      long_task_keepalive_after_seconds: 20
+      # long_task_keepalive_interval_seconds: 20  # 可选；不填时默认与首次阈值一致，设为 0 也会回退到首次阈值

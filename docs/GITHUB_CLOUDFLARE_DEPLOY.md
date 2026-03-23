@@ -118,6 +118,8 @@ Workers 项目推荐：
 3. 把 `docs/examples/github-actions/cloudflare-pages-deploy.yml:1` 复制到目标项目：
    - `.github/workflows/deploy-cloudflare-pages.yml`
 4. 根据项目调整安装和构建命令；如果通过机器人命令 `启用Pages部署 <Pages项目名> [构建目录]` 生成，则项目名和构建目录会直接写入工作流，不需要再配 GitHub Variables
+   - 如果前端在子目录，例如 `xiaodaka/`，可直接把构建目录写成 `xiaodaka/dist`
+   - 当前机器人也会在“仓库根没有 package.json、且只检测到一个前端子项目”时自动识别子目录并生成正确的工作流
 5. 推送到 `main`，自动部署
 
 ## Workers 项目接入步骤
