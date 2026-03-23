@@ -1893,6 +1893,9 @@ class MessageDispatcher:
         if not isinstance(reply_state, dict):
             return False
 
+        old_req_id = str(reply_state.get("req_id") or "")
+        old_stream_id = str(reply_state.get("stream_id") or "")
+        handoff_preview = self._summarize_stream_preview((extra or {}).get("last_preview") or "", limit=180)
         new_stream_id = uuid.uuid4().hex[:12]
         reply_state["req_id"] = req_id
         reply_state["stream_id"] = new_stream_id
@@ -1905,6 +1908,19 @@ class MessageDispatcher:
             reply_state=reply_state,
         ):
             return False
+
+        if old_req_id and old_stream_id:
+            handoff_lines = []
+            if handoff_preview:
+                handoff_lines.append(f"最近输出：{handoff_preview}")
+            handoff_lines.append("⏩ 当前任务仍在处理中，后续进度已切换到新的消息气泡继续显示。")
+            handoff_lines.append("请查看最新一条机器人消息获取实时进度。")
+            await self._reply_stream(
+                old_req_id,
+                old_stream_id,
+                "\n".join(handoff_lines),
+                finish=True,
+            )
 
         if ack:
             await self._reply_stream(req_id, new_stream_id, ack, finish=False)

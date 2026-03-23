@@ -699,6 +699,96 @@ def test_running_task_status_reply_reports_recent_terminal_status():
         registry.forget(task_key)
 
 
+def test_handoff_running_reply_closes_old_bubble_and_switches_to_new_one():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    async def run_flow(dispatcher: MessageDispatcher, task_key: str, ws: DummyWs):
+        registry = get_task_registry()
+
+        async def sleeper():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(sleeper())
+        registry.register(
+            task_key,
+            task,
+            "stream_old",
+            req_id="req_old",
+            last_preview="Codex 正在生成页面骨架",
+            reply_state={
+                "req_id": "req_old",
+                "stream_id": "stream_old",
+                "prefix": "",
+            },
+        )
+
+        handed_off = await dispatcher._handoff_running_reply(
+            "session-handoff",
+            "req_new",
+            "⏳ 已收到，继续处理。",
+        )
+        _task, current_stream_id, extra = registry.get(task_key)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0)
+        return handed_off, current_stream_id, extra, list(ws.payloads)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-handoff")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        handed_off, current_stream_id, extra, payloads = asyncio.run(run_flow(dispatcher, task_key, ws))
+
+        assert handed_off is True
+        assert current_stream_id != "stream_old"
+        assert extra["reply_state"]["req_id"] == "req_new"
+        assert extra["reply_state"]["stream_id"] == current_stream_id
+        assert len(payloads) == 2
+
+        old_payload = payloads[0]
+        assert old_payload["headers"]["req_id"] == "req_old"
+        assert old_payload["body"]["stream"]["id"] == "stream_old"
+        assert old_payload["body"]["stream"]["finish"] is True
+        assert "切换到新的消息气泡继续显示" in old_payload["body"]["stream"]["content"]
+
+        new_payload = payloads[1]
+        assert new_payload["headers"]["req_id"] == "req_new"
+        assert new_payload["body"]["stream"]["id"] == current_stream_id
+        assert new_payload["body"]["stream"]["finish"] is False
+        assert new_payload["body"]["stream"]["content"] == "⏳ 已收到，继续处理。"
+        registry.forget(task_key)
+
+
 def test_running_task_status_reply_reports_proactive_reply_recovery():
     from src.core.task_registry import get_task_registry
     from src.transport.message_dispatcher import MessageDispatcher
