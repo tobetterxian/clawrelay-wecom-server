@@ -93,6 +93,8 @@ bots:
   #   provider_config:
   #     api_key: "${GEMINI_API_KEY}"
   #     inherit_group_project_context: true  # 群聊时自动继承 codex_cli 当前群项目上下文
+  #     enable_brochure_internal_delegate: true  # 允许“做完整画册”时后台自动委托给 codex_cli 落地
+  #     delegate_execution_bot_key: "cx_bot"  # 可选：指定负责真正落地执行的 codex_cli 机器人
   #     # group_project_context_bot_key: "codex_cli_bot"
   #     # group_project_context_workspace_root: "${WORKSPACE_ROOT_BASE:-/data/workspaces}/codex"
 

@@ -379,6 +379,27 @@ bots:
 - 审批、文件改动确认、补充提问会通过企业微信文字回复回传，体验更接近原生交互式 Codex
 - 这个类型更适合本地读写代码、执行命令、排障，以及多人协作场景下的目录隔离
 
+### 产品画册机器人联动
+
+如果你希望群里只出现一个前台 `@产品画册` 机器人，但真正的代码落地、导出、发布由 `codex_cli` 机器人在后台执行，可以这样配置：
+
+```yaml
+bots:
+  brochure_bot:
+    bot_type: "gemini"   # 也可以是 openai
+    name: "产品画册"
+    provider_config:
+      inherit_group_project_context: true
+      enable_brochure_internal_delegate: true
+      delegate_execution_bot_key: "cx_bot"
+```
+
+说明：
+- `@产品画册 做完整画册`：先生成需求文档，再后台委托 `cx_bot` 保存文档、生成画册、回传预览图
+- `@产品画册 做完整画册并导出PDF`：完整生成后自动导出 PDF
+- `@产品画册 回传画册图片` / `导出画册PDF` / `导出画册PPT` / `发布画册`：会直接委托后台执行机器人处理
+- 如果后台 `codex_cli` 在执行中需要确认或补充信息，继续在当前 `@产品画册` 会话里直接回复文字即可，无需再单独 `@cx_bot`
+
 ### 多机器人配置示例
 
 可以在同一个服务中运行多个不同类型的机器人：

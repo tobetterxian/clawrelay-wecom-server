@@ -14,6 +14,7 @@ from typing import Optional
 
 from config.bot_config import BotConfig
 from src.core.base_orchestrator import BaseOrchestrator
+from src.core.bot_delegate_manager import BotDelegateManager
 from src.transport.ws_client import WsClient
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.session_manager import SessionManager
@@ -22,6 +23,11 @@ from src.core.group_project_context_resolver import (
     GroupProjectContextResolver,
 )
 from src.handlers.command_handlers import CommandRouter
+from src.utils.brochure_delegate import (
+    BrochureDelegateRequest,
+    build_brochure_delegate_planning_prompt,
+    parse_brochure_delegate_request,
+)
 from src.utils.quoted_handoff import rewrite_quoted_development_request
 from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 from src.utils.weixin_utils import ImageUtils, FileUtils
@@ -91,6 +97,7 @@ class MessageDispatcher:
         bot_config: BotConfig,
         orchestrator: Optional[BaseOrchestrator] = None,
         group_project_context_resolver: Optional[GroupProjectContextResolver] = None,
+        delegate_manager: Optional[BotDelegateManager] = None,
     ):
         self.ws = ws_client
         self.config = bot_config
@@ -105,6 +112,7 @@ class MessageDispatcher:
         # 会话管理
         self.session_manager = SessionManager()
         self.group_project_context_resolver = group_project_context_resolver
+        self.delegate_manager = delegate_manager
 
         # 加载自定义命令
         self._load_custom_commands()
@@ -225,11 +233,17 @@ class MessageDispatcher:
             return f"【当前群项目上下文】\n{context_text}"
         return f"【当前群项目上下文】\n{context_text}\n\n{normalized_content}"
 
-    def _make_orchestrator_call_kwargs(self, req_id: str) -> dict:
-        if self.config.bot_type != "codex_cli":
+    def _make_orchestrator_call_kwargs(
+        self,
+        req_id: str,
+        bot_config: Optional[BotConfig] = None,
+        on_interaction_request=None,
+    ) -> dict:
+        effective_bot_config = bot_config or self.config
+        if (effective_bot_config.bot_type or "").strip() != "codex_cli":
             return {}
 
-        async def on_interaction_request(payload: dict):
+        async def relay_interaction_request(payload: dict):
             template_card = (payload or {}).get("template_card")
             if template_card:
                 logger.info(
@@ -237,8 +251,44 @@ class MessageDispatcher:
                     self.bot_key,
                     (payload or {}).get("task_id", ""),
                 )
+            if callable(on_interaction_request):
+                try:
+                    await on_interaction_request(payload or {})
+                except Exception as e:
+                    logger.warning(
+                        "[Dispatcher:%s] Codex 交互回调处理失败: req_id=%s err=%s",
+                        self.bot_key,
+                        req_id,
+                        e,
+                    )
 
-        return {"on_interaction_request": on_interaction_request}
+        return {"on_interaction_request": relay_interaction_request}
+
+    def _supports_brochure_internal_delegate(self) -> bool:
+        provider_config = self.config.provider_config or {}
+        explicit_value = provider_config.get("enable_brochure_internal_delegate")
+        if explicit_value is not None:
+            return self._is_truthy_config(explicit_value)
+
+        bot_key = str(self.config.bot_key or "").strip().lower()
+        bot_name = str(self.config.name or "").strip().lower()
+        bot_desc = str(self.config.description or "").strip().lower()
+        return "brochure" in bot_key or "画册" in bot_name or "画册" in bot_desc
+
+    def _preferred_delegate_bot_key(self) -> str:
+        provider_config = self.config.provider_config or {}
+        return str(
+            provider_config.get("delegate_execution_bot_key")
+            or provider_config.get("group_project_context_bot_key")
+            or ""
+        ).strip()
+
+    def _resolve_codex_cli_delegate_target(self):
+        if not self.delegate_manager:
+            return None
+        return self.delegate_manager.resolve_codex_cli_delegate(
+            preferred_bot_key=self._preferred_delegate_bot_key()
+        )
 
     @staticmethod
     def _is_truthy_config(value) -> bool:
@@ -616,6 +666,285 @@ class MessageDispatcher:
             return f"{prefix}\n\n{content}"
         return prefix or content
 
+    @staticmethod
+    def _join_delegate_sections(sections: list[str], live_text: str = "") -> str:
+        parts = [str(item or "").strip() for item in (sections or []) if str(item or "").strip()]
+        if str(live_text or "").strip():
+            parts.append(str(live_text or "").strip())
+        return "\n\n".join(parts).strip()
+
+    @staticmethod
+    def _delegated_log_context(log_context: dict, source_bot_key: str, target_bot_key: str) -> dict:
+        delegated_context = dict(log_context or {})
+        delegated_context["delegated_from_bot_key"] = source_bot_key
+        delegated_context["delegated_execution_bot_key"] = target_bot_key
+        delegated_context["delegated_execution_mode"] = "internal"
+        return delegated_context
+
+    @classmethod
+    def _build_delegate_interaction_notice(cls, payload: dict, target_bot_key: str) -> str:
+        prompt = cls._clean_document_fragment((payload or {}).get("text_prompt") or "", limit=2000)
+        lines = [
+            "【等待确认】",
+            f"后台执行机器人 `{target_bot_key}` 需要你的确认或补充信息。",
+            "请直接继续在当前画册机器人里回复文字，无需再切到其它机器人。",
+        ]
+        if prompt:
+            lines.append(prompt)
+        return "\n".join(lines).strip()
+
+    def _resolve_pending_brochure_delegate_interaction(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict,
+    ):
+        if not self._supports_brochure_internal_delegate():
+            return None
+
+        delegate_target = self._resolve_codex_cli_delegate_target()
+        if not delegate_target:
+            return None
+
+        target_bot_key, target_bot_config, target_orchestrator = delegate_target
+        delegated_log_context = self._delegated_log_context(log_context, self.bot_key, target_bot_key)
+        target_runtime_session_key = target_orchestrator.get_runtime_session_key(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=delegated_log_context,
+        )
+        if not target_orchestrator.has_pending_interaction(target_runtime_session_key):
+            return None
+
+        return (
+            target_bot_key,
+            target_bot_config,
+            target_orchestrator,
+            delegated_log_context,
+            target_runtime_session_key,
+        )
+
+    async def _clear_brochure_delegate_session(
+        self,
+        user_id: str,
+        session_key: str,
+        log_context: dict,
+    ) -> None:
+        if not self._supports_brochure_internal_delegate():
+            return
+
+        delegate_target = self._resolve_codex_cli_delegate_target()
+        if not delegate_target:
+            return
+
+        target_bot_key, _target_bot_config, target_orchestrator = delegate_target
+        delegated_log_context = self._delegated_log_context(log_context, self.bot_key, target_bot_key)
+        target_runtime_session_key = target_orchestrator.get_runtime_session_key(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=delegated_log_context,
+        )
+        await target_orchestrator.clear_session(target_runtime_session_key)
+
+    async def _run_delegate_text_stage(
+        self,
+        on_stream_delta,
+        sections: list[str],
+        stage_title: str,
+        execute_coro,
+    ) -> str:
+        final_text = ""
+
+        async def stage_stream(accumulated_text: str, finish: bool):
+            nonlocal final_text
+            live_section = f"{stage_title}\n{accumulated_text}".strip() if accumulated_text else stage_title
+            await on_stream_delta(self._join_delegate_sections(sections, live_section), False)
+            if finish:
+                final_text = str(accumulated_text or "").strip()
+
+        result = await execute_coro(stage_stream)
+        result_text = str(result or final_text or "").strip()
+        if result_text:
+            sections.append(f"{stage_title}\n{result_text}".strip())
+            await on_stream_delta(self._join_delegate_sections(sections), False)
+        return result_text
+
+    async def _run_delegate_control_stage(
+        self,
+        on_stream_delta,
+        sections: list[str],
+        stage_title: str,
+        execute_coro,
+    ):
+        result = await execute_coro()
+        if isinstance(result, dict):
+            result_text = str(result.get("content") or "").strip()
+        else:
+            result_text = str(result or "").strip()
+        sections.append(f"{stage_title}\n{result_text}".strip() if result_text else stage_title)
+        await on_stream_delta(self._join_delegate_sections(sections), False)
+        return result
+
+    async def _execute_brochure_delegate_workflow(
+        self,
+        req_id: str,
+        user_id: str,
+        session_key: str,
+        runtime_session_key: str,
+        log_context: dict,
+        delegate_request: BrochureDelegateRequest,
+        delegate_target,
+        composed_message: str,
+        on_stream_delta,
+    ) -> str:
+        target_bot_key, target_bot_config, target_orchestrator = delegate_target
+        delegated_log_context = self._delegated_log_context(log_context, self.bot_key, target_bot_key)
+        sections = [
+            "\n".join(
+                [
+                    "已进入画册自动落地流程",
+                    f"前台机器人：{self.bot_key}",
+                    f"后台执行：{target_bot_key}",
+                ]
+            )
+        ]
+        await on_stream_delta(self._join_delegate_sections(sections), False)
+
+        final_delivery_result = None
+        plan_text = ""
+        latest_interaction_notice = ""
+
+        async def on_delegate_interaction_request(payload: dict):
+            nonlocal latest_interaction_notice
+            notice = self._build_delegate_interaction_notice(payload, target_bot_key)
+            if not notice or notice == latest_interaction_notice:
+                return
+            latest_interaction_notice = notice
+            await on_stream_delta(self._join_delegate_sections(sections, notice), False)
+
+        if delegate_request.planning_needed:
+            planning_prompt = build_brochure_delegate_planning_prompt(composed_message)
+            plan_text = await self._run_delegate_text_stage(
+                on_stream_delta=on_stream_delta,
+                sections=sections,
+                stage_title="【画册方案】",
+                execute_coro=lambda stage_stream: self.orchestrator.handle_text_message(
+                    user_id=user_id,
+                    message=planning_prompt,
+                    stream_id=uuid.uuid4().hex[:12],
+                    session_key=session_key,
+                    log_context=log_context,
+                    on_stream_delta=stage_stream,
+                ),
+            )
+
+            save_command = self._compose_message_with_quote("保存为画册需求文档", plan_text)
+            await self._run_delegate_control_stage(
+                on_stream_delta=on_stream_delta,
+                sections=sections,
+                stage_title="【保存需求】",
+                execute_coro=lambda: target_orchestrator.handle_control_command(
+                    user_id=user_id,
+                    content=save_command,
+                    session_key=session_key,
+                    log_context=delegated_log_context,
+                ),
+            )
+
+            generate_command = self._compose_message_with_quote("生成画册", plan_text)
+            await self._run_delegate_text_stage(
+                on_stream_delta=on_stream_delta,
+                sections=sections,
+                stage_title="【Codex 落地】",
+                execute_coro=lambda stage_stream: target_orchestrator.handle_text_message(
+                    user_id=user_id,
+                    message=generate_command,
+                    stream_id=uuid.uuid4().hex[:12],
+                    session_key=session_key,
+                    log_context=delegated_log_context,
+                    on_stream_delta=stage_stream,
+                    **self._make_orchestrator_call_kwargs(
+                        req_id,
+                        target_bot_config,
+                        on_interaction_request=on_delegate_interaction_request,
+                    ),
+                ),
+            )
+
+        final_delivery_result = await self._run_delegate_control_stage(
+            on_stream_delta=on_stream_delta,
+            sections=sections,
+            stage_title="【成品交付】",
+            execute_coro=lambda: target_orchestrator.handle_control_command(
+                user_id=user_id,
+                content=delegate_request.final_control_command,
+                session_key=session_key,
+                log_context=delegated_log_context,
+            ),
+        )
+
+        final_text = self._join_delegate_sections(sections)
+        await on_stream_delta(final_text, True)
+
+        if isinstance(final_delivery_result, dict):
+            await self._reply_control_result(req_id, final_delivery_result)
+            return str(final_delivery_result.get("content") or final_text or "").strip()
+        return str(final_delivery_result or final_text).strip()
+
+    async def _maybe_handle_brochure_internal_delegate(
+        self,
+        req_id: str,
+        user_id: str,
+        session_key: str,
+        runtime_session_key: str,
+        content: str,
+        quote_context: str,
+        group_project_context: Optional[GroupProjectContext],
+        log_context: dict,
+    ) -> bool:
+        if not self._supports_brochure_internal_delegate():
+            return False
+
+        composed_message = self._compose_message_with_group_project_context(
+            self._compose_message_with_quote(content, quote_context),
+            group_project_context,
+        )
+        delegate_request = parse_brochure_delegate_request(composed_message)
+        if not delegate_request:
+            return False
+
+        delegate_target = self._resolve_codex_cli_delegate_target()
+        if not delegate_target:
+            await self._reply_text(
+                req_id,
+                "当前没有可用的 `codex_cli` 机器人用于画册落地，请先配置并启动 `cx_bot` 一类的执行机器人。",
+                finish=True,
+            )
+            return True
+
+        stream_id = uuid.uuid4().hex[:12]
+        reply_state = {"req_id": req_id, "stream_id": stream_id, "prefix": ""}
+        on_stream_delta = self._make_stream_delta_callback(reply_state)
+
+        await self._run_with_task_registry(
+            req_id,
+            stream_id,
+            runtime_session_key,
+            self._execute_brochure_delegate_workflow(
+                req_id=req_id,
+                user_id=user_id,
+                session_key=session_key,
+                runtime_session_key=runtime_session_key,
+                log_context=log_context,
+                delegate_request=delegate_request,
+                delegate_target=delegate_target,
+                composed_message=composed_message,
+                on_stream_delta=on_stream_delta,
+            ),
+            reply_state=reply_state,
+        )
+        return True
+
     async def _handoff_running_reply(self, session_key: str, req_id: str, ack: str) -> bool:
         from src.core.task_registry import get_task_registry
 
@@ -732,6 +1061,7 @@ class MessageDispatcher:
         if normalized in ("reset", "new", "clear", "重置", "清空"):
             await self.session_manager.clear_session(self.bot_key, runtime_session_key)
             await self.orchestrator.clear_session(runtime_session_key)
+            await self._clear_brochure_delegate_session(user_id, session_key, log_context)
             await self._reply_text(req_id, "会话已重置，可以开始新的对话。", finish=True)
             return
 
@@ -744,6 +1074,7 @@ class MessageDispatcher:
                 old_req_id = extra.get("req_id")
                 if old_stream_id and old_req_id:
                     await self._reply_stream(old_req_id, old_stream_id, "⏹ 任务已被用户停止。", finish=True)
+                await self._clear_brochure_delegate_session(user_id, session_key, log_context)
                 await self._reply_text(req_id, "⏹ 已停止当前任务。", finish=True)
             else:
                 await self._reply_text(req_id, "当前没有正在运行的任务。", finish=True)
@@ -761,11 +1092,65 @@ class MessageDispatcher:
                 if ack:
                     await self._reply_text(req_id, ack, finish=True)
                     return
+            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            return
+
+        pending_delegate_interaction = self._resolve_pending_brochure_delegate_interaction(
+            user_id=user_id,
+            session_key=session_key,
+            log_context=log_context,
+        )
+        if pending_delegate_interaction:
+            (
+                _target_bot_key,
+                _target_bot_config,
+                target_orchestrator,
+                _delegated_log_context,
+                target_runtime_session_key,
+            ) = pending_delegate_interaction
+            target_is_control_command = False
+            checker = getattr(target_orchestrator, "is_control_command", None)
+            if callable(checker):
+                try:
+                    target_is_control_command = bool(checker(command_content))
+                except Exception as e:
+                    logger.warning("[Dispatcher:%s] 检查委托控制命令失败: %s", self.bot_key, e)
+            if not target_is_control_command:
+                interaction_result = await target_orchestrator.handle_interaction_text(
+                    target_runtime_session_key,
+                    content,
+                )
+                if interaction_result:
+                    ack = interaction_result.get("ack", "")
+                    submitted = bool(interaction_result.get("submitted"))
+                    if submitted and await self._handoff_running_reply(runtime_session_key, req_id, ack):
+                        return
+                    if ack:
+                        await self._reply_text(req_id, ack, finish=True)
+                        return
+                await self._reply_text(
+                    req_id,
+                    "当前画册后台任务仍在等待你的确认，请直接回复上一条提示中的答案。",
+                    finish=True,
+                )
+                return
 
         if (
             not self.orchestrator.has_pending_interaction(runtime_session_key)
             and self._is_help_menu_trigger(content)
             and await self._reply_help_menu_card(req_id)
+        ):
+            return
+
+        if await self._maybe_handle_brochure_internal_delegate(
+            req_id=req_id,
+            user_id=user_id,
+            session_key=session_key,
+            runtime_session_key=runtime_session_key,
+            content=content,
+            quote_context=quote_context,
+            group_project_context=group_project_context,
+            log_context=log_context,
         ):
             return
 

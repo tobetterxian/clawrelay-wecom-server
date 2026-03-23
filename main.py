@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from config.bot_config import BotConfigManager
 from src.transport.ws_client import WsClient
 from src.transport.message_dispatcher import MessageDispatcher
+from src.core.bot_delegate_manager import BotDelegateManager
 from src.core.group_project_context_resolver import GroupProjectContextResolver
 from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_checks
 from src.utils.single_instance import SingleInstanceLock, SingleInstanceError
@@ -39,7 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 INSTANCE_LOCK_PATH = PROJECT_ROOT / "logs" / "clawrelay-wecom-server.lock"
 
 
-async def run_bot(bot_config, orchestrator=None, group_project_context_resolver=None) -> None:
+async def run_bot(bot_config, orchestrator=None, group_project_context_resolver=None, delegate_manager=None) -> None:
     """为单个bot运行WebSocket连接"""
     if not bot_config.secret:
         logger.error("机器人 %s 未配置secret，跳过", bot_config.bot_key)
@@ -56,6 +57,7 @@ async def run_bot(bot_config, orchestrator=None, group_project_context_resolver=
         bot_config,
         orchestrator=orchestrator,
         group_project_context_resolver=group_project_context_resolver,
+        delegate_manager=delegate_manager,
     )
 
     # 绑定回调
@@ -87,6 +89,7 @@ async def main():
 
     prepared_orchestrators = run_codex_cli_startup_checks(all_configs)
     group_project_context_resolver = GroupProjectContextResolver.from_bot_configs(all_configs)
+    delegate_manager = BotDelegateManager(all_configs, prepared_orchestrators)
 
     # 为每个bot启动一个Task
     tasks = []
@@ -97,6 +100,7 @@ async def main():
                 bot_config,
                 orchestrator=prepared_orchestrators.get(bot_key),
                 group_project_context_resolver=group_project_context_resolver,
+                delegate_manager=delegate_manager,
             ),
             name=f"bot:{bot_key}",
         )

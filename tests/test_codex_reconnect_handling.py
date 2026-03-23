@@ -18,6 +18,7 @@ from src.core.cloudflare_pages_manager import (
     CloudflareWorkerStatusInfo,
 )
 from src.core.base_orchestrator import BaseOrchestrator
+from src.core.bot_delegate_manager import BotDelegateManager
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
 from src.core.github_repository_manager import (
     GitHubRepositoryInfo,
@@ -36,6 +37,7 @@ from src.core.workspace_init_modes import (
 from src.core.workspace_manager import WorkspaceManager
 from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_check
 from src.utils.brochure_generation import rewrite_brochure_generation_request
+from src.utils.brochure_delegate import parse_brochure_delegate_request
 from src.utils.quoted_requirement_doc import parse_quoted_requirement_doc_request
 
 
@@ -167,6 +169,20 @@ def test_rewrite_brochure_generation_request_expands_short_request():
     assert "HTML/H5 产品画册" in rewritten
     assert "`brochure/index.html`" in rewritten
     assert "`docs/image-prompts.md`" in rewritten
+
+
+def test_parse_brochure_delegate_request_supports_full_flow_and_direct_control():
+    full_flow_request = parse_brochure_delegate_request("【当前消息】\n做完整画册并导出PDF")
+    assert full_flow_request is not None
+    assert full_flow_request.mode == "full_flow"
+    assert full_flow_request.planning_needed is True
+    assert full_flow_request.final_control_command == "导出画册PDF"
+
+    direct_request = parse_brochure_delegate_request("【当前消息】\n导出画册PDF brochure/index.html dist/custom.pdf")
+    assert direct_request is not None
+    assert direct_request.mode == "direct_control"
+    assert direct_request.planning_needed is False
+    assert direct_request.final_control_command == "导出画册PDF brochure/index.html dist/custom.pdf"
 
 
 def test_is_control_command_recognizes_help_subtopic():
@@ -2079,6 +2095,269 @@ def test_message_dispatcher_routes_structured_image_control_reply():
     assert payload["body"]["stream"]["content"] == "已回传画册预览图"
     assert payload["body"]["stream"]["msg_item"][0]["msgtype"] == "image"
     assert payload["body"]["stream"]["msg_item"][0]["image"]["base64"] == "ZmFrZV9pbWFnZQ=="
+
+
+def test_message_dispatcher_brochure_internal_delegate_runs_full_flow():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            assert "可直接交给 Codex CLI 落地执行" in message
+            if on_stream_delta:
+                await on_stream_delta("这是整理后的画册需求文档", True)
+            return "这是整理后的画册需求文档"
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self):
+            self.calls = []
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ) -> str:
+            self.calls.append(("text", message))
+            if on_stream_delta:
+                await on_stream_delta("Codex 已生成画册文件", True)
+            return "Codex 已生成画册文件"
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+        async def handle_control_command(
+            self,
+            user_id: str,
+            content: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ):
+            self.calls.append(("control", content))
+            if "保存为画册需求文档" in content:
+                return "已保存需求文档：docs/requirements.md"
+            if content == "回传画册图片":
+                return {
+                    "type": "image",
+                    "image_base64": "ZmFrZV9pbWFnZQ==",
+                    "image_md5": "fake-md5",
+                    "content": "已回传画册预览图",
+                }
+            return f"done: {content}"
+
+    brochure_config = BotConfig(
+        bot_key="brochure_bot",
+        bot_id="bot_brochure",
+        secret="secret_brochure",
+        bot_type="gemini",
+        name="产品画册",
+        description="产品画册策划与文案机器人",
+        provider_config={
+            "enable_brochure_internal_delegate": True,
+            "delegate_execution_bot_key": "cx_bot",
+        },
+    )
+    codex_config = BotConfig(
+        bot_key="cx_bot",
+        bot_id="bot_cx",
+        secret="secret_cx",
+        bot_type="codex_cli",
+        working_dir="C:/next",
+    )
+    delegate_orchestrator = CodexDelegateOrchestrator()
+    delegate_manager = BotDelegateManager(
+        {"brochure_bot": brochure_config, "cx_bot": codex_config},
+        {"cx_bot": delegate_orchestrator},
+    )
+    ws = DummyWs()
+    dispatcher = MessageDispatcher(
+        ws,
+        brochure_config,
+        orchestrator=BrochureOrchestrator(),
+        delegate_manager=delegate_manager,
+    )
+
+    asyncio.run(
+        dispatcher._handle_text(
+            "req_full_brochure",
+            {"msgtype": "text", "text": {"content": "做完整画册"}},
+            "alice",
+            "alice",
+            "single",
+        )
+    )
+
+    assert delegate_orchestrator.calls[0][0] == "control"
+    assert "保存为画册需求文档" in delegate_orchestrator.calls[0][1]
+    assert delegate_orchestrator.calls[1][0] == "text"
+    assert "生成画册" in delegate_orchestrator.calls[1][1]
+    assert delegate_orchestrator.calls[2] == ("control", "回传画册图片")
+    assert any(payload["body"]["stream"]["content"].startswith("已进入画册自动落地流程") for payload in ws.payloads if payload["cmd"] == "aibot_respond_msg" and payload["body"].get("msgtype") == "stream")
+    assert any(
+        payload["body"]["stream"].get("msg_item")
+        and payload["body"]["stream"]["msg_item"][0]["msgtype"] == "image"
+        for payload in ws.payloads
+    )
+
+
+def test_message_dispatcher_brochure_internal_delegate_forwards_pending_interaction():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    class BrochureOrchestrator(BaseOrchestrator):
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    class CodexDelegateOrchestrator(BaseOrchestrator):
+        def __init__(self):
+            self.interactions = []
+
+        def get_runtime_session_key(
+            self,
+            user_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+        ) -> str:
+            return f"delegate::{session_key or user_id}"
+
+        def has_pending_interaction(self, session_key: str) -> bool:
+            return session_key == "delegate::alice"
+
+        async def handle_interaction_text(self, session_key: str, text: str):
+            self.interactions.append((session_key, text))
+            return {"submitted": True, "ack": "已提交给后台画册任务"}
+
+        async def handle_text_message(
+            self,
+            user_id: str,
+            message: str,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+            **kwargs,
+        ) -> str:
+            return ""
+
+        async def handle_multimodal_message(
+            self,
+            user_id: str,
+            content_blocks,
+            stream_id: str,
+            session_key: str = "",
+            log_context: dict = None,
+            on_stream_delta=None,
+        ) -> str:
+            return ""
+
+    brochure_config = BotConfig(
+        bot_key="brochure_bot",
+        bot_id="bot_brochure",
+        secret="secret_brochure",
+        bot_type="gemini",
+        name="产品画册",
+        description="产品画册策划与文案机器人",
+        provider_config={
+            "enable_brochure_internal_delegate": True,
+            "delegate_execution_bot_key": "cx_bot",
+        },
+    )
+    codex_config = BotConfig(
+        bot_key="cx_bot",
+        bot_id="bot_cx",
+        secret="secret_cx",
+        bot_type="codex_cli",
+        working_dir="C:/next",
+    )
+    delegate_orchestrator = CodexDelegateOrchestrator()
+    delegate_manager = BotDelegateManager(
+        {"brochure_bot": brochure_config, "cx_bot": codex_config},
+        {"cx_bot": delegate_orchestrator},
+    )
+    ws = DummyWs()
+    dispatcher = MessageDispatcher(
+        ws,
+        brochure_config,
+        orchestrator=BrochureOrchestrator(),
+        delegate_manager=delegate_manager,
+    )
+
+    asyncio.run(
+        dispatcher._handle_text(
+            "req_delegate_interaction",
+            {"msgtype": "text", "text": {"content": "同意，继续执行"}},
+            "alice",
+            "alice",
+            "single",
+        )
+    )
+
+    assert delegate_orchestrator.interactions == [("delegate::alice", "同意，继续执行")]
+    payload = ws.payloads[-1]
+    assert payload["cmd"] == "aibot_respond_msg"
+    assert payload["body"]["stream"]["content"] == "已提交给后台画册任务"
 
 
 def test_handle_text_message_rewrites_quoted_development_handoff_before_codex_turn():
