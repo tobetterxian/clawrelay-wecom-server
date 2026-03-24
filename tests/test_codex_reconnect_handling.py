@@ -700,6 +700,107 @@ def test_message_dispatcher_stream_reply_failure_marks_task_without_crashing():
         registry.forget(task_key)
 
 
+def test_message_dispatcher_final_stream_update_wins_over_pending_throttled_update():
+    from src.transport import message_dispatcher as dispatcher_module
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    async def run_flow(dispatcher: MessageDispatcher, ws: DummyWs):
+        callback = dispatcher._make_stream_delta_callback(
+            {"req_id": "req_race", "stream_id": "stream_race", "prefix": ""},
+            task_key="",
+        )
+        await callback("处理中", False)
+        await callback("处理中\n\n更多进度", False)
+        await callback("已完成", True)
+        await asyncio.sleep(0.1)
+        return list(ws.payloads)
+
+    original_interval = dispatcher_module.STREAM_THROTTLE_INTERVAL
+    dispatcher_module.STREAM_THROTTLE_INTERVAL = 0.05
+    try:
+        with TemporaryDirectory() as tmpdir:
+            working_dir = Path(tmpdir) / "project"
+            working_dir.mkdir()
+            orchestrator = CodexCliOrchestrator(
+                bot_key="cx_bot",
+                working_dir=str(working_dir),
+            )
+            ws = DummyWs()
+            dispatcher = MessageDispatcher(
+                ws,
+                BotConfig(
+                    bot_key="cx_bot",
+                    bot_id="test_bot_id",
+                    secret="test_secret",
+                    bot_type="codex_cli",
+                ),
+                orchestrator=orchestrator,
+            )
+
+            payloads = asyncio.run(run_flow(dispatcher, ws))
+
+            assert len(payloads) == 2
+            assert payloads[-1]["body"]["stream"]["finish"] is True
+            assert payloads[-1]["body"]["stream"]["content"] == "已完成"
+    finally:
+        dispatcher_module.STREAM_THROTTLE_INTERVAL = original_interval
+
+
+def test_message_dispatcher_ignores_late_running_status_after_finish():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    async def run_flow(dispatcher: MessageDispatcher, ws: DummyWs):
+        callback = dispatcher._make_stream_delta_callback(
+            {"req_id": "req_keepalive", "stream_id": "stream_keepalive", "prefix": ""},
+            task_key="",
+        )
+        await callback("🤖 Codex 正在处理...\n⏳ 状态：仍在处理中（已运行 20 秒；可回复“停止”）", False)
+        await callback("✅ Codex 已完成\n✅ 状态：已完成（总耗时 42 秒）", True)
+        await callback("🤖 Codex 正在处理...\n⏳ 状态：仍在处理中（已运行 43 秒；可回复“停止”）", False)
+        return list(ws.payloads)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+
+        payloads = asyncio.run(run_flow(dispatcher, ws))
+
+        assert len(payloads) == 2
+        assert payloads[0]["body"]["stream"]["finish"] is False
+        assert "已运行 20 秒" in payloads[0]["body"]["stream"]["content"]
+        assert payloads[1]["body"]["stream"]["finish"] is True
+        assert "总耗时 42 秒" in payloads[1]["body"]["stream"]["content"]
+
+
 def test_message_dispatcher_final_stream_failure_uses_proactive_reply_fallback():
     from src.core.task_registry import get_task_registry
     from src.transport.message_dispatcher import MessageDispatcher

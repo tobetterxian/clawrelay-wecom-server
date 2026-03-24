@@ -2892,6 +2892,7 @@ class MessageDispatcher:
             'last_pushed_text': "",
             'last_push_time': 0.0,
             'throttle_task': None,
+            'finished': False,
         }
         push_lock = asyncio.Lock()
 
@@ -2941,24 +2942,34 @@ class MessageDispatcher:
                 )
             if finish:
                 # 完成时立即推送最终内容
+                state['finished'] = True
                 if state['throttle_task'] and not state['throttle_task'].done():
                     state['throttle_task'].cancel()
+                    try:
+                        await state['throttle_task']
+                    except asyncio.CancelledError:
+                        pass
+                state['throttle_task'] = None
                 target_req_id = (reply_state or {}).get("req_id", "")
                 target_stream_id = (reply_state or {}).get("stream_id", "")
                 if not target_req_id or not target_stream_id:
                     logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过最终推送", self.bot_key)
                     return
                 final_content = self._compose_stream_content(reply_state, accumulated_text)
-                sent = await self._reply_stream(
-                    target_req_id,
-                    target_stream_id,
-                    final_content,
-                    finish=True,
-                )
+                async with push_lock:
+                    sent = await self._reply_stream(
+                        target_req_id,
+                        target_stream_id,
+                        final_content,
+                        finish=True,
+                    )
                 if not sent:
                     _mark_delivery_failed()
                     await _maybe_send_proactive_reply(final_content)
                 state['last_pushed_text'] = accumulated_text
+                return
+
+            if state['finished']:
                 return
 
             # 节流
@@ -2986,8 +2997,13 @@ class MessageDispatcher:
                 captured_text = accumulated_text
 
                 async def delayed_push():
-                    await asyncio.sleep(STREAM_THROTTLE_INTERVAL - elapsed)
+                    try:
+                        await asyncio.sleep(STREAM_THROTTLE_INTERVAL - elapsed)
+                    except asyncio.CancelledError:
+                        return
                     async with push_lock:
+                        if state['finished']:
+                            return
                         if captured_text != state['last_pushed_text']:
                             target_req_id = (reply_state or {}).get("req_id", "")
                             target_stream_id = (reply_state or {}).get("stream_id", "")
