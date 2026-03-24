@@ -2,10 +2,10 @@ import logging
 import subprocess
 import asyncio
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import os
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -29,6 +29,10 @@ from src.core.json_state_store import JsonStateStore
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.project_deployment_manager import ProjectDeploymentManager
 from src.core.project_registry import ProjectRegistry
+from src.utils.path_utils import (
+    resolve_local_path,
+    resolve_workspace_root_with_legacy_fallback,
+)
 from src.core.workspace_init_modes import (
     WORKSPACE_INIT_EMPTY,
     WORKSPACE_INIT_GIT_REMOTE,
@@ -54,11 +58,133 @@ def test_detects_interrupted_turn_message():
     assert not CodexCliOrchestrator._is_interrupted_turn_message("Reconnecting... 1/5")
 
 
+def test_detects_context_window_message():
+    assert CodexCliOrchestrator._is_context_window_message(
+        "Codex ran out of room in the model's context window."
+    )
+    assert CodexCliOrchestrator._is_context_window_message("ContextWindowExceeded")
+    assert not CodexCliOrchestrator._is_context_window_message("Process exited")
+
+
+def test_detects_inferred_context_window_exhaustion_from_usage_payload():
+    assert CodexCliOrchestrator._looks_like_context_window_exhausted(
+        {
+            "context_estimated_remaining_percent": 0.0,
+            "context_estimated_used_tokens": 258400,
+            "context_model_window_tokens": 258400,
+        }
+    )
+    assert CodexCliOrchestrator._looks_like_context_window_exhausted(
+        {
+            "context_estimated_used_tokens": 258400,
+            "context_model_window_tokens": 258400,
+        }
+    )
+    assert not CodexCliOrchestrator._looks_like_context_window_exhausted(
+        {
+            "context_estimated_remaining_percent": 12.5,
+            "context_estimated_used_tokens": 220000,
+            "context_model_window_tokens": 258400,
+        }
+    )
+
+
+def test_resolve_local_path_supports_windows_absolute_path():
+    resolved = resolve_local_path("C:/Users/Administrator/.codex")
+
+    if os.name == "nt":
+        assert str(resolved) == "C:\\Users\\Administrator\\.codex"
+    else:
+        assert str(resolved) == "/mnt/c/Users/Administrator/.codex"
+
+
+def test_resolve_workspace_root_with_legacy_fallback_prefers_legacy_state():
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        legacy_root = working_dir / ".codex_data"
+        configured_root = working_dir / "codex-workspaces"
+        (legacy_root / "state").mkdir(parents=True)
+        (configured_root / "state").mkdir(parents=True)
+        (legacy_root / "state" / "projects.json").write_text(
+            '[{"project_id":"proj_1"}]',
+            encoding="utf-8",
+        )
+        (configured_root / "state" / "sessions.json").write_text("[]", encoding="utf-8")
+
+        resolved_root, source = resolve_workspace_root_with_legacy_fallback(
+            working_dir=str(working_dir),
+            configured_root=str(configured_root),
+        )
+
+        assert resolved_root == legacy_root.resolve()
+        assert source == "legacy_fallback"
+
+
 def test_normalizes_transient_reconnect_error_message():
     assert (
         CodexCliOrchestrator._normalize_codex_error_message("Reconnecting... 1/5")
         == "[CodexCLI] Reconnecting in progress"
     )
+
+
+def test_codex_app_session_does_not_override_config_toml_in_thread_params():
+    from src.adapters.codex_app_server_adapter import CodexAppServerSession
+
+    session = CodexAppServerSession(
+        model="gpt-5.3-codex",
+        working_dir=".",
+        sandbox_mode="workspace-write",
+        approval_policy="never",
+        reasoning_effort="high",
+    )
+
+    params = session._build_thread_params("developer instructions")
+
+    assert params == {
+        "cwd": str(resolve_local_path(".")),
+        "developerInstructions": "developer instructions",
+    }
+
+
+def test_codex_app_session_does_not_override_config_toml_in_turn_params():
+    from src.adapters.codex_app_server_adapter import CodexAppServerSession
+
+    session = CodexAppServerSession(
+        model="gpt-5.3-codex",
+        working_dir=".",
+        sandbox_mode="workspace-write",
+        approval_policy="never",
+        reasoning_effort="high",
+        add_dirs=["./tmp"],
+    )
+    session.thread_id = "thread_1"
+
+    params = session._build_turn_params([{"type": "text", "text": "hello"}])
+
+    assert params == {
+        "threadId": "thread_1",
+        "input": [{"type": "text", "text": "hello"}],
+    }
+
+
+def test_codex_app_session_applies_runtime_config_from_thread_start_response():
+    from src.adapters.codex_app_server_adapter import CodexAppServerSession
+
+    session = CodexAppServerSession(model="", working_dir=".")
+    session._apply_thread_configuration(
+        {
+            "model": "gpt-5.3-codex",
+            "reasoningEffort": "high",
+            "cwd": "C:\\next\\workspace",
+            "modelProvider": "openai",
+        }
+    )
+
+    assert session.active_model == "gpt-5.3-codex"
+    assert session.active_reasoning_effort == "high"
+    assert session.active_cwd == "C:\\next\\workspace"
+    assert session.active_model_provider == "openai"
 
 
 def test_friendly_error_maps_reconnect_messages():
@@ -124,6 +250,22 @@ def test_friendly_error_maps_codex_common_failures():
     assert "建议下一步命令：" in _CODEX_CLI_CONTEXT_WINDOW_HINT
     assert "`重置`" in _CODEX_CLI_CONTEXT_WINDOW_HINT
     assert "建议下一步命令：" in _CODEX_CLI_STALE_THREAD_HINT
+
+
+def test_friendly_error_maps_codex_upstream_stream_disconnect():
+    from src.transport.message_dispatcher import _friendly_error
+
+    reply = _friendly_error(
+        Exception(
+            "stream disconnected before completion: "
+            "error sending request for url (https://aixj.vip/responses)"
+        )
+    )
+
+    assert "本地 Codex CLI 与模型服务的响应流中断。" in reply
+    assert "https://aixj.vip/responses" in reply
+    assert "原始异常：" in reply
+    assert "`当前任务`" in reply
 
 
 def test_friendly_error_maps_provider_configuration_failures():
@@ -218,6 +360,7 @@ def test_friendly_error_fallback_includes_next_step_commands():
     reply = _friendly_error(Exception("some unknown internal error"))
 
     assert "抱歉，处理出错，请稍后重试。" in reply
+    assert "原始异常：some unknown internal error" in reply
     assert "建议下一步命令：" in reply
     assert "`当前任务`" in reply
     assert "`重置`" in reply
@@ -230,6 +373,88 @@ def test_build_interrupted_turn_resume_prompt_mentions_continue_without_repeatin
     assert "继续完成同一个任务" in prompt
     assert "不要重复已经完成的修改" in prompt
     assert "继续开发企业官网" in prompt
+
+
+def test_build_context_window_resume_prompt_mentions_workspace_and_partial_output():
+    prompt = CodexCliOrchestrator._build_context_window_resume_prompt(
+        original_message="继续开发企业官网",
+        partial_response_text="已完成首页布局，接下来补 API 对接。",
+        commands_seen=["rg --files", "pytest -q"],
+        runtime_context={
+            "project": {"name": "corp-site"},
+            "working_dir": "/tmp/corp-site",
+        },
+        resume_attempt=2,
+    )
+
+    assert "上下文过长已自动切换到新线程" in prompt
+    assert "corp-site" in prompt
+    assert "/tmp/corp-site" in prompt
+    assert "rg --files, pytest -q" in prompt
+    assert "已完成首页布局" in prompt
+    assert "这是第 2 次自动续跑" in prompt
+
+
+def test_build_context_window_estimate_uses_last_usage_for_context_window():
+    from src.adapters.codex_app_server_adapter import (
+        CodexTokenUsageBreakdown,
+        CodexTokenUsageUpdate,
+    )
+
+    event = CodexTokenUsageUpdate(
+        thread_id="thread_1",
+        turn_id="turn_1",
+        last=CodexTokenUsageBreakdown(
+            total_tokens=5000,
+            input_tokens=3500,
+            cached_input_tokens=1000,
+            output_tokens=500,
+            reasoning_output_tokens=200,
+        ),
+        total=CodexTokenUsageBreakdown(
+            total_tokens=45000,
+            input_tokens=28000,
+            cached_input_tokens=12000,
+            output_tokens=5000,
+            reasoning_output_tokens=1800,
+        ),
+        model_context_window=100000,
+    )
+
+    estimate = CodexCliOrchestrator._build_context_window_estimate(event)
+
+    assert estimate["context_estimated_used_tokens"] == 5000
+    assert estimate["context_estimated_remaining_tokens"] == 95000
+    assert round(estimate["context_estimated_used_percent"], 1) == 0.0
+    assert round(estimate["context_estimated_remaining_percent"], 1) == 100.0
+    assert estimate["context_cumulative_total_tokens"] == 45000
+    assert estimate["context_last_total_tokens"] == 5000
+    assert estimate["context_estimate_source"] == "last.totalTokens"
+
+
+def test_build_runtime_status_strip_uses_model_reasoning_and_project_root():
+    orchestrator = CodexCliOrchestrator(bot_key="cx_bot", working_dir="C:/next")
+
+    line = orchestrator._build_runtime_status_strip(
+        {
+            "working_dir": "C:\\next\\codex-workspaces\\projects\\proj_1\\workspaces\\ws_1",
+            "project": {"project_root": "C:\\next\\codex-workspaces\\projects\\proj_1"},
+        },
+        {
+            "status_model": "gpt-5.3-codex",
+            "status_reasoning_effort": "high",
+            "status_working_dir": "C:\\next\\codex-workspaces\\projects\\proj_1\\workspaces\\ws_1",
+            "status_project_root": "C:\\next\\codex-workspaces\\projects\\proj_1",
+            "context_estimated_remaining_percent": 42.5,
+            "context_model_window_tokens": 272000,
+        },
+    )
+
+    assert line == (
+        "gpt-5.3-codex/high · Fast on · ≈42.5% left · "
+        "C:\\next\\codex-workspaces\\projects\\proj_1\\workspaces\\ws_1 · "
+        "C:\\next\\codex-workspaces\\projects\\proj_1 · 272K w"
+    )
 
 
 def test_codex_app_session_raises_when_stream_ends_before_turn_completed():
@@ -256,6 +481,41 @@ def test_codex_app_session_raises_when_stream_ends_before_turn_completed():
 
     message = asyncio.run(run_flow())
     assert "Turn interrupted before completion" in message
+
+
+def test_codex_app_session_emits_thread_compacted_event():
+    from src.adapters.codex_app_server_adapter import CodexAppServerSession, CodexContextCompaction
+
+    async def run_flow():
+        session = CodexAppServerSession(model="", working_dir=".")
+        session.thread_id = "thread_1"
+        session.process = SimpleNamespace(returncode=0)
+
+        async def fake_rpc_request(method: str, params: dict):
+            assert method == "turn/start"
+            return {"turn": {"id": "turn_1"}}
+
+        session._rpc_request = fake_rpc_request
+        await session._events.put(
+            {
+                "method": "thread/compacted",
+                "params": {"threadId": "thread_1", "turnId": "turn_1"},
+            }
+        )
+        await session._events.put({"method": "turn/completed", "params": {"turn": {"id": "turn_1"}}})
+
+        events = []
+        async for event in session.stream_turn([{"type": "text", "text": "hello"}]):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run_flow())
+
+    assert len(events) == 1
+    assert isinstance(events[0], CodexContextCompaction)
+    assert events[0].thread_id == "thread_1"
+    assert events[0].turn_id == "turn_1"
+    assert events[0].source == "thread"
 
 
 def test_runtime_elapsed_seconds_uses_whole_task_clock():
@@ -5055,6 +5315,56 @@ def test_push_to_github_rebinds_to_configured_owner():
         assert "检测到当前远程账号为 other，已切换为统一 GitHub 账号 kangaroo117" in push_reply
 
 
+def test_commit_and_push_treats_matching_remote_head_as_success():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+
+        manager = ProjectDeploymentManager(repo_root=str(workspace))
+
+        def fake_run_git_process(cwd: Path, *args: str):
+            command = tuple(args)
+            if command == ("remote", "get-url", "origin"):
+                return subprocess.CompletedProcess(args, 0, stdout="git@github.com:kangaroo117/xxcb.git\n", stderr="")
+            if command == ("symbolic-ref", "--short", "HEAD"):
+                return subprocess.CompletedProcess(args, 0, stdout="main\n", stderr="")
+            if command == ("status", "--porcelain"):
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            if command == ("rev-parse", "--verify", "HEAD"):
+                return subprocess.CompletedProcess(args, 0, stdout="abcdef1234567890\n", stderr="")
+            if command == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(args, 0, stdout="abcdef1234567890\n", stderr="")
+            if command == ("push", "-u", "origin", "main"):
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    stdout="",
+                    stderr="branch 'main' set up to track 'origin/main'.\n",
+                )
+            if command == ("ls-remote", "origin", "refs/heads/main"):
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout="abcdef1234567890\trefs/heads/main\n",
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected git command: {command}")
+
+        manager._run_git_process = fake_run_git_process
+        manager._ensure_git_repository = lambda root: False
+        manager._is_git_repository = lambda root: True
+
+        result = manager.commit_and_push_current_branch(
+            workspace_path=str(workspace),
+            commit_message="ci: enable Cloudflare Pages deploy for xxcb",
+            remote_name="origin",
+        )
+
+        assert result.branch_name == "main"
+        assert result.head_sha == "abcdef1234567890"
+        assert result.remote_url == "git@github.com:kangaroo117/xxcb.git"
+
+
 def test_scaffold_cloudflare_pages_writes_workflow():
     with TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir) / "workspace"
@@ -5114,6 +5424,30 @@ def test_scaffold_cloudflare_pages_infers_single_subdirectory_node_project():
         assert "Cloudflare Pages build directory not found: xiaodaka/dist" in content
         assert "Cloudflare Pages build directory is empty: xiaodaka/dist" in content
         assert "pages deploy xiaodaka/dist --project-name=hello-pages" in content
+
+
+def test_scaffold_cloudflare_pages_uses_root_for_static_site():
+    with TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
+        (workspace / "index.html").write_text("<!doctype html><title>Hello</title>", encoding="utf-8")
+
+        manager = ProjectDeploymentManager()
+        result = manager.scaffold_cloudflare_pages(
+            str(workspace),
+            pages_project_name="Hello Pages",
+            build_dir="dist",
+        )
+
+        workflow_path = workspace / ".github" / "workflows" / "deploy-cloudflare-pages.yml"
+        content = workflow_path.read_text(encoding="utf-8")
+
+        assert result.app_dir == "."
+        assert result.build_dir == "."
+        assert "检测到根目录存在 index.html" in "\n".join(result.warnings)
+        assert "Cloudflare Pages build directory not found: ." in content
+        assert "Cloudflare Pages build directory is empty: ." in content
+        assert "pages deploy . --project-name=hello-pages" in content
 
 
 def test_scaffold_cloudflare_worker_writes_workflow_and_wrangler():

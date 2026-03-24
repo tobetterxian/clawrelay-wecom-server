@@ -90,6 +90,7 @@ class GitPushResult:
     remote_name: str
     remote_url: str
     branch_name: str
+    head_sha: str = ""
     repo_initialized: bool = False
     had_changes: bool = False
     commit_created: bool = False
@@ -539,7 +540,11 @@ class ProjectDeploymentManager:
         result.repo_initialized = repo_initialized
         return result
 
-    def probe_git_remote(self, remote_url: str) -> GitRemoteProbeResult:
+    def probe_git_remote(
+        self,
+        remote_url: str,
+        workspace_path: str | Path | None = None,
+    ) -> GitRemoteProbeResult:
         normalized_remote_url = str(remote_url or "").strip()
         if not normalized_remote_url:
             return GitRemoteProbeResult(
@@ -549,7 +554,8 @@ class ProjectDeploymentManager:
                 error_message="远程仓库地址不能为空",
             )
 
-        completed = self._run_git_process(self.repo_root, "ls-remote", normalized_remote_url, "HEAD")
+        probe_root = self._resolve_workspace(workspace_path) if workspace_path else self.repo_root
+        completed = self._run_git_process(probe_root, "ls-remote", normalized_remote_url, "HEAD")
         if completed is None:
             return GitRemoteProbeResult(
                 remote_url=normalized_remote_url,
@@ -608,12 +614,33 @@ class ProjectDeploymentManager:
         if not self._has_head_commit(root):
             raise RuntimeError("当前工作区还没有可推送的提交，请先创建或修改文件后再推送")
 
-        push_output = self._run_git(root, "push", "-u", normalized_remote_name, branch_name)
+        head_sha = self._read_git_head_sha(root)
+        completed = self._run_git_process(root, "push", "-u", normalized_remote_name, branch_name)
+        if completed is None:
+            raise RuntimeError("未找到 git 命令")
+        push_output = (completed.stdout or completed.stderr or "").strip()
+        if completed.returncode != 0:
+            remote_head_sha = self._read_remote_ref_sha(
+                root,
+                normalized_remote_name,
+                f"refs/heads/{branch_name}",
+            )
+            if remote_head_sha and remote_head_sha == head_sha:
+                logger.warning(
+                    "[Deploy] git push 返回非零，但远端分支已更新到目标提交，按成功处理: remote=%s branch=%s head=%s output=%s",
+                    normalized_remote_name,
+                    branch_name,
+                    head_sha[:7] if head_sha else "-",
+                    push_output or "-",
+                )
+            else:
+                raise RuntimeError(push_output or f"git push -u {normalized_remote_name} {branch_name} failed")
         return GitPushResult(
             workspace_path=str(root),
             remote_name=normalized_remote_name,
             remote_url=remote_url,
             branch_name=branch_name,
+            head_sha=head_sha,
             repo_initialized=repo_initialized,
             had_changes=had_changes,
             commit_created=commit_created,
@@ -733,6 +760,13 @@ class ProjectDeploymentManager:
         if (workspace_root / "package.json").exists():
             return ".", normalized_build_dir, []
 
+        if normalized_build_dir == "dist" and self._looks_like_static_site_root(workspace_root):
+            return (
+                ".",
+                ".",
+                ["检测到根目录存在 index.html，已按静态站点自动使用构建目录 ."],
+            )
+
         app_dir_candidates = self._discover_node_project_dirs(workspace_root)
         if len(app_dir_candidates) != 1:
             return ".", normalized_build_dir, []
@@ -765,6 +799,15 @@ class ProjectDeploymentManager:
             candidates.add("/".join(parent_parts))
         return sorted(candidates)
 
+    @staticmethod
+    def _looks_like_static_site_root(workspace_root: Path) -> bool:
+        index_path = workspace_root / "index.html"
+        if not index_path.exists() or not index_path.is_file():
+            return False
+        # When the root itself is a plain static site, defaulting to `dist`
+        # breaks one-click deploy. Prefer publishing the repo root directly.
+        return True
+
     def _run_git(self, cwd: Path, *args: str) -> str:
         completed = self._run_git_process(cwd, *args)
         if completed is None:
@@ -786,6 +829,21 @@ class ProjectDeploymentManager:
         if completed is None:
             return False
         return completed.returncode == 0
+
+    def _read_git_head_sha(self, cwd: Path) -> str:
+        completed = self._run_git_process(cwd, "rev-parse", "HEAD")
+        if completed is None or completed.returncode != 0:
+            return ""
+        return str(completed.stdout or "").strip()
+
+    def _read_remote_ref_sha(self, cwd: Path, remote_name: str, ref_name: str) -> str:
+        completed = self._run_git_process(cwd, "ls-remote", remote_name, ref_name)
+        if completed is None or completed.returncode != 0:
+            return ""
+        first_line = str(completed.stdout or "").strip().splitlines()
+        if not first_line:
+            return ""
+        return first_line[0].split()[0].strip() if first_line[0].split() else ""
 
     def _has_uncommitted_changes(self, cwd: Path) -> bool:
         completed = self._run_git_process(cwd, "status", "--porcelain")

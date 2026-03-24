@@ -260,6 +260,30 @@ _GEMINI_PAYLOAD_HINT = _build_error_hint(
         "`重试` 同类请求：修复配置后重新发送原需求",
     ],
 )
+
+
+def _format_codex_cli_upstream_stream_error_hint(message: str) -> str:
+    raw_message = str(message or "").strip()
+    normalized = " ".join(raw_message.split())
+    url_match = re.search(r"url\s*\((https?://[^)]+)\)", normalized, re.IGNORECASE)
+    target_url = url_match.group(1).strip() if url_match else ""
+    reason = "模型服务的响应流在返回完成结果前中断。"
+    if target_url:
+        reason += f"\n目标地址：{target_url}"
+    reason += f"\n原始异常：{normalized}"
+    return _build_error_hint(
+        "本地 Codex CLI 与模型服务的响应流中断。",
+        reason,
+        [
+            "检查该上游接口地址是否可访问、是否偶发断连，或是否被代理/WAF 中断",
+            "检查 Codex 所用模型服务是否稳定，尤其是长任务期间的流式响应",
+            "如问题持续，请查看服务日志中的完整异常栈定位上游网络问题",
+        ],
+        [
+            "`当前任务`：确认后台任务是否已经结束",
+            "`重试` 同类请求：网络恢复后重新发送需求",
+        ],
+    )
 _GEMINI_NETWORK_HINT = _build_error_hint(
     "Gemini 服务暂时不可达。",
     "网络异常、远端服务中断，或连接被重置。",
@@ -329,6 +353,16 @@ _HELP_MENU_TRIGGER_RE = re.compile(r"^\s*1[.、:：)]?\s*$")
 _LEADING_GROUP_MENTION_RE = re.compile(r"^(?:(?:<@[^>]+>|@[^\s@]+)\s+)+")
 _QUOTE_HINT_TOKENS = ("quote", "quoted", "reply", "refer", "reference", "citation")
 
+
+def _summarize_internal_error_message(message: str, limit: int = 280) -> str:
+    normalized = " ".join(str(message or "").split()).strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(limit - 1, 0)].rstrip() + "…"
+
+
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
     msg = str(e or "")
@@ -348,6 +382,8 @@ def _friendly_error(e: Exception) -> str:
         return _CODEX_CLI_TRUSTED_DIRECTORY_HINT
     if "stream did not contain valid utf-8" in lowered and "config.toml" in lowered:
         return _CODEX_CLI_CONFIG_UTF8_HINT
+    if "stream disconnected before completion" in lowered and "error sending request for url" in lowered:
+        return _format_codex_cli_upstream_stream_error_hint(msg)
     if "[winerror 193]" in lowered:
         return _CODEX_CLI_WINDOWS_BINARY_HINT
     if "no rollout found for thread id" in lowered:
@@ -378,9 +414,13 @@ def _friendly_error(e: Exception) -> str:
         return _GEMINI_MODEL_NOT_FOUND_HINT
     if "model_not_found" in lowered and ("无可用渠道" in msg or "distributor" in lowered):
         return _MODEL_CHANNEL_UNAVAILABLE_HINT
+    summarized_error = _summarize_internal_error_message(msg)
+    reason = "暂未识别的内部异常。"
+    if summarized_error:
+        reason += f"\n原始异常：{summarized_error}"
     return _build_error_hint(
         "抱歉，处理出错，请稍后重试。",
-        "暂未识别的内部异常。",
+        reason,
         [
             "如再次出现，请查看服务日志中的原始报错",
             "若问题持续，请联系管理员排查服务环境与配置",
@@ -393,6 +433,7 @@ def _friendly_error(e: Exception) -> str:
 
 # 节流间隔(秒)
 STREAM_THROTTLE_INTERVAL = 0.3
+STREAM_FINAL_CONFIRM_DELAY = 0.25
 RUNNING_TASK_SILENT_WARNING_SECONDS = 90
 
 
@@ -1254,6 +1295,84 @@ class MessageDispatcher:
             if item:
                 lines.append(item)
 
+    @staticmethod
+    def _format_token_count(value: object) -> str:
+        try:
+            normalized = max(int(value), 0)
+        except (TypeError, ValueError):
+            normalized = 0
+        return f"{normalized:,}"
+
+    @classmethod
+    def _context_window_status_lines(cls, payload: dict) -> list[str]:
+        data = dict(payload or {})
+        used_tokens = data.get("context_estimated_used_tokens")
+        used_percent = data.get("context_estimated_used_percent")
+        remaining_percent = data.get("context_estimated_remaining_percent")
+        window_tokens = data.get("context_model_window_tokens")
+        lines: list[str] = []
+        if used_tokens is not None:
+            if used_percent is not None and remaining_percent is not None and window_tokens:
+                lines.append(
+                    "上下文估算：已用约 "
+                    f"{used_percent:.1f}%，剩余约 {remaining_percent:.1f}%"
+                    f"（{cls._format_token_count(used_tokens)} / {cls._format_token_count(window_tokens)} tokens）"
+                )
+            else:
+                lines.append(f"上下文估算：累计约 {cls._format_token_count(used_tokens)} tokens")
+        compaction_count = data.get("context_compaction_count")
+        try:
+            normalized_compaction_count = max(int(compaction_count), 0)
+        except (TypeError, ValueError):
+            normalized_compaction_count = 0
+        if normalized_compaction_count > 0:
+            lines.append(f"上下文压缩：已触发 {normalized_compaction_count} 次")
+        auto_resume_count = data.get("context_auto_resume_count")
+        try:
+            normalized_auto_resume_count = max(int(auto_resume_count), 0)
+        except (TypeError, ValueError):
+            normalized_auto_resume_count = 0
+        if normalized_auto_resume_count > 0:
+            lines.append(f"自动续跑：已触发 {normalized_auto_resume_count} 次")
+        return lines
+
+    @classmethod
+    def _task_runtime_status_strip(cls, payload: dict) -> str:
+        data = dict(payload or {})
+        model = str(data.get("status_model") or "").strip()
+        if not model:
+            return ""
+        effort = str(data.get("status_reasoning_effort") or "").strip()
+        model_with_reasoning = model if not effort else f"{model}/{effort}"
+        fast_mode = str(data.get("status_fast_mode") or "Fast on").strip() or "Fast on"
+        working_dir = str(data.get("status_working_dir") or "").strip() or "-"
+        project_root = str(data.get("status_project_root") or "").strip() or "-"
+        remaining_percent = data.get("context_estimated_remaining_percent")
+        if remaining_percent is None:
+            left_label = "ctx pending"
+        else:
+            left_label = f"≈{float(remaining_percent):.1f}% left"
+        window_tokens = data.get("context_model_window_tokens")
+        try:
+            normalized_window = max(int(window_tokens), 0)
+        except (TypeError, ValueError):
+            normalized_window = 0
+        if normalized_window <= 0:
+            window_label = "ctx ?"
+        elif normalized_window >= 1_000_000:
+            window_label = f"{normalized_window / 1_000_000:.1f}M w"
+        else:
+            window_label = f"{int(round(normalized_window / 1000.0))}K w"
+        parts = []
+        for item in [model_with_reasoning, fast_mode, left_label, working_dir, project_root, window_label]:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            if parts and parts[-1] == value:
+                continue
+            parts.append(value)
+        return " · ".join(parts)
+
     def _task_registry_key(self, runtime_session_key: str) -> str:
         return f"{self.bot_key}:{runtime_session_key}"
 
@@ -1286,6 +1405,10 @@ class MessageDispatcher:
                 status_line = f"最近一次任务已于 {self._format_elapsed_duration(now - finished_at)} 前完成。"
 
             lines = ["当前没有正在运行的任务。", status_line]
+            runtime_strip = self._task_runtime_status_strip(recent)
+            if runtime_strip:
+                lines.append(runtime_strip)
+            lines.extend(self._context_window_status_lines(recent))
             if recent.get("proactive_reply_sent"):
                 lines.append("提示：原回复通道异常，系统已通过主动回复补发结果。")
             elif reply_delivery_failed:
@@ -1319,10 +1442,27 @@ class MessageDispatcher:
             return "\n".join(lines)
 
         now = time.time()
+        now_monotonic = time.monotonic()
         started_at = float((extra or {}).get("started_at") or now)
+        started_at_monotonic = float((extra or {}).get("started_at_monotonic") or 0.0)
         last_activity_at = float((extra or {}).get("last_activity_at") or started_at)
-        running_seconds = max(now - started_at, 0)
-        silent_seconds = max(now - last_activity_at, 0)
+        last_activity_at_monotonic = float((extra or {}).get("last_activity_at_monotonic") or 0.0)
+        last_status_render_at = float((extra or {}).get("last_status_render_at") or last_activity_at)
+        last_status_render_at_monotonic = float(
+            (extra or {}).get("last_status_render_at_monotonic") or 0.0
+        )
+        if started_at_monotonic > 0:
+            running_seconds = max(now_monotonic - started_at_monotonic, 0)
+        else:
+            running_seconds = max(now - started_at, 0)
+        if last_activity_at_monotonic > 0:
+            silent_seconds = max(now_monotonic - last_activity_at_monotonic, 0)
+        else:
+            silent_seconds = max(now - last_activity_at, 0)
+        if last_status_render_at_monotonic > 0:
+            render_silent_seconds = max(now_monotonic - last_status_render_at_monotonic, 0)
+        else:
+            render_silent_seconds = max(now - last_status_render_at, 0)
         preview = self._summarize_stream_preview((extra or {}).get("last_preview") or "")
 
         stale_after_seconds = RUNNING_TASK_SILENT_WARNING_SECONDS
@@ -1339,11 +1479,15 @@ class MessageDispatcher:
             )
 
         lines = ["当前任务状态"]
+        runtime_strip = self._task_runtime_status_strip(extra)
+        if runtime_strip:
+            lines.append(runtime_strip)
+        freshness_seconds = min(silent_seconds, render_silent_seconds)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
             lines.append("状态：等待你的确认或补充信息")
             lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
             lines.append("下一步：请直接回复答案；如需取消请回复“停止”")
-        elif silent_seconds >= stale_after_seconds:
+        elif freshness_seconds >= stale_after_seconds:
             lines.append(f"状态：疑似卡住（已静默 {self._format_elapsed_duration(silent_seconds)}）")
             lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
             lines.append("建议：可回复“停止”后重新发送需求")
@@ -1353,6 +1497,7 @@ class MessageDispatcher:
             lines.append(f"最近进度：{self._format_elapsed_duration(silent_seconds)}前")
             lines.append("如需中断可回复：停止")
 
+        lines.extend(self._context_window_status_lines(extra))
         if preview:
             lines.append(f"最近输出：{preview}")
         return "\n".join(lines)
@@ -2218,7 +2363,13 @@ class MessageDispatcher:
         )
         return True
 
-    async def _handoff_running_reply(self, session_key: str, req_id: str, ack: str) -> bool:
+    async def _handoff_running_reply(
+        self,
+        session_key: str,
+        req_id: str,
+        ack: str,
+        live_status_mode: bool = False,
+    ) -> bool:
         from src.core.task_registry import get_task_registry
 
         registry = get_task_registry()
@@ -2244,6 +2395,7 @@ class MessageDispatcher:
             new_stream_id,
             req_id=req_id,
             reply_state=reply_state,
+            status_live_mode=live_status_mode,
         ):
             return False
 
@@ -2372,6 +2524,17 @@ class MessageDispatcher:
             return
 
         if self._is_running_task_status_command(content):
+            handoff_ack = (
+                "⏳ 当前任务状态已切到这里继续显示。\n"
+                "后续运行时间和最新进度会在这条消息里实时更新。"
+            )
+            if await self._handoff_running_reply(
+                runtime_session_key,
+                req_id,
+                handoff_ack,
+                live_status_mode=True,
+            ):
+                return
             await self._reply_text(
                 req_id,
                 self._running_task_status_reply(runtime_session_key),
@@ -2930,9 +3093,12 @@ class MessageDispatcher:
         """创建带节流的on_stream_delta回调"""
         state = {
             'last_pushed_text': "",
+            'last_pushed_content': "",
             'last_push_time': 0.0,
             'throttle_task': None,
             'finished': False,
+            'started_at': time.monotonic(),
+            'auto_handoff_done': False,
         }
         push_lock = asyncio.Lock()
 
@@ -2972,14 +3138,102 @@ class MessageDispatcher:
                 logger.info("[Dispatcher:%s] 已通过主动回复补发最终结果", self.bot_key)
             return sent
 
-        async def on_stream_delta(accumulated_text: str, finish: bool):
+        async def _maybe_send_completion_confirmation(content: str) -> bool:
+            response_url = str((reply_state or {}).get("response_url") or "").strip()
+            if not response_url:
+                return False
+
+            confirmation_text = (
+                "任务已完成；如果上一个进度气泡没有及时刷新，请以本条为准。\n\n"
+                f"{content}"
+            )
+            sent = False
+            try:
+                sent = await ProactiveReplyClient.send_markdown(response_url, confirmation_text)
+            except Exception as e:
+                logger.warning(
+                    "[Dispatcher:%s] 完成确认主动回复失败: err=%s",
+                    self.bot_key,
+                    e,
+                    exc_info=True,
+                )
+                sent = False
+
             if task_key:
                 from src.core.task_registry import get_task_registry
 
-                get_task_registry().touch(
+                get_task_registry().annotate(
                     task_key,
-                    last_preview=self._summarize_stream_preview(accumulated_text),
+                    completion_confirmation_attempted=True,
+                    completion_confirmation_sent=sent,
                 )
+            if sent:
+                logger.info("[Dispatcher:%s] 已主动补发完成确认消息", self.bot_key)
+            return sent
+
+        async def _maybe_auto_handoff_long_running_stream() -> bool:
+            if state['auto_handoff_done'] or state['finished']:
+                return False
+            threshold = float(
+                max(getattr(self.orchestrator, "long_task_keepalive_after_seconds", 0) or 0, 0)
+            )
+            if threshold <= 0:
+                return False
+            if (time.monotonic() - float(state.get('started_at') or 0.0)) < threshold:
+                return False
+
+            target_req_id = str((reply_state or {}).get("req_id") or "")
+            old_stream_id = str((reply_state or {}).get("stream_id") or "")
+            if not target_req_id or not old_stream_id:
+                return False
+
+            handoff_ack = (
+                "⏳ 长任务继续后台执行，后续状态在这条新消息里实时显示。\n"
+                "如需查看最终结果，请留意本条消息后续更新。"
+            )
+            new_stream_id = uuid.uuid4().hex[:12]
+            if task_key:
+                from src.core.task_registry import get_task_registry
+
+                if not get_task_registry().update_stream(
+                    task_key,
+                    new_stream_id,
+                    req_id=target_req_id,
+                    reply_state={
+                        **dict(reply_state or {}),
+                        "req_id": target_req_id,
+                        "stream_id": new_stream_id,
+                        "prefix": handoff_ack,
+                    },
+                    status_live_mode=True,
+                    auto_status_handoff=True,
+                ):
+                    return False
+
+            reply_state["req_id"] = target_req_id
+            reply_state["stream_id"] = new_stream_id
+            reply_state["prefix"] = handoff_ack
+
+            async with push_lock:
+                await self._reply_stream(
+                    target_req_id,
+                    old_stream_id,
+                    "⏩ 长任务仍在执行，实时状态已切到下一条消息继续显示。",
+                    finish=True,
+                )
+                await self._reply_stream(
+                    target_req_id,
+                    new_stream_id,
+                    handoff_ack,
+                    finish=False,
+                )
+            state['last_pushed_text'] = ""
+            state['last_pushed_content'] = ""
+            state['last_push_time'] = time.monotonic()
+            state['auto_handoff_done'] = True
+            return True
+
+        async def on_stream_delta(accumulated_text: str, finish: bool):
             if finish:
                 # 完成时立即推送最终内容
                 state['finished'] = True
@@ -2996,6 +3250,29 @@ class MessageDispatcher:
                     logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过最终推送", self.bot_key)
                     return
                 final_content = self._compose_stream_content(reply_state, accumulated_text)
+                if task_key:
+                    from src.core.task_registry import get_task_registry
+
+                    get_task_registry().touch(
+                        task_key,
+                        last_preview=self._summarize_stream_preview(final_content),
+                    )
+                needs_finish_confirmation = (
+                    final_content != state['last_pushed_content']
+                    or self._looks_like_running_status_preview(state['last_pushed_content'])
+                )
+                if needs_finish_confirmation:
+                    async with push_lock:
+                        interim_sent = await self._reply_stream(
+                            target_req_id,
+                            target_stream_id,
+                            final_content,
+                            finish=False,
+                        )
+                    if interim_sent:
+                        state['last_pushed_text'] = accumulated_text
+                        state['last_pushed_content'] = final_content
+                        state['last_push_time'] = time.monotonic()
                 async with push_lock:
                     sent = await self._reply_stream(
                         target_req_id,
@@ -3003,14 +3280,47 @@ class MessageDispatcher:
                         final_content,
                         finish=True,
                     )
+                if sent and needs_finish_confirmation:
+                    await asyncio.sleep(STREAM_FINAL_CONFIRM_DELAY)
+                    async with push_lock:
+                        await self._reply_stream(
+                            target_req_id,
+                            target_stream_id,
+                            final_content,
+                            finish=True,
+                        )
                 if not sent:
                     _mark_delivery_failed()
                     await _maybe_send_proactive_reply(final_content)
+                else:
+                    long_task_threshold = float(
+                        max(
+                            getattr(self.orchestrator, "long_task_keepalive_after_seconds", 0) or 0,
+                            0,
+                        )
+                    )
+                    is_long_task = (
+                        long_task_threshold > 0
+                        and (time.monotonic() - float(state.get('started_at') or 0.0)) >= long_task_threshold
+                    )
+                    if is_long_task or self._looks_like_running_status_preview(state['last_pushed_content']):
+                        await _maybe_send_completion_confirmation(final_content)
                 state['last_pushed_text'] = accumulated_text
+                state['last_pushed_content'] = final_content
                 return
+
+            if task_key:
+                from src.core.task_registry import get_task_registry
+
+                get_task_registry().touch(
+                    task_key,
+                    last_preview=self._summarize_stream_preview(accumulated_text),
+                )
 
             if state['finished']:
                 return
+
+            await _maybe_auto_handoff_long_running_stream()
 
             # 节流
             now = time.monotonic()
@@ -3023,15 +3333,17 @@ class MessageDispatcher:
                     if not target_req_id or not target_stream_id:
                         logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过增量推送", self.bot_key)
                         return
+                    stream_content = self._compose_stream_content(reply_state, accumulated_text)
                     sent = await self._reply_stream(
                         target_req_id,
                         target_stream_id,
-                        self._compose_stream_content(reply_state, accumulated_text),
+                        stream_content,
                         finish=False,
                     )
                     if not sent:
                         _mark_delivery_failed()
                     state['last_pushed_text'] = accumulated_text
+                    state['last_pushed_content'] = stream_content
                     state['last_push_time'] = time.monotonic()
             elif state['throttle_task'] is None or state['throttle_task'].done():
                 captured_text = accumulated_text
@@ -3050,15 +3362,17 @@ class MessageDispatcher:
                             if not target_req_id or not target_stream_id:
                                 logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过延迟推送", self.bot_key)
                                 return
+                            stream_content = self._compose_stream_content(reply_state, captured_text)
                             sent = await self._reply_stream(
                                 target_req_id,
                                 target_stream_id,
-                                self._compose_stream_content(reply_state, captured_text),
+                                stream_content,
                                 finish=False,
                             )
                             if not sent:
                                 _mark_delivery_failed()
                             state['last_pushed_text'] = captured_text
+                            state['last_pushed_content'] = stream_content
                             state['last_push_time'] = time.monotonic()
 
                 state['throttle_task'] = asyncio.create_task(delayed_push())
@@ -3085,6 +3399,7 @@ class MessageDispatcher:
             stream_id,
             req_id=req_id,
             reply_state=active_reply_state,
+            status_live_mode=False,
         )
 
         try:

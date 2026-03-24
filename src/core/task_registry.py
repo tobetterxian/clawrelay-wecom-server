@@ -42,9 +42,14 @@ class TaskRegistry:
             self._recent.pop(key, None)
 
             now = time.time()
+            now_monotonic = time.monotonic()
             metadata = dict(extra or {})
             metadata.setdefault("started_at", now)
+            metadata.setdefault("started_at_monotonic", now_monotonic)
             metadata.setdefault("last_activity_at", now)
+            metadata.setdefault("last_activity_at_monotonic", now_monotonic)
+            metadata.setdefault("last_status_render_at", now)
+            metadata.setdefault("last_status_render_at_monotonic", now_monotonic)
             metadata.setdefault("last_preview", "")
 
             self._tasks[key] = task
@@ -109,7 +114,26 @@ class TaskRegistry:
             if not task or task.done():
                 return False
             current = self._extra.setdefault(key, {})
-            current["last_activity_at"] = time.time()
+            now = time.time()
+            now_monotonic = time.monotonic()
+            current["last_activity_at"] = now
+            current["last_activity_at_monotonic"] = now_monotonic
+            current["last_status_render_at"] = now
+            current["last_status_render_at_monotonic"] = now_monotonic
+            current.update(extra)
+            return True
+
+    def mark_rendered(self, key: str, **extra) -> bool:
+        """更新最近一次状态渲染时间，不改变真实活动时间。"""
+        with self._lock:
+            task = self._tasks.get(key)
+            if not task or task.done():
+                return False
+            current = self._extra.setdefault(key, {})
+            now = time.time()
+            now_monotonic = time.monotonic()
+            current["last_status_render_at"] = now
+            current["last_status_render_at_monotonic"] = now_monotonic
             current.update(extra)
             return True
 

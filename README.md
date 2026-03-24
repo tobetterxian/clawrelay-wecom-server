@@ -353,7 +353,8 @@ bots:
       codex_path: "codex"                  # 若已在 PATH 中，可直接写 codex
       sandbox_mode: "workspace-write"      # 可选: read-only | workspace-write
       skip_git_repo_check: false
-      approval_policy: "on-request"     # 可选: untrusted | on-request | on-failure | never
+      approval_policy: "on-request"        # 可选: untrusted | on-request | on-failure | never
+      reasoning_effort: "medium"           # 可选: low | medium | high | xhigh
       dangerously_bypass_approvals_and_sandbox: false  # 仅可信环境建议开启
       workspace_root: "/path/to/project/.codex_data"  # 可选，默认 <working_dir>/.codex_data
       default_workspace_init_mode: "empty" # 可选: empty | git_remote | legacy_copy
@@ -361,6 +362,9 @@ bots:
       default_group_workspace_mode: "personal"  # 可选: personal | shared
       session_timeout_seconds: 7200
       enable_project_workspace_mode: true
+      context_window_auto_resume_limit: 3    # 可选：上下文过长时自动续跑次数；设为 0 可关闭
+      long_task_keepalive_after_seconds: 300   # 可选：任务超过 N 秒后切到“长任务后台状态”模式；设为 0 可关闭
+      # long_task_keepalive_interval_seconds: 300  # 可选：长任务状态刷新间隔；不填时默认与首次阈值一致
       # add_dirs:
       #   - "/another/writable/path"
       # profile: "default"
@@ -369,6 +373,7 @@ bots:
 **说明：**
 - `codex_cli` 类型直接启动本机 `codex app-server --listen stdio://`，**不经过** `clawrelay-api`
 - 如果服务进程拿不到 `PATH` 中的 `codex`，可显式配置 `provider_config.codex_path`
+- 可通过 `provider_config.reasoning_effort` 覆盖 Codex CLI 每轮 turn 的推理强度
 - 会按企业微信运行时会话保存 `thread_id`，后续消息自动走 `thread/resume + turn/start`
 - 默认启用 `项目 / 工作区 / 会话` 三层模型：单聊自动进入个人项目，群聊先绑定项目，再按个人/共享工作区路由
 - 默认工作区初始化优先使用 `empty` / `git_remote`，不再默认复制本地大目录；`workspace_strategy: copy` 仅作兼容，实际等价 `legacy_copy`

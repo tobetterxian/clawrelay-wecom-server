@@ -59,10 +59,13 @@ from src.adapters.codex_app_server_adapter import (
     CodexAppServerSession,
     CodexCommandExecutionComplete,
     CodexCommandExecutionStart,
+    CodexContextCompaction,
     CodexFileChangeStart,
     CodexInteractionRequest,
+    CodexTokenUsageUpdate,
 )
 from src.utils.weixin_utils import TemplateCardBuilder
+from src.utils.path_utils import resolve_local_path, resolve_workspace_root_with_legacy_fallback
 from src.utils.quoted_handoff import (
     split_structured_user_message,
     looks_like_quoted_development_handoff,
@@ -99,8 +102,12 @@ CODEX_INTERRUPTED_TURN_RE = re.compile(
     re.IGNORECASE,
 )
 CODEX_TRANSIENT_RETRY_LIMIT = 2
-CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS = 20
-CODEX_LONG_TASK_KEEPALIVE_INTERVAL_SECONDS = 20
+CODEX_CONTEXT_WINDOW_AUTO_RESUME_LIMIT = 3
+CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS = 300
+CODEX_LONG_TASK_KEEPALIVE_INTERVAL_SECONDS = 300
+CODEX_RUNTIME_STATUS_TICK_SECONDS = 1
+CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CODEX_CONTEXT_WINDOW_BASELINE_TOKENS = 12_000
 DEFAULT_PROJECT_REQUEST_RE = re.compile(
     r"(新建|创建|搭建|做(?:一个|个)?|开发|实现|生成).{0,24}项目",
     re.IGNORECASE,
@@ -376,18 +383,26 @@ class CodexCliOrchestrator(BaseOrchestrator):
         enable_project_workspace_mode: bool = True,
         long_task_keepalive_after_seconds: int = CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS,
         long_task_keepalive_interval_seconds: Optional[int] = None,
+        context_window_auto_resume_limit: int = CODEX_CONTEXT_WINDOW_AUTO_RESUME_LIMIT,
+        reasoning_effort: str = "",
     ):
         self.bot_key = bot_key
         self.system_prompt = system_prompt or ""
         self.default_github_owner = str(default_github_owner or "").strip()
-        self.base_working_dir = str(Path(working_dir).expanduser().resolve())
-        self.workspace_root = str(
-            Path(workspace_root).expanduser().resolve()
-            if workspace_root
-            else (Path(self.base_working_dir) / DEFAULT_WORKSPACE_ROOT_NAME).resolve()
+        self.model_name = str(model or "").strip()
+        self.reasoning_effort = self._normalize_reasoning_effort(reasoning_effort)
+        self.profile_name = str(profile or "").strip()
+        self.base_working_dir = str(resolve_local_path(working_dir))
+        self.requested_workspace_root = str(resolve_local_path(workspace_root)) if workspace_root else ""
+        resolved_workspace_root, workspace_root_source = resolve_workspace_root_with_legacy_fallback(
+            working_dir=self.base_working_dir,
+            configured_root=workspace_root,
+            default_root_name=DEFAULT_WORKSPACE_ROOT_NAME,
         )
+        self.workspace_root = str(resolved_workspace_root)
+        self.workspace_root_source = workspace_root_source
         self.codex_home = str(
-            Path(codex_home).expanduser().resolve()
+            resolve_local_path(codex_home)
             if codex_home
             else (Path(self.workspace_root) / 'codex-home' / self.bot_key).resolve()
         )
@@ -416,7 +431,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
             self.long_task_keepalive_interval_seconds = (
                 normalized_keepalive_interval_seconds or self.long_task_keepalive_after_seconds
             )
-        self.base_add_dirs = [str(Path(item).expanduser().resolve()) for item in (add_dirs or []) if item]
+        self.context_window_auto_resume_limit = self._normalize_optional_non_negative_int(
+            context_window_auto_resume_limit,
+            default=CODEX_CONTEXT_WINDOW_AUTO_RESUME_LIMIT,
+        )
+        self.base_add_dirs = [str(resolve_local_path(item)) for item in (add_dirs or []) if item]
 
         Path(self.workspace_root).mkdir(parents=True, exist_ok=True)
         Path(self.codex_home).mkdir(parents=True, exist_ok=True)
@@ -429,7 +448,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         self.runtime_env_vars = runtime_env_vars
 
         self.adapter = CodexAppServerAdapter(
-            model=model or DEFAULT_CODEX_CLI_MODEL,
+            model=self.model_name,
             working_dir=self.base_working_dir,
             env_vars=self.runtime_env_vars,
             sandbox_mode=sandbox_mode,
@@ -439,6 +458,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             profile=profile,
             executable=executable,
             approval_policy=approval_policy,
+            reasoning_effort=self.reasoning_effort,
         )
         self.project_registry = ProjectRegistry(self.workspace_root)
         self.github_repository_manager = GitHubRepositoryManager(env_vars=self.runtime_env_vars)
@@ -473,6 +493,17 @@ class CodexCliOrchestrator(BaseOrchestrator):
             self.default_workspace_init_mode,
             self.default_github_owner or "-",
         )
+        if self.workspace_root_source == "legacy_fallback":
+            logger.warning(
+                "[CodexCLI] 检测到旧状态目录，已回退使用 legacy workspace_root: requested=%s, effective=%s",
+                self.requested_workspace_root or "-",
+                self.workspace_root,
+            )
+        logger.info(
+            "[CodexCLI] Codex 配置策略: model / approval_policy / sandbox / reasoning_effort 以 %s 为准，不通过 app-server 参数覆盖",
+            self._codex_config_source_label(),
+        )
+        self._log_runtime_environment_diagnostics()
 
     def get_runtime_session_key(
         self,
@@ -494,6 +525,38 @@ class CodexCliOrchestrator(BaseOrchestrator):
         if mode == MODE_SHARED:
             return effective_key
         return self._compose_personal_runtime_session_key(effective_key, user_id)
+
+    def _log_runtime_environment_diagnostics(self) -> None:
+        home_value = str(self.runtime_env_vars.get("HOME") or "").strip()
+        userprofile_value = str(self.runtime_env_vars.get("USERPROFILE") or "").strip()
+        appdata_value = str(self.runtime_env_vars.get("APPDATA") or os.getenv("APPDATA") or "").strip()
+        localappdata_value = str(
+            self.runtime_env_vars.get("LOCALAPPDATA") or os.getenv("LOCALAPPDATA") or ""
+        ).strip()
+        home_codex_dir = (Path(self.codex_home) / ".codex").resolve()
+        config_path = home_codex_dir / "config.toml"
+        auth_path = home_codex_dir / "auth.json"
+
+        logger.info(
+            "[CodexCLI] 运行环境诊断: bot_key=%s, codex_path=%s, profile=%s, HOME=%s, USERPROFILE=%s, APPDATA=%s, LOCALAPPDATA=%s",
+            self.bot_key,
+            self.adapter.executable,
+            self.profile_name or "-",
+            home_value or "-",
+            userprofile_value or "-",
+            appdata_value or "-",
+            localappdata_value or "-",
+        )
+        logger.info(
+            "[CodexCLI] Codex 配置诊断: bot_key=%s, codex_home=%s, codex_dir=%s, config_toml=%s(exists=%s), auth_json=%s(exists=%s)",
+            self.bot_key,
+            self.codex_home,
+            home_codex_dir,
+            config_path,
+            config_path.exists(),
+            auth_path,
+            auth_path.exists(),
+        )
 
     async def handle_control_command(
         self,
@@ -1065,9 +1128,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
         current_thread_id = runtime_context.get("thread_id") or ""
 
         thinking_lines = ["🤖 Codex 正在处理..."]
-        if runtime_context.get("project"):
-            thinking_lines.append(f"📁 项目：{runtime_context['project'].get('name')}")
-        thinking_lines.append(f"📂 工作区：{self._display_path(runtime_context['working_dir'])}")
+        runtime_status_strip = self._build_runtime_status_strip(runtime_context)
+        if runtime_status_strip:
+            thinking_lines.append(runtime_status_strip)
         if runtime_context.get("initial_notice"):
             thinking_lines.append(runtime_context["initial_notice"])
         else:
@@ -1079,10 +1142,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 thinking_lines.append(usage_hint)
 
         reconnect_retry_count = 0
+        context_auto_resume_count = 0
         response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
         commands_seen: List[str] = []
-        turn_inputs = list(inputs or [])
+        base_turn_inputs = list(inputs or [])
+        turn_inputs = list(base_turn_inputs)
         task_started_at = time.monotonic()
+        context_compaction_count = 0
+        latest_context_usage: dict = {}
+        self._annotate_task_runtime_metadata(effective_key, runtime_context)
 
         while True:
             turn_progressed = False
@@ -1094,6 +1162,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
             self._active_runtime_contexts[effective_key] = runtime_context
             stream_lock = asyncio.Lock()
             keepalive_task = None
+            last_emitted_content = ""
+            task_registry_key = f"{self.bot_key}:{effective_key}"
 
             def _build_live_display_content(
                 override_text: Optional[str] = None,
@@ -1103,6 +1173,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             ) -> str:
                 display_text = response_text if override_text is None else override_text
                 elapsed_seconds = self._runtime_elapsed_seconds(task_started_at)
+                live_status_mode = self._task_status_live_mode(effective_key)
                 rendered_thinking_lines = self._render_runtime_thinking_lines(
                     thinking_lines,
                     elapsed_seconds=elapsed_seconds,
@@ -1110,11 +1181,21 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     allow_keepalive=allow_keepalive,
                     has_pending_interaction=runtime.has_pending_interaction(),
                     keepalive_after_seconds=self.long_task_keepalive_after_seconds,
+                    live_status_mode=live_status_mode,
                 )
+                status_lines, detail_thinking_lines = self._split_runtime_display_lines(
+                    rendered_thinking_lines
+                )
+                if runtime.has_pending_interaction() and runtime.pending_interaction:
+                    status_lines.extend(
+                        self._build_pending_interaction_status_lines(runtime.pending_interaction)
+                    )
+                status_lines = self._compact_runtime_header_lines(status_lines)
                 return self._build_display_content(
-                    rendered_thinking_lines,
+                    detail_thinking_lines,
                     str(display_text or ""),
                     finished=finished,
+                    status_lines=status_lines,
                 )
 
             async def _emit_stream_update(
@@ -1123,34 +1204,52 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 finished: bool = False,
                 allow_keepalive: bool = True,
             ) -> None:
+                nonlocal last_emitted_content
                 if not on_stream_delta:
                     return
+                content = _build_live_display_content(
+                    override_text,
+                    finished=finished,
+                    allow_keepalive=allow_keepalive,
+                )
+                if not finished and content == last_emitted_content:
+                    return
                 async with stream_lock:
-                    await on_stream_delta(
-                        _build_live_display_content(
-                            override_text,
-                            finished=finished,
-                            allow_keepalive=allow_keepalive,
-                        ),
-                        finished,
-                    )
+                    if not finished and content == last_emitted_content:
+                        return
+                    await on_stream_delta(content, finished)
+                    last_emitted_content = content
 
             async def _keepalive_loop() -> None:
+                from src.core.task_registry import get_task_registry
+
                 try:
-                    if self.long_task_keepalive_after_seconds <= 0:
+                    if self.long_task_keepalive_after_seconds <= 0 and not runtime.has_pending_interaction():
                         return
-                    initial_delay = self._runtime_keepalive_initial_delay(
-                        task_started_at,
-                        self.long_task_keepalive_after_seconds,
-                    )
-                    if initial_delay > 0:
-                        await asyncio.sleep(initial_delay)
                     while True:
-                        if runtime.has_pending_interaction():
-                            await asyncio.sleep(self.long_task_keepalive_interval_seconds)
+                        has_pending_interaction = runtime.has_pending_interaction()
+                        if has_pending_interaction or response_text.strip():
+                            await asyncio.sleep(float(CODEX_RUNTIME_STATUS_TICK_SECONDS))
                             continue
-                        await _emit_stream_update()
-                        await asyncio.sleep(self.long_task_keepalive_interval_seconds)
+                        if not has_pending_interaction and self.long_task_keepalive_after_seconds > 0:
+                            initial_delay = self._runtime_keepalive_initial_delay(
+                                task_started_at,
+                                self.long_task_keepalive_after_seconds,
+                            )
+                            if initial_delay > 0:
+                                await asyncio.sleep(
+                                    min(
+                                        initial_delay,
+                                        float(CODEX_RUNTIME_STATUS_TICK_SECONDS),
+                                    )
+                                )
+                                continue
+                        get_task_registry().mark_rendered(task_registry_key)
+                        await _emit_stream_update(allow_keepalive=not has_pending_interaction)
+                        sleep_seconds = float(CODEX_RUNTIME_STATUS_TICK_SECONDS)
+                        if sleep_seconds <= 0:
+                            continue
+                        await asyncio.sleep(sleep_seconds)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1170,6 +1269,20 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     thread_id=current_thread_id,
                     developer_instructions=self._build_effective_system_prompt(user_id, runtime_context),
                 )
+                runtime_status = self._build_runtime_status_payload(runtime, runtime_context)
+                self._annotate_task_runtime_metadata(
+                    effective_key,
+                    runtime_context,
+                    runtime_status=runtime_status,
+                )
+                runtime_status_strip = self._build_runtime_status_strip(runtime_context, runtime_status)
+                if runtime_status_strip:
+                    self._upsert_runtime_thinking_line(
+                        thinking_lines,
+                        self._runtime_status_line_prefix(runtime_status),
+                        runtime_status_strip,
+                    )
+                    await _emit_stream_update()
                 if current_thread_id:
                     self.binding_manager.save_thread_id(
                         self.bot_key,
@@ -1196,6 +1309,37 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         if file_count:
                             thinking_lines.append(f"📝 提议修改 {file_count} 个文件")
                             await _emit_stream_update()
+                    elif isinstance(event, CodexTokenUsageUpdate):
+                        turn_progressed = True
+                        context_usage = self._build_context_window_estimate(event)
+                        latest_context_usage = dict(context_usage)
+                        self._annotate_task_context_window(effective_key, **context_usage)
+                        runtime_status = self._build_runtime_status_payload(runtime, runtime_context)
+                        runtime_status.update(context_usage)
+                        self._upsert_runtime_thinking_line(
+                            thinking_lines,
+                            self._runtime_status_line_prefix(runtime_status),
+                            self._build_runtime_status_strip(runtime_context, runtime_status),
+                        )
+                        self._upsert_runtime_thinking_line(
+                            thinking_lines,
+                            "🧠 上下文估算：",
+                            self._format_context_window_estimate_line(context_usage),
+                        )
+                        await _emit_stream_update()
+                    elif isinstance(event, CodexContextCompaction):
+                        turn_progressed = True
+                        context_compaction_count += 1
+                        self._annotate_task_context_window(
+                            effective_key,
+                            context_compaction_count=context_compaction_count,
+                        )
+                        self._upsert_runtime_thinking_line(
+                            thinking_lines,
+                            "🗜️ 上下文压缩：",
+                            f"🗜️ 上下文压缩：已触发 {context_compaction_count} 次",
+                        )
+                        await _emit_stream_update()
                     elif isinstance(event, CodexAgentMessage):
                         turn_progressed = True
                         if event.text:
@@ -1271,9 +1415,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 )
                 raise
             except Exception as e:
-                error_message = self._normalize_codex_error_message(str(e))
+                raw_error_message = str(e)
+                inferred_context_window_exhausted = (
+                    self._is_transient_reconnect_message(raw_error_message)
+                    and self._looks_like_context_window_exhausted(latest_context_usage)
+                )
+                error_message = self._normalize_codex_error_message(raw_error_message)
                 if (
-                    self._is_interrupted_turn_message(str(e))
+                    self._is_interrupted_turn_message(raw_error_message)
                     and current_thread_id
                     and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
                 ):
@@ -1292,8 +1441,41 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     await _emit_stream_update()
                     await asyncio.sleep(reconnect_retry_count)
                     continue
+                if inferred_context_window_exhausted or self._is_context_window_message(raw_error_message):
+                    if context_auto_resume_count < self.context_window_auto_resume_limit:
+                        context_auto_resume_count += 1
+                        self._clear_runtime_thread_binding(effective_key, runtime_context)
+                        current_thread_id = ""
+                        turn_inputs = self._build_context_window_resume_inputs(
+                            base_turn_inputs=base_turn_inputs,
+                            original_message=message_content,
+                            partial_response_text=response_text,
+                            commands_seen=commands_seen,
+                            runtime_context=runtime_context,
+                            resume_attempt=context_auto_resume_count,
+                        )
+                        self._annotate_task_context_window(
+                            effective_key,
+                            context_auto_resume_count=context_auto_resume_count,
+                            context_auto_resumed=True,
+                            context_last_recovery_reason="context_window_exceeded",
+                        )
+                        self._upsert_runtime_thinking_line(
+                            thinking_lines,
+                            "♻️ 自动续跑：",
+                            f"♻️ 自动续跑：上下文过长，已切换新线程继续（{context_auto_resume_count}/{self.context_window_auto_resume_limit}）",
+                        )
+                        await _emit_stream_update()
+                        await asyncio.sleep(context_auto_resume_count)
+                        continue
+                    if inferred_context_window_exhausted:
+                        error_message = "Codex ran out of room in the model's context window."
+                    error_message = (
+                        f"{error_message}\n"
+                        f"Auto-resume attempts: {context_auto_resume_count}"
+                    )
                 if (
-                    self._is_transient_reconnect_message(str(e))
+                    self._is_transient_reconnect_message(raw_error_message)
                     and not turn_progressed
                     and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
                 ):
@@ -1386,6 +1568,122 @@ class CodexCliOrchestrator(BaseOrchestrator):
             parts.append(f"原始任务：{original}")
         parts.append("完成后请继续正常输出结果。")
         return "\n".join(parts)
+
+    @classmethod
+    def _normalize_reasoning_effort(cls, reasoning_effort: str) -> str:
+        value = str(reasoning_effort or "").strip().lower()
+        if not value:
+            return ""
+        if value in CODEX_REASONING_EFFORTS:
+            return value
+        logger.warning("[CodexCLI] 不支持的 reasoning_effort=%s，已忽略", reasoning_effort)
+        return ""
+
+    @staticmethod
+    def _is_context_window_message(message: str) -> bool:
+        lowered = str(message or "").strip().lower()
+        return (
+            "ran out of room in the model's context window" in lowered
+            or "contextwindowexceeded" in lowered
+            or "context window exceeded" in lowered
+        )
+
+    @staticmethod
+    def _looks_like_context_window_exhausted(payload: Optional[dict]) -> bool:
+        data = dict(payload or {})
+        remaining_percent = data.get("context_estimated_remaining_percent")
+        try:
+            if remaining_percent is not None and float(remaining_percent) <= 0.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        used_tokens = data.get("context_estimated_used_tokens")
+        window_tokens = data.get("context_model_window_tokens")
+        try:
+            normalized_used = max(int(used_tokens), 0)
+            normalized_window = max(int(window_tokens), 0)
+        except (TypeError, ValueError):
+            return False
+        return normalized_window > 0 and normalized_used >= normalized_window
+
+    def _clear_runtime_thread_binding(self, runtime_session_key: str, runtime_context: Optional[dict]) -> None:
+        if self.enable_project_workspace_mode:
+            self.binding_manager.clear_thread(self.bot_key, runtime_session_key)
+        if runtime_context is not None:
+            runtime_context["thread_id"] = ""
+
+    @classmethod
+    def _build_context_window_resume_prompt(
+        cls,
+        *,
+        original_message: str,
+        partial_response_text: str,
+        commands_seen: List[str],
+        runtime_context: Optional[dict],
+        resume_attempt: int,
+    ) -> str:
+        project_name = str(((runtime_context or {}).get("project") or {}).get("name") or "").strip()
+        workspace_path = str((runtime_context or {}).get("working_dir") or "").strip()
+        original = cls._truncate_text(str(original_message or "").strip(), limit=1200)
+        partial = cls._truncate_text(str(partial_response_text or "").strip(), limit=600)
+        command_preview = ", ".join(
+            cls._truncate_text(str(command or "").strip(), limit=80)
+            for command in list(commands_seen or [])[-6:]
+            if str(command or "").strip()
+        )
+        parts = [
+            "上一条 Codex 线程因上下文过长已自动切换到新线程。",
+            "请基于当前工作区文件状态继续完成同一个任务。",
+            "以当前文件状态为准，不要重复已经完成的修改。",
+            f"这是第 {max(int(resume_attempt or 0), 1)} 次自动续跑。",
+        ]
+        if project_name:
+            parts.append(f"当前项目：{project_name}")
+        if workspace_path:
+            parts.append(f"当前工作区：{workspace_path}")
+        if original:
+            parts.append(f"原始任务：{original}")
+        if command_preview:
+            parts.append(f"本轮已执行命令（供参考，可不重复）：{command_preview}")
+        if partial:
+            parts.append(
+                "上一线程已经输出给用户的内容片段如下，请从这里继续，不要从头重复：\n"
+                f"{partial}"
+            )
+        parts.append("如需了解现状，请优先检查当前工作区文件，再继续未完成部分。")
+        parts.append("完成后请继续正常输出最终结果。")
+        return "\n".join(parts)
+
+    @classmethod
+    def _build_context_window_resume_inputs(
+        cls,
+        *,
+        base_turn_inputs: List[dict],
+        original_message: str,
+        partial_response_text: str,
+        commands_seen: List[str],
+        runtime_context: Optional[dict],
+        resume_attempt: int,
+    ) -> List[dict]:
+        text_input = {
+            "type": "text",
+            "text": cls._sanitize_user_input(
+                cls._build_context_window_resume_prompt(
+                    original_message=original_message,
+                    partial_response_text=partial_response_text,
+                    commands_seen=commands_seen,
+                    runtime_context=runtime_context,
+                    resume_attempt=resume_attempt,
+                )
+            ),
+        }
+        resumed_inputs = [text_input]
+        resumed_inputs.extend(
+            block
+            for block in list(base_turn_inputs or [])
+            if str(block.get("type") or "").strip() != "text"
+        )
+        return resumed_inputs
 
     async def _stage_and_build_inputs(
         self,
@@ -2185,7 +2483,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         probe_target = preferred_remote_url or current_publish_url
         if probe_target:
-            probe = self.project_deployment_manager.probe_git_remote(probe_target)
+            probe = self.project_deployment_manager.probe_git_remote(
+                probe_target,
+                workspace_path=workspace_path,
+            )
             if probe.exists:
                 bound_remote_url = probe_target
                 current_project_publish_url = self._project_publish_remote_url(project)
@@ -2262,13 +2563,19 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         publish_remote_url=publish_result.origin_url,
                         upstream_remote_url=publish_result.upstream_url,
                     )
-                self._remember_github_repository_list(
-                    user_id,
-                    session_key,
-                    log_context,
-                    [created_repository],
-                    "刚自动创建用于推送的仓库",
-                )
+                    self._remember_github_repository_list(
+                        user_id,
+                        session_key,
+                        log_context,
+                        [created_repository],
+                        "刚自动创建用于推送的仓库",
+                    )
+            elif (
+                current_origin_url == probe_target
+                and probe.error_kind in {"auth_failed", "network_error", "unknown_error"}
+            ):
+                bound_remote_url = current_origin_url
+                binding_notes.append("远程预检失败，已跳过预检并直接尝试推送当前 origin")
             else:
                 return (
                     "检测当前 GitHub 远程仓库失败，暂不自动推送。\n"
@@ -3017,6 +3324,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"{item.relative_path}（{self._file_action_label(item.action)}）"
             for item in result.files
         )
+        workflow_lines = self._build_latest_workflow_run_summary_lines(
+            owner=owner,
+            repo_name=repo_name,
+            workflow_id=Path(result.workflow_path).name,
+            expected_head_sha=push_result.head_sha,
+        )
         lines = [
             "已完成一键发布 Cloudflare Pages",
             f"项目：{(project or {}).get('name', '-')}",
@@ -3034,6 +3347,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"GitHub Secrets：{', '.join(secret_names)}",
             f"最终推送：origin/{push_result.branch_name}",
         ]
+        lines.extend(workflow_lines)
         lines.extend(f"提示：{warning}" for warning in result.warnings)
         lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Pages 部署")
         return "\n".join(lines)
@@ -4312,6 +4626,45 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"详情：{run.html_url or '-'}",
         ]
 
+    def _build_latest_workflow_run_summary_lines(
+        self,
+        *,
+        owner: str,
+        repo_name: str,
+        workflow_id: str,
+        expected_head_sha: str = "",
+    ) -> List[str]:
+        normalized_owner = str(owner or "").strip()
+        normalized_repo_name = str(repo_name or "").strip()
+        normalized_workflow_id = str(workflow_id or "").strip()
+        normalized_expected_sha = str(expected_head_sha or "").strip()
+        if not normalized_owner or not normalized_repo_name or not normalized_workflow_id:
+            return []
+
+        try:
+            run = self.github_repository_manager.get_latest_workflow_run(
+                owner=normalized_owner,
+                repo=normalized_repo_name,
+                workflow_id=normalized_workflow_id,
+            )
+        except Exception as exc:
+            return [f"最近流水线：查询失败（{exc}）"]
+
+        if not run:
+            return [
+                "最近流水线：尚未创建记录，可稍后打开 GitHub Actions 页面查看",
+            ]
+
+        run_head_sha = str(run.head_sha or "").strip()
+        if normalized_expected_sha and run_head_sha and run_head_sha != normalized_expected_sha:
+            return [
+                f"最近流水线：已找到 #{run.run_number or run.id}，但对应提交为 {run_head_sha[:7]}，当前推送提交为 {normalized_expected_sha[:7]}",
+                "说明：GitHub Actions 可能仍在排队创建这次推送对应的运行记录",
+                f"流水线详情：{run.html_url or self._github_actions_url(normalized_owner, normalized_repo_name)}",
+            ]
+
+        return self._format_workflow_run_lines(run)
+
     @staticmethod
     def _cloudflare_pages_public_url(project: CloudflarePagesProjectInfo) -> str:
         subdomain = str((project or CloudflarePagesProjectInfo(name="")).subdomain or "").strip()
@@ -5106,6 +5459,254 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _runtime_elapsed_seconds(started_at: float, now: Optional[float] = None) -> float:
         return max((time.monotonic() if now is None else now) - float(started_at or 0.0), 0.0)
 
+    @staticmethod
+    def _format_token_count(value: object) -> str:
+        try:
+            normalized = max(int(value), 0)
+        except (TypeError, ValueError):
+            normalized = 0
+        return f"{normalized:,}"
+
+    @staticmethod
+    def _format_context_window_short(value: object) -> str:
+        try:
+            normalized = max(int(value), 0)
+        except (TypeError, ValueError):
+            normalized = 0
+        if normalized <= 0:
+            return "ctx ?"
+        if normalized >= 1_000_000:
+            return f"{normalized / 1_000_000:.1f}M w"
+        return f"{int(round(normalized / 1000.0))}K w"
+
+    def _build_runtime_status_strip(
+        self,
+        runtime_context: Optional[dict],
+        context_payload: Optional[dict] = None,
+    ) -> str:
+        payload = dict(context_payload or {})
+        model_label = self._format_model_with_reasoning(
+            payload.get("status_model"),
+            payload.get("status_reasoning_effort"),
+        )
+        if not model_label:
+            return ""
+        working_dir = str(
+            payload.get("status_working_dir") or (runtime_context or {}).get("working_dir") or ""
+        ).strip()
+        project_root = str(
+            payload.get("status_project_root")
+            or ((runtime_context or {}).get("project") or {}).get("project_root")
+            or ""
+        ).strip()
+        remaining_percent = payload.get("context_estimated_remaining_percent")
+        if remaining_percent is None:
+            left_label = "ctx pending"
+        else:
+            left_label = f"≈{float(remaining_percent):.1f}% left"
+        return self._join_runtime_status_parts(
+            [
+                model_label,
+                "Fast on",
+                left_label,
+                working_dir or "-",
+                project_root or "-",
+                self._format_context_window_short(payload.get("context_model_window_tokens")),
+            ]
+        )
+
+    def _codex_config_source_label(self) -> str:
+        if self.profile_name:
+            return f"profile:{self.profile_name}"
+        return "config.toml"
+
+    @staticmethod
+    def _format_model_with_reasoning(model: object, reasoning_effort: object) -> str:
+        model_value = str(model or "").strip()
+        effort_value = str(reasoning_effort or "").strip()
+        if not model_value:
+            return ""
+        if not effort_value:
+            return model_value
+        return f"{model_value}/{effort_value}"
+
+    @staticmethod
+    def _join_runtime_status_parts(parts: List[str]) -> str:
+        normalized_parts: List[str] = []
+        for item in parts:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            if normalized_parts and normalized_parts[-1] == value:
+                continue
+            normalized_parts.append(value)
+        return " · ".join(normalized_parts)
+
+    def _build_runtime_status_payload(
+        self,
+        runtime: Optional[CodexAppServerSession],
+        runtime_context: Optional[dict],
+    ) -> dict:
+        active_model = str(getattr(runtime, "active_model", "") or "").strip()
+        active_reasoning_effort = str(getattr(runtime, "active_reasoning_effort", "") or "").strip()
+        active_cwd = str(getattr(runtime, "active_cwd", "") or "").strip()
+        config_model_context_window = getattr(runtime, "config_model_context_window", None)
+        config_auto_compact_token_limit = getattr(runtime, "config_auto_compact_token_limit", None)
+        project_root = str(((runtime_context or {}).get("project") or {}).get("project_root") or "").strip()
+        working_dir = active_cwd or str((runtime_context or {}).get("working_dir") or "").strip()
+        payload = {
+            "status_model": active_model,
+            "status_reasoning_effort": active_reasoning_effort,
+            "status_fast_mode": "Fast on",
+            "status_working_dir": working_dir,
+            "status_project_root": project_root,
+        }
+        try:
+            normalized_context_window = int(config_model_context_window or 0)
+        except (TypeError, ValueError):
+            normalized_context_window = 0
+        if normalized_context_window > 0:
+            payload["context_model_window_tokens"] = normalized_context_window
+            payload["context_estimated_remaining_percent"] = self._context_window_remaining_percent(
+                0,
+                normalized_context_window,
+            )
+        try:
+            normalized_auto_compact_limit = int(config_auto_compact_token_limit or 0)
+        except (TypeError, ValueError):
+            normalized_auto_compact_limit = 0
+        if normalized_auto_compact_limit > 0:
+            payload["context_auto_compact_token_limit"] = normalized_auto_compact_limit
+        return {key: value for key, value in payload.items() if value}
+
+    def _runtime_status_line_prefix(self, payload: Optional[dict]) -> str:
+        label = self._format_model_with_reasoning(
+            (payload or {}).get("status_model"),
+            (payload or {}).get("status_reasoning_effort"),
+        )
+        return f"{label} · " if label else ""
+
+    @classmethod
+    def _build_context_window_estimate(cls, event: CodexTokenUsageUpdate) -> dict:
+        estimated_used_tokens = max(int(event.last.total_tokens or 0), 0)
+        model_context_window = int(event.model_context_window or 0) or None
+        estimated_remaining_tokens = None
+        estimated_used_percent = None
+        estimated_remaining_percent = None
+        if model_context_window:
+            estimated_remaining_tokens = max(model_context_window - estimated_used_tokens, 0)
+            estimated_remaining_percent = cls._context_window_remaining_percent(
+                estimated_used_tokens,
+                model_context_window,
+            )
+            estimated_used_percent = max(100.0 - estimated_remaining_percent, 0.0)
+        return {
+            "context_estimated_used_tokens": estimated_used_tokens,
+            "context_estimated_input_tokens": max(int(event.last.input_tokens or 0), 0),
+            "context_estimated_cached_input_tokens": max(int(event.last.cached_input_tokens or 0), 0),
+            "context_estimated_output_tokens": max(int(event.last.output_tokens or 0), 0),
+            "context_estimated_reasoning_tokens": max(
+                int(event.last.reasoning_output_tokens or 0),
+                0,
+            ),
+            "context_estimated_remaining_tokens": estimated_remaining_tokens,
+            "context_estimated_used_percent": estimated_used_percent,
+            "context_estimated_remaining_percent": estimated_remaining_percent,
+            "context_model_window_tokens": model_context_window,
+            "context_cumulative_total_tokens": max(int(event.total.total_tokens or 0), 0),
+            "context_last_total_tokens": estimated_used_tokens,
+            "context_last_input_tokens": max(int(event.last.input_tokens or 0), 0),
+            "context_last_cached_input_tokens": max(int(event.last.cached_input_tokens or 0), 0),
+            "context_last_output_tokens": max(int(event.last.output_tokens or 0), 0),
+            "context_last_reasoning_tokens": max(int(event.last.reasoning_output_tokens or 0), 0),
+            "context_estimate_source": "last.totalTokens",
+            "context_estimate_note": "基于 Codex app-server tokenUsage.last 的当前上下文估算，并非官方剩余百分比字段。",
+        }
+
+    @classmethod
+    def _context_window_remaining_percent(cls, used_tokens: int, context_window_tokens: int) -> float:
+        normalized_window = max(int(context_window_tokens or 0), 0)
+        if normalized_window <= CODEX_CONTEXT_WINDOW_BASELINE_TOKENS:
+            return 0.0
+        effective_window = normalized_window - CODEX_CONTEXT_WINDOW_BASELINE_TOKENS
+        normalized_used = max(int(used_tokens or 0) - CODEX_CONTEXT_WINDOW_BASELINE_TOKENS, 0)
+        remaining = max(effective_window - normalized_used, 0)
+        return round(
+            min(max((remaining / effective_window) * 100.0, 0.0), 100.0),
+            1,
+        )
+
+    @classmethod
+    def _format_context_window_estimate_line(cls, estimate: dict) -> str:
+        used_tokens = estimate.get("context_estimated_used_tokens")
+        remaining_tokens = estimate.get("context_estimated_remaining_tokens")
+        used_percent = estimate.get("context_estimated_used_percent")
+        remaining_percent = estimate.get("context_estimated_remaining_percent")
+        window_tokens = estimate.get("context_model_window_tokens")
+        if used_percent is not None and remaining_percent is not None and window_tokens:
+            return (
+                "🧠 上下文估算：已用约 "
+                f"{used_percent:.1f}%，剩余约 {remaining_percent:.1f}%"
+                f"（{cls._format_token_count(used_tokens)} / {cls._format_token_count(window_tokens)} tokens）"
+            )
+        if used_tokens is not None:
+            line = f"🧠 上下文估算：累计约 {cls._format_token_count(used_tokens)} tokens"
+            if remaining_tokens is not None:
+                line += f"，剩余约 {cls._format_token_count(remaining_tokens)} tokens"
+            return line
+        return "🧠 上下文估算：暂不可用"
+
+    @staticmethod
+    def _upsert_runtime_thinking_line(thinking_lines: List[str], prefix: str, content: str) -> None:
+        normalized_prefix = str(prefix or "").strip()
+        for index, line in enumerate(thinking_lines):
+            if str(line or "").startswith(normalized_prefix):
+                thinking_lines[index] = content
+                return
+        thinking_lines.append(content)
+
+    def _annotate_task_context_window(self, runtime_session_key: str, **extra) -> None:
+        from src.core.task_registry import get_task_registry
+
+        payload = {key: value for key, value in (extra or {}).items() if value is not None}
+        if not payload:
+            return
+        get_task_registry().annotate(f"{self.bot_key}:{runtime_session_key}", **payload)
+
+    def _annotate_task_runtime_metadata(
+        self,
+        runtime_session_key: str,
+        runtime_context: Optional[dict],
+        runtime_status: Optional[dict] = None,
+    ) -> None:
+        from src.core.task_registry import get_task_registry
+
+        working_dir = str((runtime_context or {}).get("working_dir") or "").strip()
+        project_root = str(((runtime_context or {}).get("project") or {}).get("project_root") or "").strip()
+        payload = {
+            "status_fast_mode": "Fast on",
+            "status_working_dir": working_dir,
+            "status_project_root": project_root,
+        }
+        payload.update({key: value for key, value in dict(runtime_status or {}).items() if value is not None})
+        get_task_registry().annotate(
+            f"{self.bot_key}:{runtime_session_key}",
+            **payload,
+        )
+
+    def _task_status_live_mode(self, runtime_session_key: str) -> bool:
+        from src.core.task_registry import get_task_registry
+
+        _task, _stream_id, extra = get_task_registry().get(f"{self.bot_key}:{runtime_session_key}")
+        value = (extra or {}).get("status_live_mode")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return False
+
     @classmethod
     def _runtime_keepalive_initial_delay(
         cls,
@@ -5129,6 +5730,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         allow_keepalive: bool = True,
         has_pending_interaction: bool = False,
         keepalive_after_seconds: Optional[float] = None,
+        live_status_mode: bool = False,
     ) -> List[str]:
         rendered_lines = list(thinking_lines or [])
         if rendered_lines:
@@ -5146,17 +5748,23 @@ class CodexCliOrchestrator(BaseOrchestrator):
             )
         else:
             threshold = max(float(keepalive_after_seconds or 0.0), 0.0)
-            if (
-                allow_keepalive
-                and threshold > 0
-                and elapsed_seconds >= threshold
-                and not has_pending_interaction
-            ):
-                status_line = (
-                    "⏳ 状态：仍在处理中"
-                    f"（已运行 {cls._format_runtime_elapsed_duration(elapsed_seconds)}；"
-                    "可回复“停止”）"
-                )
+            if has_pending_interaction:
+                if live_status_mode:
+                    status_line = (
+                        "⏸️ 状态：等待你的确认或补充信息"
+                        f"（已运行 {cls._format_runtime_elapsed_duration(elapsed_seconds)}）"
+                    )
+                else:
+                    status_line = "⏸️ 状态：等待你的确认或补充信息"
+            elif allow_keepalive and threshold > 0 and elapsed_seconds >= threshold:
+                if live_status_mode:
+                    status_line = (
+                        "⏳ 状态：运行中"
+                        f"（已运行 {cls._format_runtime_elapsed_duration(elapsed_seconds)}；"
+                        "可回复“停止”）"
+                    )
+                else:
+                    status_line = "⏳ 状态：长任务继续后台执行（发送“当前任务”查看实时状态）"
 
         if status_line:
             if rendered_lines:
@@ -5235,16 +5843,211 @@ class CodexCliOrchestrator(BaseOrchestrator):
         thinking_lines: List[str],
         text: str,
         finished: bool = False,
+        status_lines: Optional[List[str]] = None,
     ) -> str:
         parts: List[str] = []
         if thinking_lines:
             think_content = "<think>\n" + "\n".join(thinking_lines)
-            if text or finished:
-                think_content += "\n</think>"
+            # Keep the think block syntactically closed whenever we render
+            # stable status outside of it; otherwise some clients treat the
+            # pre-think status text as part of an in-flight think surface and
+            # the status lines flicker or disappear.
+            think_content += "\n</think>"
             parts.append(think_content)
+        if status_lines:
+            parts.append("\n".join(status_lines))
         if text:
             parts.append(text)
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _split_runtime_display_lines(lines: List[str]) -> tuple[List[str], List[str]]:
+        status_lines: List[str] = []
+        thinking_lines: List[str] = []
+        for index, line in enumerate(list(lines or [])):
+            value = str(line or "").strip()
+            if not value:
+                continue
+            if (
+                (index == 0 and ("Codex 正在处理" in value or "Codex 已完成" in value))
+                or value.startswith(("⏳ 状态：", "⏸️ 状态：", "✅ 状态："))
+                or value.startswith(("🧠 上下文估算：", "🗜️ 上下文压缩：", "♻️ 自动续跑："))
+                or (" · " in value and ("Fast on" in value or "Fast off" in value))
+            ):
+                status_lines.append(value)
+            else:
+                thinking_lines.append(value)
+        return status_lines, thinking_lines
+
+    def _compact_runtime_header_lines(self, lines: List[str]) -> List[str]:
+        lifecycle_line = ""
+        runtime_line = ""
+        context_line = ""
+        extra_lines: List[str] = []
+
+        for line in list(lines or []):
+            value = str(line or "").strip()
+            if not value:
+                continue
+            if "Codex 正在处理" in value or "Codex 已完成" in value:
+                lifecycle_line = value
+                continue
+            if value.startswith(("⏳ 状态：", "⏸️ 状态：", "✅ 状态：")):
+                lifecycle_line = value
+                continue
+            if " · " in value and ("Fast on" in value or "Fast off" in value):
+                runtime_line = value
+                continue
+            if value.startswith("🧠 上下文估算："):
+                context_line = value
+                continue
+            extra_lines.append(value)
+
+        compact_lines: List[str] = []
+        primary = self._compact_runtime_primary_line(lifecycle_line, runtime_line)
+        if primary:
+            compact_lines.append(primary)
+        secondary = self._compact_runtime_secondary_line(runtime_line, context_line)
+        if secondary:
+            compact_lines.append(secondary)
+        compact_lines.extend(self._compact_runtime_path_lines(runtime_line))
+        compact_lines.extend(self._compact_runtime_extra_lines(extra_lines))
+        return compact_lines
+
+    def _compact_runtime_primary_line(self, lifecycle_line: str, runtime_line: str) -> str:
+        state_label = self._extract_runtime_state_label(lifecycle_line)
+        elapsed_label = self._extract_runtime_elapsed_label(lifecycle_line)
+        model_label, fast_label, _remaining_label, _working_dir, _project_root, _window_label = (
+            self._split_runtime_status_strip(runtime_line)
+        )
+        return self._join_runtime_status_parts(
+            [state_label, elapsed_label, model_label, fast_label]
+        )
+
+    def _compact_runtime_secondary_line(self, runtime_line: str, context_line: str) -> str:
+        _model_label, _fast_label, remaining_label, _working_dir, _project_root, window_label = (
+            self._split_runtime_status_strip(runtime_line)
+        )
+        if remaining_label or window_label:
+            return self._join_runtime_status_parts([remaining_label, window_label])
+        value = str(context_line or "").strip()
+        if not value:
+            return ""
+        return value
+
+    def _compact_runtime_path_lines(self, runtime_line: str) -> List[str]:
+        _model_label, _fast_label, _remaining_label, working_dir, project_root, _window_label = (
+            self._split_runtime_status_strip(runtime_line)
+        )
+        lines: List[str] = []
+        if working_dir:
+            lines.append(f"DIR {self._compact_status_path(working_dir)}")
+        if project_root:
+            lines.append(f"ROOT {self._compact_status_path(project_root)}")
+        return lines
+
+    @staticmethod
+    def _compact_runtime_extra_lines(lines: List[str]) -> List[str]:
+        compact_lines: List[str] = []
+        for value in list(lines or [])[:3]:
+            normalized = str(value or "").strip()
+            if not normalized:
+                continue
+            compact_lines.append(normalized)
+        return compact_lines
+
+    @staticmethod
+    def _extract_runtime_state_label(line: str) -> str:
+        value = str(line or "").strip()
+        if not value:
+            return ""
+        if value.startswith("✅ 状态：已完成") or "Codex 已完成" in value:
+            return "✅ 已完成"
+        if value.startswith("⏸️ 状态：等待你的确认或补充信息"):
+            return "⏸️ 等待确认"
+        if value.startswith("⏳ 状态：运行中"):
+            return "⏳ 运行中"
+        if "Codex 正在处理" in value:
+            return "🤖 处理中"
+        return value
+
+    @classmethod
+    def _extract_runtime_elapsed_label(cls, line: str) -> str:
+        value = str(line or "").strip()
+        if not value:
+            return ""
+        matched = re.search(r"总耗时\s+([^)）]+)", value)
+        if matched:
+            return matched.group(1).strip()
+        matched = re.search(r"已运行\s+([^；;)）]+)", value)
+        if matched:
+            return matched.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _split_runtime_status_strip(line: str) -> tuple[str, str, str, str, str, str]:
+        parts = [str(item or "").strip() for item in str(line or "").split(" · ")]
+        while len(parts) < 6:
+            parts.append("")
+        return parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+
+    @classmethod
+    def _compact_status_path(cls, path_value: str, head_segments: int = 2, tail_segments: int = 2) -> str:
+        value = str(path_value or "").strip()
+        if len(value) <= 88:
+            return value
+        separator = "\\" if "\\" in value else "/"
+        parts = [part for part in re.split(r"[\\/]+", value) if part]
+        if len(parts) <= head_segments + tail_segments + 1:
+            return cls._truncate_text(value, limit=88)
+        compact = separator.join(parts[:head_segments] + ["…"] + parts[-tail_segments:])
+        return compact if len(compact) <= 88 else cls._truncate_text(compact, limit=88)
+
+    def _build_pending_interaction_status_lines(
+        self,
+        interaction: CodexInteractionRequest,
+    ) -> List[str]:
+        if not interaction:
+            return []
+
+        if interaction.interaction_type == "tool_user_input":
+            lines = ["⏸️ 等待补充信息"]
+            desc = self._tool_user_input_desc(interaction)
+            desc_lines = [item.strip() for item in str(desc or "").splitlines() if item.strip()]
+            if desc_lines:
+                lines.append(self._truncate_text(desc_lines[0], limit=88))
+            lines.append("回复：直接发送文字回答")
+            return lines
+
+        if interaction.interaction_type == "command_approval":
+            command = ((interaction.item or {}).get("command") or "").strip()
+            return [
+                f"⏸️ 等待授权：`{self._short_command(command)}`",
+                "回复：批准 / 会话允许 / 拒绝 / 取消",
+            ]
+        if interaction.interaction_type == "file_change_approval":
+            paths = self._extract_file_change_paths(interaction)
+            preview = ", ".join(paths[:2]) or "(未识别文件)"
+            return [
+                f"⏸️ 等待改动确认：{self._truncate_text(preview, limit=88)}",
+                "回复：批准 / 会话允许 / 拒绝 / 取消",
+            ]
+        if interaction.interaction_type == "permissions_approval":
+            summary = self._summarize_permissions(interaction.raw_params.get("permissions") or {})
+            first_line = next((item.strip() for item in summary.splitlines() if item.strip()), "")
+            lines = ["⏸️ 等待权限确认"]
+            if first_line:
+                lines.append(self._truncate_text(first_line, limit=88))
+            lines.append("回复：批准 / 会话允许 / 拒绝 / 取消")
+            return lines
+        if interaction.interaction_type == "mcp_elicitation":
+            desc = self._interaction_desc(interaction)
+            return [
+                "⏸️ 等待处理外部工具输入请求",
+                self._truncate_text(str(desc or "").strip(), limit=88),
+                "回复：拒绝 / 取消",
+            ]
+        return ["⏸️ 等待你的确认", "回复：继续发送文字交互"]
 
     @staticmethod
     def _short_command(command: str) -> str:

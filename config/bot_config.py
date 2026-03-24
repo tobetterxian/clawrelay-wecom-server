@@ -72,6 +72,7 @@ class BotConfigManager:
         self.bots: Dict[str, BotConfig] = {}
         self._missing_env_usages: Dict[str, set[str]] = {}
         self._config_path = config_path or os.getenv("BOT_CONFIG_PATH", "") or str(DEFAULT_CONFIG_PATH)
+        logger.info("机器人配置加载路径: %s", self._config_path)
         self._load_from_yaml(self._config_path)
 
     def _load_from_yaml(self, path: str):

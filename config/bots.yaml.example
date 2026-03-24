@@ -181,8 +181,10 @@ bots:
   #     default_github_owner: "${DEFAULT_GITHUB_OWNER:-}"  # 可选：企业微信对话里的 GitHub 列仓/建仓/推送统一使用该账号
   #     session_timeout_seconds: 7200
   #     enable_project_workspace_mode: true
-  #     long_task_keepalive_after_seconds: 20   # 可选：Codex CLI 任务超过 N 秒后插入“仍在处理中”提示；设为 0 可关闭
-  #     long_task_keepalive_interval_seconds: 20  # 可选：首次提示后每隔多少秒重复一次；设为 0 时按首次阈值处理
+  #     reasoning_effort: "medium"  # 可选：low | medium | high | xhigh
+  #     context_window_auto_resume_limit: 3  # 可选：上下文过长时自动续跑次数；设为 0 可关闭
+  #     long_task_keepalive_after_seconds: 300   # 可选：任务超过 N 秒后切到“长任务后台状态”模式；设为 0 可关闭
+  #     long_task_keepalive_interval_seconds: 300  # 可选：长任务状态刷新间隔；设为 0 时按首次阈值处理
   #     # add_dirs:
   #     #   - "/another/writable/path"
   #     # profile: "default"

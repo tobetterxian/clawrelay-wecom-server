@@ -42,6 +42,7 @@ class BusinessLogFilter(logging.Filter):
         '已注册的机器人:',
         '[Dispatcher:',
         '[OrchestratorFactory]',
+        '机器人配置加载路径',
 
         # === AI 模型初始化 ===
         '[Gemini]',
@@ -51,6 +52,11 @@ class BusinessLogFilter(logging.Filter):
         '[OpenAIModelSelector]',
         'OpenAI 编排器初始化',
         '[ClaudeRelay]',
+        '[CodexCLI]',
+        '[CodexApp]',
+        '运行环境诊断',
+        '配置文件诊断',
+        'Codex 配置诊断',
 
         # === 错误信息 ===
         'ERROR',

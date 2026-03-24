@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from config.bot_config import BotConfig
+from src.utils.path_utils import resolve_workspace_root_with_legacy_fallback
 
 from .project_registry import ProjectRegistry
 from .session_binding_manager import SessionBindingManager
@@ -94,14 +95,15 @@ class GroupProjectContextResolver:
     def _resolve_workspace_root(bot_config: BotConfig) -> str:
         provider_config = bot_config.provider_config or {}
         configured_root = str(provider_config.get("workspace_root") or "").strip()
-        if configured_root:
-            return str(Path(configured_root).expanduser().resolve())
         working_dir = str(bot_config.working_dir or "").strip()
         if not working_dir:
             return ""
-        return str(
-            (Path(working_dir).expanduser().resolve() / _DEFAULT_CODEX_CLI_WORKSPACE_ROOT_NAME).resolve()
+        resolved_root, _source = resolve_workspace_root_with_legacy_fallback(
+            working_dir=working_dir,
+            configured_root=configured_root,
+            default_root_name=_DEFAULT_CODEX_CLI_WORKSPACE_ROOT_NAME,
         )
+        return str(resolved_root)
 
     def has_sources(self) -> bool:
         return bool(self._stores)

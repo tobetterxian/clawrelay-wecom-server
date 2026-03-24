@@ -152,6 +152,11 @@ class OrchestratorFactory:
                 long_task_keepalive_interval_seconds=provider_config.get(
                     "long_task_keepalive_interval_seconds"
                 ),
+                context_window_auto_resume_limit=provider_config.get(
+                    "context_window_auto_resume_limit",
+                    3,
+                ),
+                reasoning_effort=provider_config.get("reasoning_effort", ""),
             )
 
         else:
