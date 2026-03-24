@@ -72,6 +72,8 @@ def test_friendly_error_maps_reconnect_messages():
         _friendly_error(Exception("[CodexCLI] Reconnecting in progress"))
         == _CODEX_CLI_RECONNECT_HINT
     )
+    assert "建议下一步命令：" in _CODEX_CLI_RECONNECT_HINT
+    assert "`当前任务`" in _CODEX_CLI_RECONNECT_HINT
 
 
 def test_friendly_error_maps_codex_common_failures():
@@ -119,6 +121,9 @@ def test_friendly_error_maps_codex_common_failures():
         )
         == _CODEX_CLI_STALE_THREAD_HINT
     )
+    assert "建议下一步命令：" in _CODEX_CLI_CONTEXT_WINDOW_HINT
+    assert "`重置`" in _CODEX_CLI_CONTEXT_WINDOW_HINT
+    assert "建议下一步命令：" in _CODEX_CLI_STALE_THREAD_HINT
 
 
 def test_friendly_error_maps_provider_configuration_failures():
@@ -202,6 +207,20 @@ def test_friendly_error_maps_provider_configuration_failures():
         )
         == _MODEL_CHANNEL_UNAVAILABLE_HINT
     )
+    assert "建议下一步命令：" in _CLAUDE_RELAY_CLI_NOT_FOUND_HINT
+    assert "`帮助`" in _CLAUDE_RELAY_CLI_NOT_FOUND_HINT
+    assert "建议下一步命令：" in _GEMINI_QUOTA_HINT
+
+
+def test_friendly_error_fallback_includes_next_step_commands():
+    from src.transport.message_dispatcher import _friendly_error
+
+    reply = _friendly_error(Exception("some unknown internal error"))
+
+    assert "抱歉，处理出错，请稍后重试。" in reply
+    assert "建议下一步命令：" in reply
+    assert "`当前任务`" in reply
+    assert "`重置`" in reply
 
 
 def test_build_interrupted_turn_resume_prompt_mentions_continue_without_repeating():

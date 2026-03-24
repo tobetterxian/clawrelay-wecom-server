@@ -41,173 +41,288 @@ from src.utils.weixin_utils import ImageUtils, FileUtils, ProactiveReplyClient
 
 logger = logging.getLogger(__name__)
 
-_RELAY_CONNECTION_HINT = (
-    "AI 服务暂时无法连接。\n"
-    "原因：ClawRelay 服务未启动、地址配置错误，或网络连接被拒绝。\n"
-    "处理：\n"
-    "1. 检查 ClawRelay 服务是否正常运行\n"
-    "2. 检查 `bots.yaml` 中的 `relay_url` 是否正确\n"
-    "3. 修改配置后重启服务再试。"
+def _build_error_hint(summary: str, reason: str, handling_steps: list[str], next_commands: list[str]) -> str:
+    lines = [summary, f"原因：{reason}", "处理："]
+    for idx, step in enumerate(handling_steps, start=1):
+        lines.append(f"{idx}. {step}")
+    if next_commands:
+        lines.append("建议下一步命令：")
+        for item in next_commands:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+_RELAY_CONNECTION_HINT = _build_error_hint(
+    "AI 服务暂时无法连接。",
+    "ClawRelay 服务未启动、地址配置错误，或网络连接被拒绝。",
+    [
+        "检查 ClawRelay 服务是否正常运行",
+        "检查 `bots.yaml` 中的 `relay_url` 是否正确",
+        "修改配置后重启服务再试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：待服务恢复后重新发送原需求",
+    ],
 )
-_RELAY_HTTP_ERROR_HINT = (
-    "AI 服务返回异常。\n"
-    "原因：ClawRelay 内部处理失败。\n"
-    "处理：\n"
-    "1. 查看 Relay 服务日志定位具体报错\n"
-    "2. 检查模型命令、工作目录和网络配置\n"
-    "3. 修复后重启相关服务。"
+_RELAY_HTTP_ERROR_HINT = _build_error_hint(
+    "AI 服务返回异常。",
+    "ClawRelay 内部处理失败。",
+    [
+        "查看 Relay 服务日志定位具体报错",
+        "检查模型命令、工作目录和网络配置",
+        "修复后重启相关服务。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：服务修复后重新发送原需求",
+    ],
 )
-_CLAUDE_RELAY_CLI_NOT_FOUND_HINT = (
-    "Claude Code 服务启动失败。\n"
-    "原因：服务器上未找到 `claude` 可执行文件。\n"
-    "处理：\n"
-    "1. 在运行 Relay 的机器上安装 Claude Code/CLI\n"
-    "2. 确认 `claude` 已加入服务进程的 PATH\n"
-    "3. 重启 Relay 与本服务后重试。"
+_CLAUDE_RELAY_CLI_NOT_FOUND_HINT = _build_error_hint(
+    "Claude Code 服务启动失败。",
+    "服务器上未找到 `claude` 可执行文件。",
+    [
+        "在运行 Relay 的机器上安装 Claude Code/CLI",
+        "确认 `claude` 已加入服务进程的 PATH",
+        "重启 Relay 与本服务后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：安装完成后重新发送原需求",
+    ],
 )
-_CLAUDE_RELAY_WORKDIR_HINT = (
-    "Claude Code 服务启动失败。\n"
-    "原因：配置的工作目录无效，Relay 无法切换到目标目录。\n"
-    "处理：\n"
-    "1. 检查 `bots.yaml` 中的 `working_dir` 是否为有效本机路径\n"
-    "2. 避免路径被截断、拼错或包含非法字符\n"
-    "3. 保存后重启服务再试。"
+_CLAUDE_RELAY_WORKDIR_HINT = _build_error_hint(
+    "Claude Code 服务启动失败。",
+    "配置的工作目录无效，Relay 无法切换到目标目录。",
+    [
+        "检查 `bots.yaml` 中的 `working_dir` 是否为有效本机路径",
+        "避免路径被截断、拼错或包含非法字符",
+        "保存后重启服务再试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复目录配置后重新发送原需求",
+    ],
 )
-_CODEX_CLI_NOT_FOUND_HINT = (
-    "本地 Codex CLI 不可用。\n"
-    "原因：服务进程找不到 `codex` 可执行文件。\n"
-    "处理：\n"
-    "1. 确认已安装 Codex CLI\n"
-    "2. 检查 `codex` 是否在服务进程的 PATH 中\n"
-    "3. 或在 `bots.yaml` 中设置 `provider_config.codex_path`\n"
-    "4. 重启服务后重试。"
+_CODEX_CLI_NOT_FOUND_HINT = _build_error_hint(
+    "本地 Codex CLI 不可用。",
+    "服务进程找不到 `codex` 可执行文件。",
+    [
+        "确认已安装 Codex CLI",
+        "检查 `codex` 是否在服务进程的 PATH 中",
+        "或在 `bots.yaml` 中设置 `provider_config.codex_path`",
+        "重启服务后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：安装或修复配置后重新发送原需求",
+    ],
 )
-_CODEX_CLI_SANDBOX_HINT = (
-    "本地 Codex CLI 沙箱不可用。\n"
-    "原因：当前环境的 `bwrap/user namespace` 能力异常。\n"
-    "处理：\n"
-    "1. 检查当前系统是否支持 `bwrap/user namespace`\n"
-    "2. 若在可信环境运行，可在 `bots.yaml` 中为 `codex_cli` 机器人设置\n"
-    "   `provider_config.dangerously_bypass_approvals_and_sandbox: true`\n"
-    "3. 修改配置后重启服务。"
+_CODEX_CLI_SANDBOX_HINT = _build_error_hint(
+    "本地 Codex CLI 沙箱不可用。",
+    "当前环境的 `bwrap/user namespace` 能力异常。",
+    [
+        "检查当前系统是否支持 `bwrap/user namespace`",
+        "若在可信环境运行，可在 `bots.yaml` 中为 `codex_cli` 机器人设置 `provider_config.dangerously_bypass_approvals_and_sandbox: true`",
+        "修改配置后重启服务。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复沙箱配置后重新发送原需求",
+    ],
 )
-_CODEX_CLI_EXEC_HINT = (
-    "本地 Codex CLI 调用失败。\n"
-    "原因：执行过程中被中断，或 Codex 后台进程异常退出。\n"
-    "处理：\n"
-    "1. 检查 Codex 登录状态与网络连通性\n"
-    "2. 检查工作目录、权限和本机环境是否正常\n"
-    "3. 如频繁出现，请查看服务日志中的原始异常。"
+_CODEX_CLI_EXEC_HINT = _build_error_hint(
+    "本地 Codex CLI 调用失败。",
+    "执行过程中被中断，或 Codex 后台进程异常退出。",
+    [
+        "检查 Codex 登录状态与网络连通性",
+        "检查工作目录、权限和本机环境是否正常",
+        "如频繁出现，请查看服务日志中的原始异常。",
+    ],
+    [
+        "`当前任务`：查看是否还有后台任务残留",
+        "`重试` 同类请求：确认环境正常后重新发送原需求",
+    ],
 )
-_CODEX_CLI_RECONNECT_HINT = (
-    "本地 Codex CLI 与服务端连接暂时中断。\n"
-    "原因：Codex 执行通道正在重连。\n"
-    "处理：\n"
-    "1. 稍等片刻后重试\n"
-    "2. 如长时间反复出现，请检查网络和 Codex 后台进程状态。"
+_CODEX_CLI_RECONNECT_HINT = _build_error_hint(
+    "本地 Codex CLI 与服务端连接暂时中断。",
+    "Codex 执行通道正在重连。",
+    [
+        "稍等片刻后重试",
+        "如长时间反复出现，请检查网络和 Codex 后台进程状态。",
+    ],
+    [
+        "`当前任务`：查看任务是否已经恢复",
+        "`停止`：若长时间无恢复，可先终止当前任务",
+    ],
 )
-_CODEX_CLI_CONTEXT_WINDOW_HINT = (
-    "当前会话上下文已满，Codex 暂时无法继续处理。\n"
-    "原因：这条会话累计的历史消息、引用内容或需求文档过长。\n"
-    "处理：\n"
-    "1. 回复“重置”或新开一个会话后重试\n"
-    "2. 长需求优先保存到项目文件，再发短命令引用文件路径\n"
-    "3. 避免在对话里重复粘贴整篇长文档。"
+_CODEX_CLI_CONTEXT_WINDOW_HINT = _build_error_hint(
+    "当前会话上下文已满，Codex 暂时无法继续处理。",
+    "这条会话累计的历史消息、引用内容或需求文档过长。",
+    [
+        "回复“重置”或新开一个会话后重试",
+        "长需求优先保存到项目文件，再发短命令引用文件路径",
+        "避免在对话里重复粘贴整篇长文档。",
+    ],
+    [
+        "`重置`：清空当前会话上下文后重试",
+        "`帮助`：查看推荐的短命令写法",
+    ],
 )
-_CODEX_CLI_TRUSTED_DIRECTORY_HINT = (
-    "当前项目目录未被 Codex 信任，任务未启动。\n"
-    "原因：Codex 拒绝在未信任的 Git 目录中执行。\n"
-    "处理：\n"
-    "1. 让管理员把该工作区加入可信目录，或调整 Codex 启动参数\n"
-    "2. 也可切换到已信任的项目目录后重试\n"
-    "3. 如环境已确认可信，再检查是否需要启用跳过仓库信任校验。"
+_CODEX_CLI_TRUSTED_DIRECTORY_HINT = _build_error_hint(
+    "当前项目目录未被 Codex 信任，任务未启动。",
+    "Codex 拒绝在未信任的 Git 目录中执行。",
+    [
+        "让管理员把该工作区加入可信目录，或调整 Codex 启动参数",
+        "也可切换到已信任的项目目录后重试",
+        "如环境已确认可信，再检查是否需要启用跳过仓库信任校验。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：工作区修复后重新发送原需求",
+    ],
 )
-_CODEX_CLI_CONFIG_UTF8_HINT = (
-    "Codex 配置文件读取失败。\n"
-    "原因：`C:\\Users\\Administrator\\.codex\\config.toml` 不是有效的 UTF-8 文本。\n"
-    "处理：\n"
-    "1. 用 UTF-8 编码重新保存该文件\n"
-    "2. 若文件已损坏，可先备份后删除，让 Codex 重新生成\n"
-    "3. 重启服务后再试。"
+_CODEX_CLI_CONFIG_UTF8_HINT = _build_error_hint(
+    "Codex 配置文件读取失败。",
+    "`C:\\Users\\Administrator\\.codex\\config.toml` 不是有效的 UTF-8 文本。",
+    [
+        "用 UTF-8 编码重新保存该文件",
+        "若文件已损坏，可先备份后删除，让 Codex 重新生成",
+        "重启服务后再试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：配置修复后重新发送原需求",
+    ],
 )
-_CODEX_CLI_WINDOWS_BINARY_HINT = (
-    "Codex 可执行文件无法在当前 Windows 环境启动。\n"
-    "原因：配置的 `codex` 不是有效的 Win32 程序，常见于误用了 Linux/macOS 二进制。\n"
-    "处理：\n"
-    "1. 安装 Windows 版 Codex CLI\n"
-    "2. 检查 `bots.yaml` 中的 `provider_config.codex_path`\n"
-    "3. 重启服务后重试。"
+_CODEX_CLI_WINDOWS_BINARY_HINT = _build_error_hint(
+    "Codex 可执行文件无法在当前 Windows 环境启动。",
+    "配置的 `codex` 不是有效的 Win32 程序，常见于误用了 Linux/macOS 二进制。",
+    [
+        "安装 Windows 版 Codex CLI",
+        "检查 `bots.yaml` 中的 `provider_config.codex_path`",
+        "重启服务后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复二进制路径后重新发送原需求",
+    ],
 )
-_CODEX_CLI_STALE_THREAD_HINT = (
-    "当前 Codex 会话状态已失效。\n"
-    "原因：之前的线程或 rollout 已不存在，无法继续复用。\n"
-    "处理：\n"
-    "1. 回复“重置”清空当前会话\n"
-    "2. 或直接重新发送任务，开启一轮新会话\n"
-    "3. 如频繁出现，请排查服务重连与会话状态同步。"
+_CODEX_CLI_STALE_THREAD_HINT = _build_error_hint(
+    "当前 Codex 会话状态已失效。",
+    "之前的线程或 rollout 已不存在，无法继续复用。",
+    [
+        "回复“重置”清空当前会话",
+        "或直接重新发送任务，开启一轮新会话",
+        "如频繁出现，请排查服务重连与会话状态同步。",
+    ],
+    [
+        "`重置`：清空当前会话并重新开始",
+        "`继续`：重置后重新发送你的任务内容",
+    ],
 )
-_CODEX_CLI_PROCESS_LIMIT_HINT = (
-    "Codex 执行通道已达到并发上限。\n"
-    "原因：后台保留的执行进程过多，新任务暂时无法继续。\n"
-    "处理：\n"
-    "1. 先停止或结束其它长任务\n"
-    "2. 必要时重启服务释放旧进程\n"
-    "3. 如经常出现，请排查进程回收逻辑。"
+_CODEX_CLI_PROCESS_LIMIT_HINT = _build_error_hint(
+    "Codex 执行通道已达到并发上限。",
+    "后台保留的执行进程过多，新任务暂时无法继续。",
+    [
+        "先停止或结束其它长任务",
+        "必要时重启服务释放旧进程",
+        "如经常出现，请排查进程回收逻辑。",
+    ],
+    [
+        "`当前任务`：查看是否仍有任务在运行",
+        "`停止`：先结束旧任务后再发新需求",
+    ],
 )
-_GEMINI_MODEL_NOT_FOUND_HINT = (
-    "Gemini 模型配置不可用。\n"
-    "原因：当前模型名称不存在，或与所用 API 版本不匹配。\n"
-    "处理：\n"
-    "1. 检查 `bots.yaml` 中的模型名是否正确\n"
-    "2. 检查当前 API 版本是否支持该模型\n"
-    "3. 切换到可用模型后重试。"
+_GEMINI_MODEL_NOT_FOUND_HINT = _build_error_hint(
+    "Gemini 模型配置不可用。",
+    "当前模型名称不存在，或与所用 API 版本不匹配。",
+    [
+        "检查 `bots.yaml` 中的模型名是否正确",
+        "检查当前 API 版本是否支持该模型",
+        "切换到可用模型后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复模型配置后重新发送原需求",
+    ],
 )
-_GEMINI_PAYLOAD_HINT = (
-    "Gemini 请求参数不兼容。\n"
-    "原因：当前请求体字段与所用 API 版本不匹配。\n"
-    "处理：\n"
-    "1. 检查 Gemini API 版本配置\n"
-    "2. 检查是否向旧版本接口传了新字段\n"
-    "3. 调整配置后重试。"
+_GEMINI_PAYLOAD_HINT = _build_error_hint(
+    "Gemini 请求参数不兼容。",
+    "当前请求体字段与所用 API 版本不匹配。",
+    [
+        "检查 Gemini API 版本配置",
+        "检查是否向旧版本接口传了新字段",
+        "调整配置后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复配置后重新发送原需求",
+    ],
 )
-_GEMINI_NETWORK_HINT = (
-    "Gemini 服务暂时不可达。\n"
-    "原因：网络异常、远端服务中断，或连接被重置。\n"
-    "处理：\n"
-    "1. 稍后重试\n"
-    "2. 检查本机网络、代理和防火墙配置\n"
-    "3. 如持续失败，请检查 Gemini 服务状态。"
+_GEMINI_NETWORK_HINT = _build_error_hint(
+    "Gemini 服务暂时不可达。",
+    "网络异常、远端服务中断，或连接被重置。",
+    [
+        "稍后重试",
+        "检查本机网络、代理和防火墙配置",
+        "如持续失败，请检查 Gemini 服务状态。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：网络恢复后重新发送原需求",
+    ],
 )
-_GEMINI_LOCATION_HINT = (
-    "当前 Gemini 请求被地区策略拦截。\n"
-    "原因：当前网络出口所在地区不支持该 API 调用。\n"
-    "处理：\n"
-    "1. 更换到受支持地区的网络出口\n"
-    "2. 或改用当前环境可用的其它模型提供方。"
+_GEMINI_LOCATION_HINT = _build_error_hint(
+    "当前 Gemini 请求被地区策略拦截。",
+    "当前网络出口所在地区不支持该 API 调用。",
+    [
+        "更换到受支持地区的网络出口",
+        "或改用当前环境可用的其它模型提供方。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：切换网络出口后重新发送原需求",
+    ],
 )
-_GEMINI_QUOTA_HINT = (
-    "Gemini 当前额度不足。\n"
-    "原因：API 配额或速率限制已触发。\n"
-    "处理：\n"
-    "1. 检查 Gemini 控制台中的配额与账单状态\n"
-    "2. 降低调用频率或切换到有额度的模型\n"
-    "3. 配额恢复后再试。"
+_GEMINI_QUOTA_HINT = _build_error_hint(
+    "Gemini 当前额度不足。",
+    "API 配额或速率限制已触发。",
+    [
+        "检查 Gemini 控制台中的配额与账单状态",
+        "降低调用频率或切换到有额度的模型",
+        "配额恢复后再试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：额度恢复后重新发送原需求",
+    ],
 )
-_GEMINI_API_KEY_HINT = (
-    "Gemini API Key 无效。\n"
-    "原因：配置的密钥错误、失效或未生效。\n"
-    "处理：\n"
-    "1. 检查环境变量或配置文件中的 API Key\n"
-    "2. 确认该 Key 已开通目标 API 权限\n"
-    "3. 更新后重启服务。"
+_GEMINI_API_KEY_HINT = _build_error_hint(
+    "Gemini API Key 无效。",
+    "配置的密钥错误、失效或未生效。",
+    [
+        "检查环境变量或配置文件中的 API Key",
+        "确认该 Key 已开通目标 API 权限",
+        "更新后重启服务。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：修复 Key 后重新发送原需求",
+    ],
 )
-_MODEL_CHANNEL_UNAVAILABLE_HINT = (
-    "当前模型暂不可用。\n"
-    "原因：服务端配置的模型在当前渠道/分组中没有可用供应商。\n"
-    "处理：\n"
-    "1. 检查模型名称是否正确\n"
-    "2. 检查对应渠道或分组是否已开通\n"
-    "3. 切换到可用模型后重试。"
+_MODEL_CHANNEL_UNAVAILABLE_HINT = _build_error_hint(
+    "当前模型暂不可用。",
+    "服务端配置的模型在当前渠道/分组中没有可用供应商。",
+    [
+        "检查模型名称是否正确",
+        "检查对应渠道或分组是否已开通",
+        "切换到可用模型后重试。",
+    ],
+    [
+        "`帮助`：查看当前还能继续使用的命令",
+        "`重试` 同类请求：切换可用模型后重新发送原需求",
+    ],
 )
 _CODEX_CLI_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
 _HELP_MENU_TRIGGER_RE = re.compile(r"^\s*1[.、:：)]?\s*$")
@@ -263,7 +378,18 @@ def _friendly_error(e: Exception) -> str:
         return _GEMINI_MODEL_NOT_FOUND_HINT
     if "model_not_found" in lowered and ("无可用渠道" in msg or "distributor" in lowered):
         return _MODEL_CHANNEL_UNAVAILABLE_HINT
-    return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
+    return _build_error_hint(
+        "抱歉，处理出错，请稍后重试。",
+        "暂未识别的内部异常。",
+        [
+            "如再次出现，请查看服务日志中的原始报错",
+            "若问题持续，请联系管理员排查服务环境与配置",
+        ],
+        [
+            "`当前任务`：查看是否还有后台任务在运行",
+            "`重置`：清空当前会话后重新发送原需求",
+        ],
+    )
 
 # 节流间隔(秒)
 STREAM_THROTTLE_INTERVAL = 0.3
