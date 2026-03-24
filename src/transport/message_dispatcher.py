@@ -1229,6 +1229,31 @@ class MessageDispatcher:
             return normalized
         return normalized[: max(limit - 1, 0)].rstrip() + "…"
 
+    @staticmethod
+    def _looks_like_running_status_preview(content: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(content or "")).strip()
+        if not normalized:
+            return False
+        return (
+            "Codex 正在处理" in normalized
+            or "状态：仍在处理中" in normalized
+            or "状态：运行中" in normalized
+        )
+
+    @staticmethod
+    def _append_multiline_labeled_line(lines: list[str], label: str, content: str) -> None:
+        value = str(content or "").strip()
+        if not value:
+            return
+        parts = value.splitlines()
+        first = parts[0].strip()
+        if first:
+            lines.append(f"{label}{first}")
+        for item in parts[1:]:
+            item = item.strip()
+            if item:
+                lines.append(item)
+
     def _task_registry_key(self, runtime_session_key: str) -> str:
         return f"{self.bot_key}:{runtime_session_key}"
 
@@ -1247,6 +1272,7 @@ class MessageDispatcher:
             preview = self._summarize_stream_preview((recent or {}).get("last_preview") or "")
             terminal_status = str((recent or {}).get("terminal_status") or "completed").strip().lower()
             reply_delivery_failed = bool((recent or {}).get("reply_delivery_failed"))
+            terminal_error_user = str((recent or {}).get("terminal_error_user") or "").strip()
             terminal_error = self._summarize_stream_preview(
                 str((recent or {}).get("terminal_error") or ""),
                 limit=180,
@@ -1264,8 +1290,22 @@ class MessageDispatcher:
                 lines.append("提示：原回复通道异常，系统已通过主动回复补发结果。")
             elif reply_delivery_failed:
                 lines.append("提示：执行期间回复通道异常，最终结果可能没有成功送达。")
-            if terminal_error and terminal_status == "error":
-                lines.append(f"最近错误：{terminal_error}")
+            if terminal_status == "error":
+                if terminal_error_user:
+                    self._append_multiline_labeled_line(lines, "最近错误：", terminal_error_user)
+                elif terminal_error:
+                    lines.append(f"最近错误：{terminal_error}")
+            if terminal_status == "error" and self._looks_like_running_status_preview(preview):
+                preview = ""
+            if terminal_status == "error" and preview:
+                comparable_preview = re.sub(r"\s+", " ", str(preview or "")).strip()
+                comparable_error = re.sub(
+                    r"\s+",
+                    " ",
+                    str(terminal_error_user or terminal_error or ""),
+                ).strip()
+                if comparable_preview and comparable_error and comparable_preview in comparable_error:
+                    preview = ""
             if preview:
                 lines.append(f"最近输出：{preview}")
             resume_state = recent.get("brochure_delegate_resume")
@@ -3038,12 +3078,13 @@ class MessageDispatcher:
 
         inner_task = asyncio.create_task(coro)
         task_key = f"{self.bot_key}:{session_key}"
+        active_reply_state = reply_state or self._build_reply_state(req_id, stream_id)
         get_task_registry().register(
             task_key,
             inner_task,
             stream_id,
             req_id=req_id,
-            reply_state=reply_state or self._build_reply_state(req_id, stream_id),
+            reply_state=active_reply_state,
         )
 
         try:
@@ -3053,7 +3094,15 @@ class MessageDispatcher:
             logger.info("[Dispatcher:%s] 任务被用户取消: session_key=%s", self.bot_key, session_key)
         except Exception as e:
             logger.error("[Dispatcher:%s] AI 处理异常: %s", self.bot_key, e, exc_info=True)
-            await self._reply_stream(req_id, stream_id, _friendly_error(e), finish=True)
+            friendly_error = _friendly_error(e)
+            get_task_registry().annotate(
+                task_key,
+                last_preview=self._summarize_stream_preview(friendly_error),
+                terminal_error_user=friendly_error,
+            )
+            target_req_id = str((active_reply_state or {}).get("req_id") or req_id)
+            target_stream_id = str((active_reply_state or {}).get("stream_id") or stream_id)
+            await self._reply_stream(target_req_id, target_stream_id, friendly_error, finish=True)
 
     # ---- 回复辅助方法 ----
 

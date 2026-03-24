@@ -113,6 +113,19 @@ class TaskRegistry:
             current.update(extra)
             return True
 
+    def annotate(self, key: str, **extra) -> bool:
+        """更新运行中或最近结束任务的附加状态，不改动活动时间"""
+        with self._lock:
+            if key in self._extra:
+                current = self._extra.setdefault(key, {})
+                current.update(extra)
+                return True
+            if key in self._recent:
+                current = self._recent.setdefault(key, {})
+                current.update(extra)
+                return True
+            return False
+
     def cancel(self, key: str) -> tuple[bool, Optional[str], dict]:
         """取消任务
 

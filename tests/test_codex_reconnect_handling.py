@@ -801,6 +801,81 @@ def test_message_dispatcher_ignores_late_running_status_after_finish():
         assert "总耗时 42 秒" in payloads[1]["body"]["stream"]["content"]
 
 
+def test_run_with_task_registry_error_updates_recent_status_and_current_reply_target():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    async def run_flow(dispatcher: MessageDispatcher, task_key: str, reply_state: dict):
+        registry = get_task_registry()
+
+        async def failing_coro():
+            registry.touch(
+                task_key,
+                last_preview="🤖 Codex 正在处理...\n⏳ 状态：仍在处理中（已运行 25 分 37 秒；可回复“停止”）",
+            )
+            reply_state["req_id"] = "req_new"
+            reply_state["stream_id"] = "stream_new"
+            raise Exception(
+                "Codex ran out of room in the model's context window. "
+                "Start a new thread or clear earlier history before retrying."
+            )
+
+        await dispatcher._run_with_task_registry(
+            "req_old",
+            "stream_old",
+            "session-error-status",
+            failing_coro(),
+            reply_state=reply_state,
+        )
+        await asyncio.sleep(0)
+        return registry.get_recent(task_key)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-error-status")
+        registry = get_task_registry()
+        registry.forget(task_key)
+        reply_state = {"req_id": "req_old", "stream_id": "stream_old", "prefix": ""}
+
+        recent = asyncio.run(run_flow(dispatcher, task_key, reply_state))
+        reply = dispatcher._running_task_status_reply("session-error-status")
+
+        assert recent["terminal_status"] == "error"
+        assert recent["last_preview"].startswith("当前会话上下文已满")
+        assert recent["terminal_error_user"].startswith("当前会话上下文已满")
+        assert len(ws.payloads) == 1
+        assert ws.payloads[0]["headers"]["req_id"] == "req_new"
+        assert ws.payloads[0]["body"]["stream"]["id"] == "stream_new"
+        assert ws.payloads[0]["body"]["stream"]["finish"] is True
+        assert "当前会话上下文已满" in ws.payloads[0]["body"]["stream"]["content"]
+        assert "最近错误：当前会话上下文已满" in reply
+        assert "状态：仍在处理中" not in reply
+        registry.forget(task_key)
+
+
 def test_message_dispatcher_final_stream_failure_uses_proactive_reply_fallback():
     from src.core.task_registry import get_task_registry
     from src.transport.message_dispatcher import MessageDispatcher
