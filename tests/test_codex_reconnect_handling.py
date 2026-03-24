@@ -74,6 +74,136 @@ def test_friendly_error_maps_reconnect_messages():
     )
 
 
+def test_friendly_error_maps_codex_common_failures():
+    from src.transport.message_dispatcher import (
+        _CODEX_CLI_CONFIG_UTF8_HINT,
+        _CODEX_CLI_CONTEXT_WINDOW_HINT,
+        _CODEX_CLI_STALE_THREAD_HINT,
+        _CODEX_CLI_TRUSTED_DIRECTORY_HINT,
+        _CODEX_CLI_WINDOWS_BINARY_HINT,
+        _friendly_error,
+    )
+
+    assert (
+        _friendly_error(
+            Exception(
+                "Codex ran out of room in the model's context window. "
+                "Start a new thread or clear earlier history before retrying."
+            )
+        )
+        == _CODEX_CLI_CONTEXT_WINDOW_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                "[CodexCLI] Process exited with code 1: "
+                "Not inside a trusted directory and --skip-git-repo-check was not specified."
+            )
+        )
+        == _CODEX_CLI_TRUSTED_DIRECTORY_HINT
+    )
+    assert _friendly_error(Exception("[WinError 193] %1 不是有效的 Win32 应用程序。")) == _CODEX_CLI_WINDOWS_BINARY_HINT
+    assert (
+        _friendly_error(
+            Exception(
+                "{'code': -32600, 'message': 'failed to load configuration: "
+                "Failed to read config file C:\\\\Users\\\\Administrator\\\\.codex\\\\config.toml: "
+                "stream did not contain valid UTF-8'}"
+            )
+        )
+        == _CODEX_CLI_CONFIG_UTF8_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception("{'code': -32600, 'message': 'no rollout found for thread id 019d03a8'}")
+        )
+        == _CODEX_CLI_STALE_THREAD_HINT
+    )
+
+
+def test_friendly_error_maps_provider_configuration_failures():
+    from src.transport.message_dispatcher import (
+        _CLAUDE_RELAY_CLI_NOT_FOUND_HINT,
+        _CLAUDE_RELAY_WORKDIR_HINT,
+        _GEMINI_API_KEY_HINT,
+        _GEMINI_LOCATION_HINT,
+        _GEMINI_MODEL_NOT_FOUND_HINT,
+        _GEMINI_PAYLOAD_HINT,
+        _GEMINI_QUOTA_HINT,
+        _MODEL_CHANNEL_UNAVAILABLE_HINT,
+        _friendly_error,
+    )
+
+    assert (
+        _friendly_error(
+            Exception(
+                '[ClaudeRelay] HTTP 500 error: {"error":{"code":500,"message":"failed to start claude: '
+                'exec: \\"claude\\": executable file not found in %PATH%","type":"server_error"}}'
+            )
+        )
+        == _CLAUDE_RELAY_CLI_NOT_FOUND_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                '[ClaudeRelay] HTTP 500 error: {"error":{"code":500,"message":"failed to start claude: '
+                'chdir C:\\\\next: The filename, directory name, or volume label syntax is incorrect.",'
+                '"type":"server_error"}}'
+            )
+        )
+        == _CLAUDE_RELAY_WORKDIR_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                'Gemini API error: HTTP 400, {"error":{"message":"API key not valid. Please pass a valid API key."}}'
+            )
+        )
+        == _GEMINI_API_KEY_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                'Gemini API error: HTTP 400, {"error":{"message":"User location is not supported for the API use."}}'
+            )
+        )
+        == _GEMINI_LOCATION_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                'Gemini API error: HTTP 429, {"error":{"message":"You exceeded your current quota, please check your plan and billing details."}}'
+            )
+        )
+        == _GEMINI_QUOTA_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                'Gemini API error: HTTP 400, {"error":{"message":"Invalid JSON payload received. Unknown name \\"systemInstruction\\": Cannot find field."}}'
+            )
+        )
+        == _GEMINI_PAYLOAD_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                'Gemini API error: HTTP 404, {"error":{"message":"models/gemini-2.0-flash-exp is not found for API version v1beta"}}'
+            )
+        )
+        == _GEMINI_MODEL_NOT_FOUND_HINT
+    )
+    assert (
+        _friendly_error(
+            Exception(
+                "Error code: 503 - {'error': {'code': 'model_not_found', 'message': "
+                "'分组 default 下模型 gpt-4o 无可用渠道（distributor）', 'type': 'new_api_error'}}"
+            )
+        )
+        == _MODEL_CHANNEL_UNAVAILABLE_HINT
+    )
+
+
 def test_build_interrupted_turn_resume_prompt_mentions_continue_without_repeating():
     prompt = CodexCliOrchestrator._build_interrupted_turn_resume_prompt("继续开发企业官网")
 

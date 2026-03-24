@@ -42,32 +42,172 @@ from src.utils.weixin_utils import ImageUtils, FileUtils, ProactiveReplyClient
 logger = logging.getLogger(__name__)
 
 _RELAY_CONNECTION_HINT = (
-    "AI 服务暂时无法连接，请联系管理员检查：\n"
-    "1. ClawRelay 服务是否正常运行\n"
-    "2. bots.yaml 中的 relay_url 配置是否正确\n"
-    "修改配置后需要重启服务才能生效。"
+    "AI 服务暂时无法连接。\n"
+    "原因：ClawRelay 服务未启动、地址配置错误，或网络连接被拒绝。\n"
+    "处理：\n"
+    "1. 检查 ClawRelay 服务是否正常运行\n"
+    "2. 检查 `bots.yaml` 中的 `relay_url` 是否正确\n"
+    "3. 修改配置后重启服务再试。"
 )
 _RELAY_HTTP_ERROR_HINT = (
-    "AI 服务返回异常，请联系管理员检查 ClawRelay 服务状态。"
+    "AI 服务返回异常。\n"
+    "原因：ClawRelay 内部处理失败。\n"
+    "处理：\n"
+    "1. 查看 Relay 服务日志定位具体报错\n"
+    "2. 检查模型命令、工作目录和网络配置\n"
+    "3. 修复后重启相关服务。"
+)
+_CLAUDE_RELAY_CLI_NOT_FOUND_HINT = (
+    "Claude Code 服务启动失败。\n"
+    "原因：服务器上未找到 `claude` 可执行文件。\n"
+    "处理：\n"
+    "1. 在运行 Relay 的机器上安装 Claude Code/CLI\n"
+    "2. 确认 `claude` 已加入服务进程的 PATH\n"
+    "3. 重启 Relay 与本服务后重试。"
+)
+_CLAUDE_RELAY_WORKDIR_HINT = (
+    "Claude Code 服务启动失败。\n"
+    "原因：配置的工作目录无效，Relay 无法切换到目标目录。\n"
+    "处理：\n"
+    "1. 检查 `bots.yaml` 中的 `working_dir` 是否为有效本机路径\n"
+    "2. 避免路径被截断、拼错或包含非法字符\n"
+    "3. 保存后重启服务再试。"
 )
 _CODEX_CLI_NOT_FOUND_HINT = (
-    "本地 Codex CLI 不可用，请联系管理员检查：\n"
-    "1. 是否已安装 codex CLI\n"
-    "2. codex 是否在服务进程的 PATH 中\n"
-    "3. 服务重启后是否生效。"
+    "本地 Codex CLI 不可用。\n"
+    "原因：服务进程找不到 `codex` 可执行文件。\n"
+    "处理：\n"
+    "1. 确认已安装 Codex CLI\n"
+    "2. 检查 `codex` 是否在服务进程的 PATH 中\n"
+    "3. 或在 `bots.yaml` 中设置 `provider_config.codex_path`\n"
+    "4. 重启服务后重试。"
 )
 _CODEX_CLI_SANDBOX_HINT = (
-    "本地 Codex CLI 沙箱不可用，请联系管理员检查：\n"
-    "1. 当前系统是否支持 bwrap/user namespace\n"
-    "2. 若在可信环境运行，可在 bots.yaml 中为 codex_cli 机器人设置\n"
-    "   provider_config.dangerously_bypass_approvals_and_sandbox: true\n"
-    "3. 修改配置后需要重启服务。"
+    "本地 Codex CLI 沙箱不可用。\n"
+    "原因：当前环境的 `bwrap/user namespace` 能力异常。\n"
+    "处理：\n"
+    "1. 检查当前系统是否支持 `bwrap/user namespace`\n"
+    "2. 若在可信环境运行，可在 `bots.yaml` 中为 `codex_cli` 机器人设置\n"
+    "   `provider_config.dangerously_bypass_approvals_and_sandbox: true`\n"
+    "3. 修改配置后重启服务。"
 )
 _CODEX_CLI_EXEC_HINT = (
-    "本地 Codex CLI 调用失败，请联系管理员检查 codex 登录状态、网络连通性和工作目录配置。"
+    "本地 Codex CLI 调用失败。\n"
+    "原因：执行过程中被中断，或 Codex 后台进程异常退出。\n"
+    "处理：\n"
+    "1. 检查 Codex 登录状态与网络连通性\n"
+    "2. 检查工作目录、权限和本机环境是否正常\n"
+    "3. 如频繁出现，请查看服务日志中的原始异常。"
 )
 _CODEX_CLI_RECONNECT_HINT = (
-    "本地 Codex CLI 与服务端连接暂时中断，系统正在重连，请稍后再试。"
+    "本地 Codex CLI 与服务端连接暂时中断。\n"
+    "原因：Codex 执行通道正在重连。\n"
+    "处理：\n"
+    "1. 稍等片刻后重试\n"
+    "2. 如长时间反复出现，请检查网络和 Codex 后台进程状态。"
+)
+_CODEX_CLI_CONTEXT_WINDOW_HINT = (
+    "当前会话上下文已满，Codex 暂时无法继续处理。\n"
+    "原因：这条会话累计的历史消息、引用内容或需求文档过长。\n"
+    "处理：\n"
+    "1. 回复“重置”或新开一个会话后重试\n"
+    "2. 长需求优先保存到项目文件，再发短命令引用文件路径\n"
+    "3. 避免在对话里重复粘贴整篇长文档。"
+)
+_CODEX_CLI_TRUSTED_DIRECTORY_HINT = (
+    "当前项目目录未被 Codex 信任，任务未启动。\n"
+    "原因：Codex 拒绝在未信任的 Git 目录中执行。\n"
+    "处理：\n"
+    "1. 让管理员把该工作区加入可信目录，或调整 Codex 启动参数\n"
+    "2. 也可切换到已信任的项目目录后重试\n"
+    "3. 如环境已确认可信，再检查是否需要启用跳过仓库信任校验。"
+)
+_CODEX_CLI_CONFIG_UTF8_HINT = (
+    "Codex 配置文件读取失败。\n"
+    "原因：`C:\\Users\\Administrator\\.codex\\config.toml` 不是有效的 UTF-8 文本。\n"
+    "处理：\n"
+    "1. 用 UTF-8 编码重新保存该文件\n"
+    "2. 若文件已损坏，可先备份后删除，让 Codex 重新生成\n"
+    "3. 重启服务后再试。"
+)
+_CODEX_CLI_WINDOWS_BINARY_HINT = (
+    "Codex 可执行文件无法在当前 Windows 环境启动。\n"
+    "原因：配置的 `codex` 不是有效的 Win32 程序，常见于误用了 Linux/macOS 二进制。\n"
+    "处理：\n"
+    "1. 安装 Windows 版 Codex CLI\n"
+    "2. 检查 `bots.yaml` 中的 `provider_config.codex_path`\n"
+    "3. 重启服务后重试。"
+)
+_CODEX_CLI_STALE_THREAD_HINT = (
+    "当前 Codex 会话状态已失效。\n"
+    "原因：之前的线程或 rollout 已不存在，无法继续复用。\n"
+    "处理：\n"
+    "1. 回复“重置”清空当前会话\n"
+    "2. 或直接重新发送任务，开启一轮新会话\n"
+    "3. 如频繁出现，请排查服务重连与会话状态同步。"
+)
+_CODEX_CLI_PROCESS_LIMIT_HINT = (
+    "Codex 执行通道已达到并发上限。\n"
+    "原因：后台保留的执行进程过多，新任务暂时无法继续。\n"
+    "处理：\n"
+    "1. 先停止或结束其它长任务\n"
+    "2. 必要时重启服务释放旧进程\n"
+    "3. 如经常出现，请排查进程回收逻辑。"
+)
+_GEMINI_MODEL_NOT_FOUND_HINT = (
+    "Gemini 模型配置不可用。\n"
+    "原因：当前模型名称不存在，或与所用 API 版本不匹配。\n"
+    "处理：\n"
+    "1. 检查 `bots.yaml` 中的模型名是否正确\n"
+    "2. 检查当前 API 版本是否支持该模型\n"
+    "3. 切换到可用模型后重试。"
+)
+_GEMINI_PAYLOAD_HINT = (
+    "Gemini 请求参数不兼容。\n"
+    "原因：当前请求体字段与所用 API 版本不匹配。\n"
+    "处理：\n"
+    "1. 检查 Gemini API 版本配置\n"
+    "2. 检查是否向旧版本接口传了新字段\n"
+    "3. 调整配置后重试。"
+)
+_GEMINI_NETWORK_HINT = (
+    "Gemini 服务暂时不可达。\n"
+    "原因：网络异常、远端服务中断，或连接被重置。\n"
+    "处理：\n"
+    "1. 稍后重试\n"
+    "2. 检查本机网络、代理和防火墙配置\n"
+    "3. 如持续失败，请检查 Gemini 服务状态。"
+)
+_GEMINI_LOCATION_HINT = (
+    "当前 Gemini 请求被地区策略拦截。\n"
+    "原因：当前网络出口所在地区不支持该 API 调用。\n"
+    "处理：\n"
+    "1. 更换到受支持地区的网络出口\n"
+    "2. 或改用当前环境可用的其它模型提供方。"
+)
+_GEMINI_QUOTA_HINT = (
+    "Gemini 当前额度不足。\n"
+    "原因：API 配额或速率限制已触发。\n"
+    "处理：\n"
+    "1. 检查 Gemini 控制台中的配额与账单状态\n"
+    "2. 降低调用频率或切换到有额度的模型\n"
+    "3. 配额恢复后再试。"
+)
+_GEMINI_API_KEY_HINT = (
+    "Gemini API Key 无效。\n"
+    "原因：配置的密钥错误、失效或未生效。\n"
+    "处理：\n"
+    "1. 检查环境变量或配置文件中的 API Key\n"
+    "2. 确认该 Key 已开通目标 API 权限\n"
+    "3. 更新后重启服务。"
+)
+_MODEL_CHANNEL_UNAVAILABLE_HINT = (
+    "当前模型暂不可用。\n"
+    "原因：服务端配置的模型在当前渠道/分组中没有可用供应商。\n"
+    "处理：\n"
+    "1. 检查模型名称是否正确\n"
+    "2. 检查对应渠道或分组是否已开通\n"
+    "3. 切换到可用模型后重试。"
 )
 _CODEX_CLI_RECONNECT_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
 _HELP_MENU_TRIGGER_RE = re.compile(r"^\s*1[.、:：)]?\s*$")
@@ -76,21 +216,53 @@ _QUOTE_HINT_TOKENS = ("quote", "quoted", "reply", "refer", "reference", "citatio
 
 def _friendly_error(e: Exception) -> str:
     """将内部异常转为用户友好的错误提示"""
-    msg = str(e)
-    if "[ClaudeRelay] Connection error" in msg:
+    msg = str(e or "")
+    lowered = msg.strip().lower()
+
+    if "failed to start claude: exec:" in lowered and "not found in %path%" in lowered:
+        return _CLAUDE_RELAY_CLI_NOT_FOUND_HINT
+    if "failed to start claude: chdir" in lowered:
+        return _CLAUDE_RELAY_WORKDIR_HINT
+    if "[clauderelay] connection error" in lowered:
         return _RELAY_CONNECTION_HINT
-    if "[ClaudeRelay] HTTP" in msg:
+    if "[clauderelay] http" in lowered:
         return _RELAY_HTTP_ERROR_HINT
+    if "ran out of room in the model's context window" in lowered:
+        return _CODEX_CLI_CONTEXT_WINDOW_HINT
+    if "not inside a trusted directory" in lowered and "--skip-git-repo-check" in lowered:
+        return _CODEX_CLI_TRUSTED_DIRECTORY_HINT
+    if "stream did not contain valid utf-8" in lowered and "config.toml" in lowered:
+        return _CODEX_CLI_CONFIG_UTF8_HINT
+    if "[winerror 193]" in lowered:
+        return _CODEX_CLI_WINDOWS_BINARY_HINT
+    if "no rollout found for thread id" in lowered:
+        return _CODEX_CLI_STALE_THREAD_HINT
+    if "the maximum number of unified exec processes" in lowered:
+        return _CODEX_CLI_PROCESS_LIMIT_HINT
     if "[CodexCLI] 未找到 codex 命令" in msg:
         return _CODEX_CLI_NOT_FOUND_HINT
-    if "bwrap: Creating new namespace failed" in msg:
+    if "bwrap: creating new namespace failed" in lowered:
         return _CODEX_CLI_SANDBOX_HINT
-    if "[CodexCLI] Reconnecting in progress" in msg or _CODEX_CLI_RECONNECT_RE.match(msg.strip()):
+    if "[codexcli] reconnecting in progress" in lowered or _CODEX_CLI_RECONNECT_RE.match(msg.strip()):
         return _CODEX_CLI_RECONNECT_HINT
-    if "[CodexCLI] Turn interrupted before completion" in msg:
+    if "[codexcli] turn interrupted before completion" in lowered:
         return _CODEX_CLI_EXEC_HINT
-    if "[CodexCLI] Process exited" in msg or "Codex app-server 进程异常退出" in msg:
+    if "[codexcli] process exited" in lowered or "Codex app-server 进程异常退出" in msg:
         return _CODEX_CLI_EXEC_HINT
+    if "api key not valid" in lowered or "api_key_invalid" in lowered:
+        return _GEMINI_API_KEY_HINT
+    if "user location is not supported for the api use" in lowered:
+        return _GEMINI_LOCATION_HINT
+    if "quota exceeded" in lowered or "exceeded your current quota" in lowered:
+        return _GEMINI_QUOTA_HINT
+    if "cannot connect to host generativelanguage.googleapis.com" in lowered or "server disconnected" in lowered:
+        return _GEMINI_NETWORK_HINT
+    if "unknown name \\\"systeminstruction\\\"" in lowered or 'unknown name "systeminstruction"' in lowered:
+        return _GEMINI_PAYLOAD_HINT
+    if "models/" in lowered and "is not found" in lowered:
+        return _GEMINI_MODEL_NOT_FOUND_HINT
+    if "model_not_found" in lowered and ("无可用渠道" in msg or "distributor" in lowered):
+        return _MODEL_CHANNEL_UNAVAILABLE_HINT
     return f"抱歉，处理出错，请稍后重试。如问题持续，请联系管理员。"
 
 # 节流间隔(秒)
