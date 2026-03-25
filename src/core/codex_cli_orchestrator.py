@@ -1376,17 +1376,8 @@ class CodexCliOrchestrator(BaseOrchestrator):
                                 action_hint=self._interaction_action_hint(event),
                             )
                         )
-                        visible_prompt = self._build_interaction_text_prompt(event)
-                        pending_text = runtime_state.visible_text()
-                        if visible_prompt:
-                            pending_text = pending_text.strip()
-                            if pending_text:
-                                if visible_prompt not in pending_text:
-                                    pending_text = f"{pending_text}\n\n{visible_prompt}"
-                            else:
-                                pending_text = visible_prompt
                         await _emit_stream_update(
-                            pending_text,
+                            runtime_state.visible_text(),
                             allow_keepalive=False,
                         )
                         if on_interaction_request:

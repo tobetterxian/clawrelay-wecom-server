@@ -155,6 +155,42 @@ def test_codex_runtime_state_exports_current_stage_line():
     assert state.current_stage_line() == "❓ Codex 需要你补充信息"
 
 
+def test_message_dispatcher_runtime_preview_prefers_structured_snapshot_fields():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    payload = {
+        "runtime_visible_text": "正在分析项目结构",
+        "runtime_last_detail_line": "🔧 `rg --files`",
+        "last_preview": "旧预览",
+    }
+    assert MessageDispatcher._runtime_preview_from_payload(payload) == "正在分析项目结构"
+
+    payload = {
+        "runtime_visible_text": "",
+        "runtime_last_detail_line": "🔧 `rg --files`",
+        "last_preview": "旧预览",
+    }
+    assert MessageDispatcher._runtime_preview_from_payload(payload) == "🔧 `rg --files`"
+
+
+def test_message_dispatcher_runtime_pending_and_stage_lines_are_structured():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    payload = {
+        "runtime_pending_title": "⚠️ Codex 请求执行命令",
+        "runtime_pending_desc": "命令：rg --files",
+        "runtime_pending_action_hint": "请直接回复：批准 / 会话允许 / 拒绝 / 取消",
+        "runtime_stage_line": "⚠️ Codex 请求执行命令",
+    }
+
+    pending_lines = MessageDispatcher._runtime_pending_status_lines(payload)
+
+    assert pending_lines[0] == "状态：⚠️ Codex 请求执行命令"
+    assert "详情：命令：rg --files" in pending_lines
+    assert "下一步：请直接回复：批准 / 会话允许 / 拒绝 / 取消" in pending_lines
+    assert MessageDispatcher._runtime_stage_line(payload) == "⚠️ Codex 请求执行命令"
+
+
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():
     assert CodexCliOrchestrator._looks_like_context_window_exhausted(
         {

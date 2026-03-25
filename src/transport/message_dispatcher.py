@@ -1334,6 +1334,12 @@ class MessageDispatcher:
         return ""
 
     @staticmethod
+    def _same_compact_text(left: str, right: str) -> bool:
+        normalized_left = re.sub(r"\s+", " ", str(left or "")).strip()
+        normalized_right = re.sub(r"\s+", " ", str(right or "")).strip()
+        return bool(normalized_left) and normalized_left == normalized_right
+
+    @staticmethod
     def _looks_like_running_status_preview(content: str) -> bool:
         normalized = re.sub(r"\s+", " ", str(content or "")).strip()
         if not normalized:
@@ -1495,6 +1501,8 @@ class MessageDispatcher:
                 ).strip()
                 if comparable_preview and comparable_error and comparable_preview in comparable_error:
                     preview = ""
+            if stage_line and self._same_compact_text(preview, stage_line):
+                preview = ""
             if preview:
                 lines.append(f"最近输出：{preview}")
             resume_state = recent.get("brochure_delegate_resume")
@@ -1571,6 +1579,8 @@ class MessageDispatcher:
             lines.append("如需中断可回复：停止")
 
         lines.extend(self._context_window_status_lines(extra))
+        if stage_line and self._same_compact_text(preview, stage_line):
+            preview = ""
         if preview:
             lines.append(f"最近输出：{preview}")
         return "\n".join(lines)
