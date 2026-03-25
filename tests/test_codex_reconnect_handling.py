@@ -326,6 +326,22 @@ def test_friendly_error_maps_codex_upstream_stream_disconnect():
     assert "`当前任务`" in reply
 
 
+def test_compose_final_stream_content_clears_running_prefix():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    content = MessageDispatcher._compose_final_stream_content(
+        {
+            "prefix": (
+                "⏳ 长任务继续后台执行，后续状态在这条新消息里实时显示。\n"
+                "如需查看最终结果，请留意本条消息后续更新。"
+            )
+        },
+        "✅ 已完成 · 5 分 38 秒 · gpt-5.4/xhigh · Fast on",
+    )
+
+    assert content == "✅ 已完成 · 5 分 38 秒 · gpt-5.4/xhigh · Fast on"
+
+
 def test_friendly_error_maps_provider_configuration_failures():
     from src.transport.message_dispatcher import (
         _CLAUDE_RELAY_CLI_NOT_FOUND_HINT,

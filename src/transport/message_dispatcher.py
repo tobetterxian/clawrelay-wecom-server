@@ -1603,6 +1603,12 @@ class MessageDispatcher:
             return f"{prefix}\n\n{content}"
         return prefix or content
 
+    @classmethod
+    def _compose_final_stream_content(cls, reply_state: dict, content: str) -> str:
+        final_reply_state = dict(reply_state or {})
+        final_reply_state["prefix"] = ""
+        return cls._compose_stream_content(final_reply_state, content)
+
     @staticmethod
     def _join_delegate_sections(sections: list[str], live_text: str = "") -> str:
         parts = [str(item or "").strip() for item in (sections or []) if str(item or "").strip()]
@@ -3246,13 +3252,15 @@ class MessageDispatcher:
                 if not target_req_id or not target_stream_id:
                     logger.warning("[Dispatcher:%s] 缺少流式回复目标，跳过最终推送", self.bot_key)
                     return
-                final_content = self._compose_stream_content(reply_state, accumulated_text)
+                reply_state["prefix"] = ""
+                final_content = self._compose_final_stream_content(reply_state, accumulated_text)
                 if task_key:
                     from src.core.task_registry import get_task_registry
 
                     get_task_registry().touch(
                         task_key,
                         last_preview=self._summarize_stream_preview(final_content),
+                        reply_state=dict(reply_state or {}),
                     )
                 needs_finish_confirmation = (
                     final_content != state['last_pushed_content']
@@ -3309,6 +3317,9 @@ class MessageDispatcher:
                 state['last_pushed_content'] = final_content
                 return
 
+            if state['finished']:
+                return
+
             if task_key:
                 from src.core.task_registry import get_task_registry
 
@@ -3316,9 +3327,6 @@ class MessageDispatcher:
                     task_key,
                     last_preview=self._summarize_stream_preview(accumulated_text),
                 )
-
-            if state['finished']:
-                return
 
             await _maybe_auto_handoff_long_running_stream()
 
