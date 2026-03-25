@@ -7,6 +7,7 @@ ClawRelay WeCom Server - WebSocket Long Connection Mode
 """
 
 import asyncio
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.transport.ws_client import WsClient
 from src.transport.message_dispatcher import MessageDispatcher
 from src.core.bot_delegate_manager import BotDelegateManager
 from src.core.group_project_context_resolver import GroupProjectContextResolver
+from src.adapters.codex_app_server_adapter import cleanup_spawned_codex_processes
 from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_checks
 from src.utils.single_instance import SingleInstanceLock, SingleInstanceError
 
@@ -65,7 +67,21 @@ async def run_bot(bot_config, orchestrator=None, group_project_context_resolver=
     ws_client._on_event_callback = dispatcher.on_event_callback
 
     logger.info("启动机器人: %s (%s)", bot_config.bot_key, bot_config.description)
-    await ws_client.run()
+    try:
+        await ws_client.run()
+    finally:
+        try:
+            await ws_client.stop()
+        except Exception:
+            logger.warning("停止机器人 WebSocket 失败: %s", bot_config.bot_key, exc_info=True)
+        shutdown = getattr(dispatcher.orchestrator, "shutdown", None)
+        if callable(shutdown):
+            try:
+                result = shutdown()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.warning("关闭机器人编排器失败: %s", bot_config.bot_key, exc_info=True)
 
 
 async def main():
@@ -135,3 +151,5 @@ if __name__ == "__main__":
         raise SystemExit(1)
     except KeyboardInterrupt:
         logger.info("收到退出信号，关闭服务")
+    finally:
+        cleanup_spawned_codex_processes("main_process_exit")

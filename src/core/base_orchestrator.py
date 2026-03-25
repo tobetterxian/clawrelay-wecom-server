@@ -98,6 +98,10 @@ class BaseOrchestrator(ABC):
         """
         return None
 
+    async def shutdown(self) -> None:
+        """关闭编排器并释放持有的运行时资源"""
+        return None
+
     def has_pending_interaction(self, session_key: str) -> bool:
         """当前会话是否存在待处理的人机交互"""
         return False

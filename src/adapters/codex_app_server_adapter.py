@@ -5,11 +5,15 @@ Codex App Server 适配器
 支持 thread/turn 生命周期、审批请求、文件变更审查与用户补充输入。
 """
 
+import atexit
 import asyncio
 import json
 import logging
 import os
 import re
+import signal
+import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -18,6 +22,87 @@ from src.utils.path_utils import resolve_local_path
 
 logger = logging.getLogger(__name__)
 CODEX_STREAM_RETRY_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
+_SPAWNED_CODEX_PIDS: set[int] = set()
+_SPAWNED_CODEX_PIDS_LOCK = threading.Lock()
+
+
+def register_spawned_codex_pid(pid: int) -> None:
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if normalized_pid <= 0:
+        return
+    with _SPAWNED_CODEX_PIDS_LOCK:
+        _SPAWNED_CODEX_PIDS.add(normalized_pid)
+    logger.info("[CodexApp] 注册子进程: pid=%s", normalized_pid)
+
+
+def unregister_spawned_codex_pid(pid: int) -> None:
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if normalized_pid <= 0:
+        return
+    with _SPAWNED_CODEX_PIDS_LOCK:
+        _SPAWNED_CODEX_PIDS.discard(normalized_pid)
+
+
+def list_spawned_codex_pids() -> list[int]:
+    with _SPAWNED_CODEX_PIDS_LOCK:
+        return sorted(_SPAWNED_CODEX_PIDS)
+
+
+def cleanup_spawned_codex_processes(reason: str = "process_exit") -> list[int]:
+    pids = list_spawned_codex_pids()
+    if not pids:
+        return []
+
+    cleaned: list[int] = []
+    for pid in pids:
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if result.returncode not in (0, 128, 255):
+                    logger.warning(
+                        "[CodexApp] taskkill 返回非预期状态: pid=%s, code=%s, reason=%s",
+                        pid,
+                        result.returncode,
+                        reason,
+                    )
+            else:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            cleaned.append(pid)
+        except Exception:
+            logger.warning(
+                "[CodexApp] 清理子进程失败: pid=%s, reason=%s",
+                pid,
+                reason,
+                exc_info=True,
+            )
+        finally:
+            unregister_spawned_codex_pid(pid)
+
+    if cleaned:
+        logger.warning(
+            "[CodexApp] 已清理残留 codex 子进程: count=%s, pids=%s, reason=%s",
+            len(cleaned),
+            cleaned,
+            reason,
+        )
+    return cleaned
+
+
+atexit.register(cleanup_spawned_codex_processes, "atexit")
 
 
 @dataclass
@@ -458,6 +543,8 @@ class CodexAppServerSession:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
             except Exception:
                 pass
+            finally:
+                unregister_spawned_codex_pid(self.process.pid or 0)
 
     @property
     def _process_return_code(self) -> Optional[int]:
@@ -484,6 +571,8 @@ class CodexAppServerSession:
             raise CodexAppServerError(
                 f"[CodexCLI] 未找到 codex 命令: {self.executable}。请先安装 Codex CLI，或在 bots.yaml 中设置 provider_config.codex_path。"
             ) from e
+
+        register_spawned_codex_pid(getattr(self.process, "pid", 0))
 
         self._stdout_task = asyncio.create_task(self._stdout_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
@@ -532,6 +621,7 @@ class CodexAppServerSession:
         try:
             return_code = await self.process.wait()
             logger.info("[CodexApp] app-server exited: code=%s", return_code)
+            unregister_spawned_codex_pid(self.process.pid or 0)
         except asyncio.CancelledError:
             return
 

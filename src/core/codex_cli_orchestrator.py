@@ -1059,6 +1059,28 @@ class CodexCliOrchestrator(BaseOrchestrator):
             shutil.rmtree(upload_dir, ignore_errors=True)
         logger.info("[CodexCLI] 清空会话: bot=%s, session_key=%s", self.bot_key, session_key)
 
+    async def shutdown(self) -> None:
+        sessions = list(self._active_sessions.items())
+        self._active_sessions.clear()
+        self._active_runtime_contexts.clear()
+        if not sessions:
+            return
+        logger.warning(
+            "[CodexCLI] 服务退出，开始关闭活跃 Codex 会话: bot=%s, count=%s",
+            self.bot_key,
+            len(sessions),
+        )
+        for session_key, runtime in sessions:
+            try:
+                await runtime.close()
+            except Exception:
+                logger.warning(
+                    "[CodexCLI] 关闭活跃 Codex 会话失败: bot=%s, session_key=%s",
+                    self.bot_key,
+                    session_key,
+                    exc_info=True,
+                )
+
     def has_pending_interaction(self, session_key: str) -> bool:
         runtime = self._active_sessions.get(session_key)
         return runtime.has_pending_interaction() if runtime else False

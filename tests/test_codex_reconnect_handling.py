@@ -323,6 +323,58 @@ def test_codex_app_session_does_not_override_config_toml_in_thread_params():
     }
 
 
+def test_codex_cli_orchestrator_shutdown_closes_active_sessions():
+    class DummyRuntime:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    async def run_flow():
+        orchestrator = CodexCliOrchestrator(bot_key="cx_bot", working_dir=".")
+        runtime_a = DummyRuntime()
+        runtime_b = DummyRuntime()
+        orchestrator._active_sessions["s1"] = runtime_a
+        orchestrator._active_sessions["s2"] = runtime_b
+        orchestrator._active_runtime_contexts["s1"] = {"working_dir": "."}
+        orchestrator._active_runtime_contexts["s2"] = {"working_dir": "."}
+
+        await orchestrator.shutdown()
+        return orchestrator, runtime_a, runtime_b
+
+    orchestrator, runtime_a, runtime_b = asyncio.run(run_flow())
+
+    assert runtime_a.closed is True
+    assert runtime_b.closed is True
+    assert orchestrator._active_sessions == {}
+    assert orchestrator._active_runtime_contexts == {}
+
+
+def test_cleanup_spawned_codex_processes_unregisters_registered_pids():
+    from src.adapters.codex_app_server_adapter import (
+        cleanup_spawned_codex_processes,
+        list_spawned_codex_pids,
+        register_spawned_codex_pid,
+    )
+
+    register_spawned_codex_pid(99991)
+    register_spawned_codex_pid(99992)
+
+    if os.name == "nt":
+        with patch("src.adapters.codex_app_server_adapter.subprocess.run") as mocked_run:
+            mocked_run.return_value = SimpleNamespace(returncode=128)
+            cleaned = cleanup_spawned_codex_processes("test_cleanup")
+            assert cleaned == [99991, 99992]
+    else:
+        with patch("src.adapters.codex_app_server_adapter.os.kill") as mocked_kill:
+            cleaned = cleanup_spawned_codex_processes("test_cleanup")
+            assert cleaned == [99991, 99992]
+            assert mocked_kill.call_count == 2
+
+    assert list_spawned_codex_pids() == []
+
+
 def test_codex_app_session_does_not_override_config_toml_in_turn_params():
     from src.adapters.codex_app_server_adapter import CodexAppServerSession
 
