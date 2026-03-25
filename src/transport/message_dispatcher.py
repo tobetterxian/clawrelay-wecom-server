@@ -1270,6 +1270,40 @@ class MessageDispatcher:
             return normalized
         return normalized[: max(limit - 1, 0)].rstrip() + "…"
 
+    @classmethod
+    def _runtime_preview_from_payload(cls, payload: dict, limit: int = 120) -> str:
+        data = dict(payload or {})
+        candidates = [
+            data.get("runtime_visible_text"),
+            data.get("runtime_last_detail_line"),
+            data.get("last_preview"),
+            data.get("runtime_commentary_text"),
+            data.get("runtime_response_text"),
+        ]
+        for candidate in candidates:
+            preview = cls._summarize_stream_preview(str(candidate or ""), limit=limit)
+            if preview:
+                return preview
+        return ""
+
+    @classmethod
+    def _runtime_pending_status_lines(cls, payload: dict) -> list[str]:
+        data = dict(payload or {})
+        title = str(data.get("runtime_pending_title") or "").strip()
+        desc = str(data.get("runtime_pending_desc") or "").strip()
+        action_hint = str(data.get("runtime_pending_action_hint") or "").strip()
+        if not title and not desc and not action_hint:
+            return []
+
+        lines: list[str] = []
+        if title:
+            lines.append(f"状态：{title}")
+        if desc:
+            cls._append_multiline_labeled_line(lines, "详情：", desc)
+        if action_hint:
+            lines.append(f"下一步：{action_hint}")
+        return lines
+
     @staticmethod
     def _looks_like_running_status_preview(content: str) -> bool:
         normalized = re.sub(r"\s+", " ", str(content or "")).strip()
@@ -1388,7 +1422,7 @@ class MessageDispatcher:
 
             now = time.time()
             finished_at = float((recent or {}).get("finished_at") or now)
-            preview = self._summarize_stream_preview((recent or {}).get("last_preview") or "")
+            preview = self._runtime_preview_from_payload(recent)
             terminal_status = str((recent or {}).get("terminal_status") or "completed").strip().lower()
             reply_delivery_failed = bool((recent or {}).get("reply_delivery_failed"))
             terminal_error_user = str((recent or {}).get("terminal_error_user") or "").strip()
@@ -1463,7 +1497,7 @@ class MessageDispatcher:
             render_silent_seconds = max(now_monotonic - last_status_render_at_monotonic, 0)
         else:
             render_silent_seconds = max(now - last_status_render_at, 0)
-        preview = self._summarize_stream_preview((extra or {}).get("last_preview") or "")
+        preview = self._runtime_preview_from_payload(extra)
 
         stale_after_seconds = RUNNING_TASK_SILENT_WARNING_SECONDS
         keepalive_after_seconds = int(
@@ -1484,9 +1518,13 @@ class MessageDispatcher:
             lines.append(runtime_strip)
         freshness_seconds = min(silent_seconds, render_silent_seconds)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
-            lines.append("状态：等待你的确认或补充信息")
+            pending_lines = self._runtime_pending_status_lines(extra)
+            if pending_lines:
+                lines.extend(pending_lines)
+            else:
+                lines.append("状态：等待你的确认或补充信息")
+                lines.append("下一步：请直接回复答案；如需取消请回复“停止”")
             lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
-            lines.append("下一步：请直接回复答案；如需取消请回复“停止”")
         elif freshness_seconds >= stale_after_seconds:
             lines.append(f"状态：疑似卡住（已静默 {self._format_elapsed_duration(silent_seconds)}）")
             lines.append(f"已运行：{self._format_elapsed_duration(running_seconds)}")
@@ -2390,7 +2428,7 @@ class MessageDispatcher:
 
         old_req_id = str(reply_state.get("req_id") or "")
         old_stream_id = str(reply_state.get("stream_id") or "")
-        handoff_preview = self._summarize_stream_preview((extra or {}).get("last_preview") or "", limit=180)
+        handoff_preview = self._runtime_preview_from_payload(extra, limit=180)
         new_stream_id = uuid.uuid4().hex[:12]
         reply_state["req_id"] = req_id
         reply_state["stream_id"] = new_stream_id

@@ -29,6 +29,7 @@ from src.core.json_state_store import JsonStateStore
 from src.core.orchestrator_factory import OrchestratorFactory
 from src.core.project_deployment_manager import ProjectDeploymentManager
 from src.core.project_registry import ProjectRegistry
+from src.core.codex_runtime_state import CodexRuntimePendingState, CodexRuntimeState
 from src.utils.path_utils import (
     resolve_local_path,
     resolve_workspace_root_with_legacy_fallback,
@@ -105,6 +106,34 @@ def test_select_runtime_display_text_prefers_commentary_before_final_answer():
         )
         == "等待你的确认"
     )
+
+
+def test_codex_runtime_state_prefers_response_then_commentary_and_exports_pending_snapshot():
+    state = CodexRuntimeState()
+    state.add_static_line("已进入项目工作区")
+    state.set_runtime_status_line("gpt-5.4/xhigh · Fast on · ≈80.0% left")
+    state.append_detail_line("🔧 `rg --files`")
+    state.append_commentary_text("先检查项目结构。")
+
+    assert state.visible_text() == "先检查项目结构。"
+
+    state.append_response_text("开始修复状态同步。")
+    assert state.visible_text() == "开始修复状态同步。"
+
+    state.set_pending(
+        CodexRuntimePendingState(
+            kind="command_approval",
+            title="⚠️ Codex 请求执行命令",
+            description="命令：rg --files",
+            action_hint="请直接回复：批准 / 会话允许 / 拒绝 / 取消",
+        )
+    )
+    payload = state.to_registry_payload()
+
+    assert payload["runtime_visible_text"] == "开始修复状态同步。"
+    assert payload["runtime_last_detail_line"] == "🔧 `rg --files`"
+    assert payload["runtime_pending_kind"] == "command_approval"
+    assert payload["runtime_pending_title"] == "⚠️ Codex 请求执行命令"
 
 
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():

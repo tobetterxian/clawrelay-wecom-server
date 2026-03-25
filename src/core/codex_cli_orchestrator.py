@@ -22,6 +22,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .base_orchestrator import BaseOrchestrator, OnStreamDelta
 from .chat_logger import get_chat_logger
+from .codex_runtime_state import CodexRuntimePendingState, CodexRuntimeState
 from .cloudflare_pages_manager import (
     CloudflarePagesDeploymentInfo,
     CloudflarePagesManager,
@@ -1130,24 +1131,24 @@ class CodexCliOrchestrator(BaseOrchestrator):
         effective_key = runtime_context["runtime_session_key"]
         current_thread_id = runtime_context.get("thread_id") or ""
 
-        thinking_lines = ["🤖 Codex 正在处理..."]
+        runtime_state = CodexRuntimeState(
+            response_text=str(runtime_context.get("first_reply_guidance") or "").strip()
+        )
         runtime_status_strip = self._build_runtime_status_strip(runtime_context)
         if runtime_status_strip:
-            thinking_lines.append(runtime_status_strip)
+            runtime_state.set_runtime_status_line(runtime_status_strip)
         if runtime_context.get("initial_notice"):
-            thinking_lines.append(runtime_context["initial_notice"])
+            runtime_state.add_static_line(runtime_context["initial_notice"])
         else:
             usage_hint = self._build_default_project_usage_hint(
                 message_content=message_content,
                 runtime_context=runtime_context,
             )
             if usage_hint:
-                thinking_lines.append(usage_hint)
+                runtime_state.add_static_line(usage_hint)
 
         reconnect_retry_count = 0
         context_auto_resume_count = 0
-        response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
-        commentary_text = ""
         commands_seen: List[str] = []
         base_turn_inputs = list(inputs or [])
         turn_inputs = list(base_turn_inputs)
@@ -1175,15 +1176,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 finished: bool = False,
                 allow_keepalive: bool = True,
             ) -> str:
-                display_text = self._select_runtime_display_text(
-                    response_text=response_text,
-                    commentary_text=commentary_text,
-                    override_text=override_text,
-                )
+                display_text = runtime_state.visible_text(override_text=override_text)
                 elapsed_seconds = self._runtime_elapsed_seconds(task_started_at)
                 live_status_mode = self._task_status_live_mode(effective_key)
                 rendered_thinking_lines = self._render_runtime_thinking_lines(
-                    thinking_lines,
+                    runtime_state.render_lines(),
                     elapsed_seconds=elapsed_seconds,
                     finished=finished,
                     allow_keepalive=allow_keepalive,
@@ -1215,6 +1212,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 nonlocal last_emitted_content
                 if not on_stream_delta:
                     return
+                self._annotate_task_runtime_snapshot(effective_key, runtime_state)
                 content = _build_live_display_content(
                     override_text,
                     finished=finished,
@@ -1282,11 +1280,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 )
                 runtime_status_strip = self._build_runtime_status_strip(runtime_context, runtime_status)
                 if runtime_status_strip:
-                    self._upsert_runtime_thinking_line(
-                        thinking_lines,
-                        self._runtime_status_line_prefix(runtime_status),
-                        runtime_status_strip,
-                    )
+                    runtime_state.set_runtime_status_line(runtime_status_strip)
                     await _emit_stream_update()
                 if current_thread_id:
                     self.binding_manager.save_thread_id(
@@ -1296,26 +1290,25 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     )
 
                 async for event in runtime.stream_turn(turn_inputs):
+                    if not isinstance(event, CodexInteractionRequest):
+                        runtime_state.clear_pending()
                     if isinstance(event, CodexCommandExecutionStart):
                         turn_progressed = True
                         short_command = self._short_command(event.command)
                         commands_seen.append(short_command)
-                        self._append_runtime_detail_line(thinking_lines, f"🔧 `{short_command}`")
+                        runtime_state.append_detail_line(f"🔧 `{short_command}`")
                         await _emit_stream_update()
                     elif isinstance(event, CodexCommandExecutionComplete):
                         turn_progressed = True
                         failure_line = self._format_command_result(event)
                         if failure_line:
-                            self._append_runtime_detail_line(thinking_lines, failure_line)
+                            runtime_state.append_detail_line(failure_line)
                             await _emit_stream_update()
                     elif isinstance(event, CodexFileChangeStart):
                         turn_progressed = True
                         file_count = len(event.changes or [])
                         if file_count:
-                            self._append_runtime_detail_line(
-                                thinking_lines,
-                                f"📝 提议修改 {file_count} 个文件",
-                            )
+                            runtime_state.append_detail_line(f"📝 提议修改 {file_count} 个文件")
                             await _emit_stream_update()
                     elif isinstance(event, CodexTokenUsageUpdate):
                         turn_progressed = True
@@ -1324,15 +1317,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         self._annotate_task_context_window(effective_key, **context_usage)
                         runtime_status = self._build_runtime_status_payload(runtime, runtime_context)
                         runtime_status.update(context_usage)
-                        self._upsert_runtime_thinking_line(
-                            thinking_lines,
-                            self._runtime_status_line_prefix(runtime_status),
-                            self._build_runtime_status_strip(runtime_context, runtime_status),
+                        runtime_state.set_runtime_status_line(
+                            self._build_runtime_status_strip(runtime_context, runtime_status)
                         )
-                        self._upsert_runtime_thinking_line(
-                            thinking_lines,
-                            "🧠 上下文估算：",
-                            self._format_context_window_estimate_line(context_usage),
+                        runtime_state.set_context_line(
+                            self._format_context_window_estimate_line(context_usage)
                         )
                         await _emit_stream_update()
                     elif isinstance(event, CodexContextCompaction):
@@ -1342,8 +1331,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                             effective_key,
                             context_compaction_count=context_compaction_count,
                         )
-                        self._upsert_runtime_thinking_line(
-                            thinking_lines,
+                        runtime_state.upsert_notice(
                             "🗜️ 上下文压缩：",
                             f"🗜️ 上下文压缩：已触发 {context_compaction_count} 次",
                         )
@@ -1352,8 +1340,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         stream_error_detail = str(
                             event.additional_details or event.message or ""
                         ).strip()
-                        self._upsert_runtime_thinking_line(
-                            thinking_lines,
+                        runtime_state.upsert_notice(
                             "🔄 上游流重连：",
                             (
                                 "🔄 上游流重连："
@@ -1367,23 +1354,30 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_progressed = True
                         if event.text:
                             if self._is_commentary_agent_message_phase(event.phase):
-                                if event.is_new_message and commentary_text.strip():
-                                    commentary_text += "\n\n"
-                                commentary_text += event.text
+                                runtime_state.append_commentary_text(
+                                    event.text,
+                                    is_new_message=event.is_new_message,
+                                )
                                 await _emit_stream_update()
                                 continue
-                            commentary_text = ""
-                            if event.is_new_message and response_text.strip():
-                                response_text += "\n\n"
-                            response_text += event.text
+                            runtime_state.clear_commentary_text()
+                            runtime_state.append_response_text(
+                                event.text,
+                                is_new_message=event.is_new_message,
+                            )
                             await _emit_stream_update()
                     elif isinstance(event, CodexInteractionRequest):
                         turn_progressed = True
-                        visible_prompt = self._build_interaction_text_prompt(event)
-                        pending_text = self._select_runtime_display_text(
-                            response_text=response_text,
-                            commentary_text=commentary_text,
+                        runtime_state.set_pending(
+                            CodexRuntimePendingState(
+                                kind=event.interaction_type,
+                                title=self._interaction_title(event),
+                                description=self._interaction_desc(event),
+                                action_hint=self._interaction_action_hint(event),
+                            )
                         )
+                        visible_prompt = self._build_interaction_text_prompt(event)
+                        pending_text = runtime_state.visible_text()
                         if visible_prompt:
                             pending_text = pending_text.strip()
                             if pending_text:
@@ -1400,10 +1394,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
                                 self._build_interaction_payload(event, effective_key)
                             )
 
-                if not response_text.strip():
-                    response_text = "Codex 已完成处理，但未生成文本回复。"
+                if not runtime_state.response_text.strip():
+                    runtime_state.set_response_text("Codex 已完成处理，但未生成文本回复。")
 
-                thinking_lines.append("✨ 回复完成")
+                runtime_state.clear_pending()
+                runtime_state.append_detail_line("✨ 回复完成")
                 await _emit_stream_update(finished=True, allow_keepalive=False)
 
                 latency_ms = int((time.time() - start_time) * 1000)
@@ -1418,7 +1413,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     user_id=user_id,
                     stream_id=stream_id,
                     message_content=message_content,
-                    response_content=response_text,
+                    response_content=runtime_state.response_text,
                     status="success",
                     latency_ms=latency_ms,
                     request_at=request_at,
@@ -1426,7 +1421,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     tools_used=commands_seen or None,
                     log_context=log_context,
                 )
-                return response_text
+                return runtime_state.response_text
 
             except asyncio.CancelledError:
                 logger.warning("[CodexCLI] 任务被取消: bot=%s, user=%s", self.bot_key, user_id)
@@ -1460,7 +1455,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
                 ):
                     reconnect_retry_count += 1
-                    thinking_lines.append(
+                    runtime_state.append_detail_line(
                         f"🔄 Codex 执行通道中断，正在继续（{reconnect_retry_count}/{CODEX_TRANSIENT_RETRY_LIMIT}）"
                     )
                     turn_inputs = [
@@ -1482,7 +1477,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_inputs = self._build_context_window_resume_inputs(
                             base_turn_inputs=base_turn_inputs,
                             original_message=message_content,
-                            partial_response_text=response_text,
+                            partial_response_text=runtime_state.visible_text(),
                             commands_seen=commands_seen,
                             runtime_context=runtime_context,
                             resume_attempt=context_auto_resume_count,
@@ -1493,8 +1488,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                             context_auto_resumed=True,
                             context_last_recovery_reason="context_window_exceeded",
                         )
-                        self._upsert_runtime_thinking_line(
-                            thinking_lines,
+                        runtime_state.upsert_notice(
                             "♻️ 自动续跑：",
                             f"♻️ 自动续跑：上下文过长，已切换新线程继续（{context_auto_resume_count}/{self.context_window_auto_resume_limit}）",
                         )
@@ -1513,7 +1507,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     and reconnect_retry_count < CODEX_TRANSIENT_RETRY_LIMIT
                 ):
                     reconnect_retry_count += 1
-                    thinking_lines.append(
+                    runtime_state.append_detail_line(
                         f"🔄 Codex 连接短暂中断，正在重试（{reconnect_retry_count}/{CODEX_TRANSIENT_RETRY_LIMIT}）"
                     )
                     await _emit_stream_update()
@@ -5872,6 +5866,23 @@ class CodexCliOrchestrator(BaseOrchestrator):
             **payload,
         )
 
+    def _annotate_task_runtime_snapshot(
+        self,
+        runtime_session_key: str,
+        runtime_state: Optional[CodexRuntimeState],
+    ) -> None:
+        from src.core.task_registry import get_task_registry
+
+        if runtime_state is None:
+            return
+        payload = runtime_state.to_registry_payload()
+        if not payload:
+            return
+        get_task_registry().annotate(
+            f"{self.bot_key}:{runtime_session_key}",
+            **payload,
+        )
+
     def _task_status_live_mode(self, runtime_session_key: str) -> bool:
         from src.core.task_registry import get_task_registry
 
@@ -7347,21 +7358,22 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _build_interaction_text_prompt(self, interaction: CodexInteractionRequest) -> str:
         title = self._interaction_title(interaction)
         desc = self._interaction_desc(interaction)
+        action_hint = self._interaction_action_hint(interaction)
+        return "\n\n".join([title, desc, action_hint])
 
+    @staticmethod
+    def _interaction_action_hint(interaction: CodexInteractionRequest) -> str:
         if interaction.interaction_type in {
             "command_approval",
             "file_change_approval",
             "permissions_approval",
         }:
-            action_hint = "请直接回复：批准 / 会话允许 / 拒绝 / 取消"
-        elif interaction.interaction_type == "tool_user_input":
-            action_hint = "请直接发送你的回答；如果有多个问题，请按 问题ID=答案 每行一个回复"
-        elif interaction.interaction_type == "mcp_elicitation":
-            action_hint = "请直接回复：拒绝 / 取消"
-        else:
-            action_hint = "请直接发送文字继续交互"
-
-        return "\n\n".join([title, desc, action_hint])
+            return "请直接回复：批准 / 会话允许 / 拒绝 / 取消"
+        if interaction.interaction_type == "tool_user_input":
+            return "请直接发送你的回答；如果有多个问题，请按 问题ID=答案 每行一个回复"
+        if interaction.interaction_type == "mcp_elicitation":
+            return "请直接回复：拒绝 / 取消"
+        return "请直接发送文字继续交互"
 
     def _build_interaction_task_id(
         self,
