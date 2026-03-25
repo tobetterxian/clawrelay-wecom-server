@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -16,6 +17,7 @@ from typing import Any, Dict, List, Optional, Union
 from src.utils.path_utils import resolve_local_path
 
 logger = logging.getLogger(__name__)
+CODEX_STREAM_RETRY_RE = re.compile(r"^Reconnecting\.\.\.\s+\d+/\d+$", re.IGNORECASE)
 
 
 @dataclass
@@ -87,6 +89,14 @@ class CodexContextCompaction:
 
 
 @dataclass
+class CodexStreamError:
+    message: str
+    additional_details: str = ""
+    codex_error_info: Optional[Any] = None
+    will_retry: bool = True
+
+
+@dataclass
 class CodexInteractionRequest:
     interaction_type: str
     request_id: Union[int, str]
@@ -106,6 +116,7 @@ StreamEvent = Union[
     CodexFileChangeComplete,
     CodexTokenUsageUpdate,
     CodexContextCompaction,
+    CodexStreamError,
     CodexInteractionRequest,
 ]
 
@@ -161,6 +172,8 @@ class CodexAppServerSession:
         self._agent_message_lengths: Dict[str, int] = {}
         self._context_compaction_item_ids: set[str] = set()
         self._context_compaction_thread_turn_pairs: set[tuple[str, str]] = set()
+        self._last_retryable_stream_error_message: str = ""
+        self._last_retryable_stream_error_details: str = ""
         self.active_model: str = ""
         self.active_model_provider: str = ""
         self.active_reasoning_effort: str = ""
@@ -219,6 +232,8 @@ class CodexAppServerSession:
         turn = (response or {}).get("turn") or {}
         self.turn_id = turn.get("id", "") or self.turn_id
         turn_completed = False
+        self._last_retryable_stream_error_message = ""
+        self._last_retryable_stream_error_details = ""
 
         while True:
             message = await self._events.get()
@@ -375,15 +390,34 @@ class CodexAppServerSession:
                 continue
 
             if method == "error":
-                error = (params.get("error") or {}).get("message", "Codex app-server 错误")
-                raise CodexAppServerError(error)
+                error = params.get("error") or {}
+                will_retry = bool(params.get("willRetry"))
+                error_message = self._extract_turn_error_primary_message(error)
+                additional_details = self._extract_turn_error_additional_details(error)
+                codex_error_info = error.get("codexErrorInfo") or error.get("codex_error_info")
+                if will_retry:
+                    self._remember_retryable_stream_error(error_message, additional_details)
+                    yield CodexStreamError(
+                        message=error_message,
+                        additional_details=additional_details,
+                        codex_error_info=codex_error_info,
+                        will_retry=True,
+                    )
+                    continue
+                raise CodexAppServerError(self._build_turn_error_exception_message(error))
 
             if method == "turn/completed":
                 turn = params.get("turn") or {}
                 self.turn_id = turn.get("id", "") or self.turn_id
                 turn_error = turn.get("error")
-                if turn_error and turn_error.get("message"):
-                    raise CodexAppServerError(turn_error["message"])
+                if turn_error and (
+                    turn_error.get("message")
+                    or turn_error.get("additionalDetails")
+                    or turn_error.get("additional_details")
+                ):
+                    raise CodexAppServerError(
+                        self._build_turn_error_exception_message(turn_error)
+                    )
                 turn_completed = True
                 break
 
@@ -733,14 +767,74 @@ class CodexAppServerSession:
         )
 
     def _build_process_error(self) -> str:
-        stderr_text = "\n".join(self._stderr_lines[-20:]).strip()
-        detail = stderr_text or f"Codex app-server 进程异常退出（code={self._process_return_code}）"
+        detail = self._build_terminal_error_detail(
+            f"Codex app-server 进程异常退出（code={self._process_return_code}）"
+        )
         return f"[CodexCLI] Process exited: {detail}"
 
     def _build_unexpected_stream_end_error(self) -> str:
-        stderr_text = "\n".join(self._stderr_lines[-20:]).strip()
-        detail = stderr_text or f"stdout ended before turn/completed（code={self._process_return_code}）"
+        detail = self._build_terminal_error_detail(
+            f"stdout ended before turn/completed（code={self._process_return_code}）"
+        )
         return f"[CodexCLI] Turn interrupted before completion: {detail}"
+
+    @staticmethod
+    def _extract_turn_error_primary_message(
+        error_payload: Any,
+        fallback: str = "Codex app-server 错误",
+    ) -> str:
+        value = str((error_payload or {}).get("message") or fallback).strip()
+        return value or fallback
+
+    @staticmethod
+    def _extract_turn_error_additional_details(error_payload: Any) -> str:
+        return str(
+            (error_payload or {}).get("additionalDetails")
+            or (error_payload or {}).get("additional_details")
+            or ""
+        ).strip()
+
+    @classmethod
+    def _build_turn_error_exception_message(
+        cls,
+        error_payload: Any,
+        fallback: str = "Codex app-server 错误",
+    ) -> str:
+        message = cls._extract_turn_error_primary_message(error_payload, fallback=fallback)
+        additional_details = cls._extract_turn_error_additional_details(error_payload)
+        if additional_details and additional_details != message:
+            if cls._is_retrying_message(message):
+                return additional_details
+            return f"{message}\n{additional_details}"
+        return message
+
+    @classmethod
+    def _is_retrying_message(cls, message: str) -> bool:
+        return bool(CODEX_STREAM_RETRY_RE.match(str(message or "").strip()))
+
+    def _remember_retryable_stream_error(self, message: str, additional_details: str) -> None:
+        self._last_retryable_stream_error_message = str(message or "").strip()
+        self._last_retryable_stream_error_details = str(additional_details or "").strip()
+
+    def _best_retryable_stream_error_detail(self) -> str:
+        if self._last_retryable_stream_error_details:
+            return self._last_retryable_stream_error_details
+        if (
+            self._last_retryable_stream_error_message
+            and not self._is_retrying_message(self._last_retryable_stream_error_message)
+        ):
+            return self._last_retryable_stream_error_message
+        return ""
+
+    def _build_terminal_error_detail(self, fallback: str) -> str:
+        details: List[str] = []
+        retryable_detail = self._best_retryable_stream_error_detail()
+        stderr_text = "\n".join(self._stderr_lines[-20:]).strip()
+        for candidate in (retryable_detail, stderr_text):
+            normalized = str(candidate or "").strip()
+            if normalized and normalized not in details:
+                details.append(normalized)
+        return "\n".join(details) if details else fallback
 
 
 class CodexAppServerAdapter:

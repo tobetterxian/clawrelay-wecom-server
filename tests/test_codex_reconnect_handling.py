@@ -541,6 +541,97 @@ def test_codex_app_session_raises_when_stream_ends_before_turn_completed():
     assert "Turn interrupted before completion" in message
 
 
+def test_codex_app_session_emits_retryable_stream_error_without_interrupting_turn():
+    from src.adapters.codex_app_server_adapter import CodexAppServerSession, CodexStreamError
+
+    async def run_flow():
+        session = CodexAppServerSession(model="", working_dir=".")
+        session.thread_id = "thread_1"
+        session.process = SimpleNamespace(returncode=0)
+
+        async def fake_rpc_request(method: str, params: dict):
+            assert method == "turn/start"
+            return {"turn": {"id": "turn_1"}}
+
+        session._rpc_request = fake_rpc_request
+        await session._events.put(
+            {
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": "Reconnecting... 1/5",
+                        "additionalDetails": (
+                            "stream disconnected before completion: "
+                            "error sending request for url (https://aixj.vip/responses)"
+                        ),
+                    },
+                    "willRetry": True,
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                },
+            }
+        )
+        await session._events.put({"method": "turn/completed", "params": {"turn": {"id": "turn_1"}}})
+
+        events = []
+        async for event in session.stream_turn([{"type": "text", "text": "hello"}]):
+            events.append(event)
+        return events
+
+    events = asyncio.run(run_flow())
+
+    assert len(events) == 1
+    assert isinstance(events[0], CodexStreamError)
+    assert events[0].message == "Reconnecting... 1/5"
+    assert "https://aixj.vip/responses" in events[0].additional_details
+
+
+def test_codex_app_session_uses_retryable_stream_error_details_for_terminal_failure():
+    from src.adapters.codex_app_server_adapter import CodexAppServerError, CodexAppServerSession
+
+    async def run_flow():
+        session = CodexAppServerSession(model="", working_dir=".")
+        session.thread_id = "thread_1"
+        session.process = SimpleNamespace(returncode=0)
+
+        async def fake_rpc_request(method: str, params: dict):
+            assert method == "turn/start"
+            return {"turn": {"id": "turn_1"}}
+
+        session._rpc_request = fake_rpc_request
+        await session._events.put(
+            {
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": "Reconnecting... 1/5",
+                        "additionalDetails": (
+                            "stream disconnected before completion: "
+                            "error sending request for url (https://aixj.vip/responses)"
+                        ),
+                    },
+                    "willRetry": True,
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                },
+            }
+        )
+        await session._events.put(None)
+
+        try:
+            async for _event in session.stream_turn([{"type": "text", "text": "hello"}]):
+                pass
+        except CodexAppServerError as exc:
+            return str(exc)
+        raise AssertionError("expected CodexAppServerError")
+
+    message = asyncio.run(run_flow())
+
+    assert "Turn interrupted before completion" in message
+    assert "stream disconnected before completion" in message
+    assert "https://aixj.vip/responses" in message
+
+
 def test_codex_app_session_emits_thread_compacted_event():
     from src.adapters.codex_app_server_adapter import CodexAppServerSession, CodexContextCompaction
 

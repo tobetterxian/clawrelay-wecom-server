@@ -62,6 +62,7 @@ from src.adapters.codex_app_server_adapter import (
     CodexContextCompaction,
     CodexFileChangeStart,
     CodexInteractionRequest,
+    CodexStreamError,
     CodexTokenUsageUpdate,
 )
 from src.utils.weixin_utils import TemplateCardBuilder
@@ -1343,6 +1344,21 @@ class CodexCliOrchestrator(BaseOrchestrator):
                             thinking_lines,
                             "🗜️ 上下文压缩：",
                             f"🗜️ 上下文压缩：已触发 {context_compaction_count} 次",
+                        )
+                        await _emit_stream_update()
+                    elif isinstance(event, CodexStreamError):
+                        stream_error_detail = str(
+                            event.additional_details or event.message or ""
+                        ).strip()
+                        self._upsert_runtime_thinking_line(
+                            thinking_lines,
+                            "🔄 上游流重连：",
+                            (
+                                "🔄 上游流重连："
+                                f"{self._truncate_text(stream_error_detail, limit=220)}"
+                            )
+                            if stream_error_detail
+                            else "🔄 上游流重连：Codex 正在自动重连",
                         )
                         await _emit_stream_update()
                     elif isinstance(event, CodexAgentMessage):
