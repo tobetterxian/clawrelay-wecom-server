@@ -1231,9 +1231,6 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         return
                     while True:
                         has_pending_interaction = runtime.has_pending_interaction()
-                        if has_pending_interaction or response_text.strip():
-                            await asyncio.sleep(float(CODEX_RUNTIME_STATUS_TICK_SECONDS))
-                            continue
                         if not has_pending_interaction and self.long_task_keepalive_after_seconds > 0:
                             initial_delay = self._runtime_keepalive_initial_delay(
                                 task_started_at,
