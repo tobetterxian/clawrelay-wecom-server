@@ -1287,17 +1287,32 @@ class MessageDispatcher:
     @classmethod
     def _runtime_preview_from_payload(cls, payload: dict, limit: int = 120) -> str:
         data = dict(payload or {})
-        candidates = [
+        structured_candidates = [
             data.get("runtime_visible_text"),
             data.get("runtime_last_detail_line"),
-            data.get("last_preview"),
             data.get("runtime_commentary_text"),
             data.get("runtime_response_text"),
         ]
-        for candidate in candidates:
+        for candidate in structured_candidates:
             preview = cls._summarize_stream_preview(str(candidate or ""), limit=limit)
             if preview:
                 return preview
+        has_runtime_snapshot = any(
+            str(data.get(key) or "").strip()
+            for key in (
+                "runtime_visible_text",
+                "runtime_last_detail_line",
+                "runtime_commentary_text",
+                "runtime_response_text",
+                "runtime_stage_line",
+                "runtime_pending_title",
+            )
+        )
+        if has_runtime_snapshot:
+            return ""
+        preview = cls._summarize_stream_preview(str(data.get("last_preview") or ""), limit=limit)
+        if preview:
+            return preview
         return ""
 
     @classmethod

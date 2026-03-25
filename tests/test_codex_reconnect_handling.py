@@ -191,6 +191,18 @@ def test_message_dispatcher_runtime_pending_and_stage_lines_are_structured():
     assert MessageDispatcher._runtime_stage_line(payload) == "⚠️ Codex 请求执行命令"
 
 
+def test_message_dispatcher_runtime_preview_ignores_legacy_preview_when_structured_snapshot_exists():
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    payload = {
+        "runtime_stage_line": "🔄 上游流重连：等待恢复",
+        "runtime_pending_title": "⚠️ Codex 请求执行命令",
+        "last_preview": "旧 preview 不应再显示",
+    }
+
+    assert MessageDispatcher._runtime_preview_from_payload(payload) == ""
+
+
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():
     assert CodexCliOrchestrator._looks_like_context_window_exhausted(
         {
@@ -1555,6 +1567,60 @@ def test_running_task_status_reply_reports_recent_terminal_status():
         assert "最近一次任务已于" in reply
         assert "结果可能没有成功送达" in reply
         assert "最近输出：任务已经完成" in reply
+        registry.forget(task_key)
+
+
+def test_running_task_status_reply_deduplicates_stage_and_preview():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        async def send_reply(self, payload: dict):
+            return None
+
+    async def run_flow(task_key: str):
+        registry = get_task_registry()
+        task = asyncio.create_task(asyncio.sleep(0))
+        registry.register(
+            task_key,
+            task,
+            "stream_done",
+            req_id="req_done",
+            runtime_stage_line="⚠️ Codex 请求执行命令",
+            runtime_pending_title="⚠️ Codex 请求执行命令",
+            runtime_pending_desc="命令：rg --files",
+            runtime_pending_action_hint="请直接回复：批准 / 会话允许 / 拒绝 / 取消",
+        )
+        await task
+        await asyncio.sleep(0)
+        return registry.get_recent(task_key)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        dispatcher = MessageDispatcher(
+            DummyWs(),
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-stage-dedupe")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        asyncio.run(run_flow(task_key))
+        reply = dispatcher._running_task_status_reply("session-stage-dedupe")
+
+        assert "当前阶段：⚠️ Codex 请求执行命令" in reply
+        assert "最近输出：" not in reply
         registry.forget(task_key)
 
 
