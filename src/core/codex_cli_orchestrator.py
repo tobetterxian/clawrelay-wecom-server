@@ -1296,10 +1296,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_progressed = True
                         short_command = self._short_command(event.command)
                         commands_seen.append(short_command)
+                        runtime_state.set_active_tool("command", f"🔧 `{short_command}`")
                         runtime_state.append_detail_line(f"🔧 `{short_command}`")
                         await _emit_stream_update()
                     elif isinstance(event, CodexCommandExecutionComplete):
                         turn_progressed = True
+                        runtime_state.clear_active_tool()
                         failure_line = self._format_command_result(event)
                         if failure_line:
                             runtime_state.append_detail_line(failure_line)
@@ -1308,6 +1310,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_progressed = True
                         file_count = len(event.changes or [])
                         if file_count:
+                            runtime_state.set_active_tool("file_change", f"📝 提议修改 {file_count} 个文件")
                             runtime_state.append_detail_line(f"📝 提议修改 {file_count} 个文件")
                             await _emit_stream_update()
                     elif isinstance(event, CodexTokenUsageUpdate):
@@ -1326,6 +1329,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         await _emit_stream_update()
                     elif isinstance(event, CodexContextCompaction):
                         turn_progressed = True
+                        runtime_state.clear_active_tool()
                         context_compaction_count += 1
                         self._annotate_task_context_window(
                             effective_key,
@@ -1340,6 +1344,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         stream_error_detail = str(
                             event.additional_details or event.message or ""
                         ).strip()
+                        runtime_state.clear_active_tool()
                         runtime_state.upsert_notice(
                             "🔄 上游流重连：",
                             (
@@ -1360,6 +1365,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                                 )
                                 await _emit_stream_update()
                                 continue
+                            runtime_state.clear_active_tool()
                             runtime_state.clear_commentary_text()
                             runtime_state.append_response_text(
                                 event.text,
@@ -1368,6 +1374,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                             await _emit_stream_update()
                     elif isinstance(event, CodexInteractionRequest):
                         turn_progressed = True
+                        runtime_state.clear_active_tool()
                         runtime_state.set_pending(
                             CodexRuntimePendingState(
                                 kind=event.interaction_type,
@@ -1389,6 +1396,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     runtime_state.set_response_text("Codex 已完成处理，但未生成文本回复。")
 
                 runtime_state.clear_pending()
+                runtime_state.clear_active_tool()
                 runtime_state.append_detail_line("✨ 回复完成")
                 await _emit_stream_update(finished=True, allow_keepalive=False)
 
@@ -1610,19 +1618,6 @@ class CodexCliOrchestrator(BaseOrchestrator):
     def _is_commentary_agent_message_phase(phase: str) -> bool:
         return str(phase or "").strip().lower() == "commentary"
 
-    @staticmethod
-    def _select_runtime_display_text(
-        response_text: str,
-        commentary_text: str = "",
-        override_text: Optional[str] = None,
-    ) -> str:
-        if override_text is not None:
-            return str(override_text or "")
-        if str(response_text or "").strip():
-            return str(response_text or "")
-        return str(commentary_text or "")
-
-    @staticmethod
     def _is_final_agent_message_phase(phase: str) -> bool:
         normalized = str(phase or "").strip().lower()
         return normalized in {"", "final_answer"}
@@ -5786,47 +5781,6 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 line += f"，剩余约 {cls._format_token_count(remaining_tokens)} tokens"
             return line
         return "🧠 上下文估算：暂不可用"
-
-    @staticmethod
-    def _upsert_runtime_thinking_line(thinking_lines: List[str], prefix: str, content: str) -> None:
-        normalized_prefix = str(prefix or "").strip()
-        for index, line in enumerate(thinking_lines):
-            if str(line or "").startswith(normalized_prefix):
-                thinking_lines[index] = content
-                return
-        thinking_lines.append(content)
-
-    @classmethod
-    def _append_runtime_detail_line(cls, thinking_lines: List[str], content: str) -> None:
-        normalized_content = str(content or "").strip()
-        if not normalized_content:
-            return
-        if thinking_lines:
-            last_line = str(thinking_lines[-1] or "").strip()
-            base_last, count_last = cls._split_runtime_detail_repeat(last_line)
-            base_new, _count_new = cls._split_runtime_detail_repeat(normalized_content)
-            if base_last == base_new:
-                repeated_count = count_last + 1
-                thinking_lines[-1] = (
-                    f"{base_new} ×{repeated_count}"
-                    if repeated_count > 1
-                    else base_new
-                )
-                return
-        thinking_lines.append(normalized_content)
-
-    @staticmethod
-    def _split_runtime_detail_repeat(line: str) -> tuple[str, int]:
-        value = str(line or "").strip()
-        matched = re.match(r"^(.*?)(?:\s+×(\d+))?$", value)
-        if not matched:
-            return value, 1
-        base = str(matched.group(1) or "").strip()
-        try:
-            count = max(int(matched.group(2) or "1"), 1)
-        except ValueError:
-            count = 1
-        return base, count
 
     def _annotate_task_context_window(self, runtime_session_key: str, **extra) -> None:
         from src.core.task_registry import get_task_registry

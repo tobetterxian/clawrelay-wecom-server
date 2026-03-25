@@ -83,31 +83,6 @@ def test_agent_message_phase_classification():
     assert not CodexCliOrchestrator._is_final_agent_message_phase("commentary")
 
 
-def test_select_runtime_display_text_prefers_commentary_before_final_answer():
-    assert (
-        CodexCliOrchestrator._select_runtime_display_text(
-            response_text="",
-            commentary_text="先检查项目结构并读取关键文件。",
-        )
-        == "先检查项目结构并读取关键文件。"
-    )
-    assert (
-        CodexCliOrchestrator._select_runtime_display_text(
-            response_text="最终回复",
-            commentary_text="先检查项目结构并读取关键文件。",
-        )
-        == "最终回复"
-    )
-    assert (
-        CodexCliOrchestrator._select_runtime_display_text(
-            response_text="最终回复",
-            commentary_text="说明文本",
-            override_text="等待你的确认",
-        )
-        == "等待你的确认"
-    )
-
-
 def test_codex_runtime_state_prefers_response_then_commentary_and_exports_pending_snapshot():
     state = CodexRuntimeState()
     state.add_static_line("已进入项目工作区")
@@ -159,6 +134,20 @@ def test_codex_runtime_state_exports_current_stage_line():
     assert state.current_stage_line() == "🔧 `rg --files`"
 
 
+def test_codex_runtime_state_exports_active_tool_snapshot():
+    state = CodexRuntimeState()
+    state.set_active_tool("command", "🔧 `rg --files`", status="running")
+    payload = state.to_registry_payload()
+
+    assert payload["runtime_active_tool_kind"] == "command"
+    assert payload["runtime_active_tool_title"] == "🔧 `rg --files`"
+    assert payload["runtime_active_tool_status"] == "running"
+
+    state.clear_active_tool()
+    payload = state.to_registry_payload()
+    assert payload["runtime_active_tool_kind"] == ""
+
+
 def test_message_dispatcher_runtime_preview_prefers_structured_snapshot_fields():
     from src.transport.message_dispatcher import MessageDispatcher
 
@@ -193,6 +182,10 @@ def test_message_dispatcher_runtime_pending_and_stage_lines_are_structured():
     assert "详情：命令：rg --files" in pending_lines
     assert "下一步：请直接回复：批准 / 会话允许 / 拒绝 / 取消" in pending_lines
     assert MessageDispatcher._runtime_stage_line(payload) == "⚠️ Codex 请求执行命令"
+
+    payload["runtime_active_tool_title"] = "🔧 `rg --files`"
+    payload["runtime_active_tool_status"] = "running"
+    assert MessageDispatcher._runtime_active_tool_line(payload) == "活跃工具：🔧 `rg --files`（running）"
 
 
 def test_message_dispatcher_runtime_preview_ignores_legacy_preview_when_structured_snapshot_exists():

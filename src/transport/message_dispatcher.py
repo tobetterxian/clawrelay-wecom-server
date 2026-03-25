@@ -1348,6 +1348,24 @@ class MessageDispatcher:
                 return value
         return ""
 
+    @classmethod
+    def _runtime_active_tool_line(cls, payload: dict) -> str:
+        data = dict(payload or {})
+        title = cls._summarize_stream_preview(str(data.get("runtime_active_tool_title") or ""), limit=180)
+        if not title:
+            return ""
+        status = str(data.get("runtime_active_tool_status") or "").strip()
+        if status:
+            return f"活跃工具：{title}（{status}）"
+        return f"活跃工具：{title}"
+
+    @classmethod
+    def _runtime_active_tool_title(cls, payload: dict) -> str:
+        return cls._summarize_stream_preview(
+            str((payload or {}).get("runtime_active_tool_title") or ""),
+            limit=180,
+        )
+
     @staticmethod
     def _same_compact_text(left: str, right: str) -> bool:
         normalized_left = re.sub(r"\s+", " ", str(left or "")).strip()
@@ -1495,6 +1513,10 @@ class MessageDispatcher:
             stage_line = self._runtime_stage_line(recent)
             if stage_line:
                 lines.append(f"当前阶段：{stage_line}")
+            active_tool_line = self._runtime_active_tool_line(recent)
+            active_tool_title = self._runtime_active_tool_title(recent)
+            if active_tool_line and not self._same_compact_text(active_tool_title, stage_line):
+                lines.append(active_tool_line)
             lines.extend(self._context_window_status_lines(recent))
             if recent.get("proactive_reply_sent"):
                 lines.append("提示：原回复通道异常，系统已通过主动回复补发结果。")
@@ -1574,6 +1596,10 @@ class MessageDispatcher:
         stage_line = self._runtime_stage_line(extra)
         if stage_line:
             lines.append(f"当前阶段：{stage_line}")
+        active_tool_line = self._runtime_active_tool_line(extra)
+        active_tool_title = self._runtime_active_tool_title(extra)
+        if active_tool_line and not self._same_compact_text(active_tool_title, stage_line):
+            lines.append(active_tool_line)
         freshness_seconds = min(silent_seconds, render_silent_seconds)
         if self.orchestrator.has_pending_interaction(runtime_session_key) or bool((extra or {}).get("runtime_pending_kind")):
             pending_lines = self._runtime_pending_status_lines(extra)

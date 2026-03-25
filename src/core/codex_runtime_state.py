@@ -23,6 +23,9 @@ class CodexRuntimeState:
     notice_lines: dict[str, str] = field(default_factory=dict)
     detail_lines: list[str] = field(default_factory=list)
     pending: Optional[CodexRuntimePendingState] = None
+    active_tool_kind: str = ""
+    active_tool_title: str = ""
+    active_tool_status: str = ""
 
     def add_static_line(self, content: str) -> None:
         normalized = str(content or "").strip()
@@ -98,6 +101,16 @@ class CodexRuntimeState:
     def clear_pending(self) -> None:
         self.pending = None
 
+    def set_active_tool(self, kind: str, title: str, status: str = "running") -> None:
+        self.active_tool_kind = str(kind or "").strip()
+        self.active_tool_title = str(title or "").strip()
+        self.active_tool_status = str(status or "").strip() or "running"
+
+    def clear_active_tool(self) -> None:
+        self.active_tool_kind = ""
+        self.active_tool_title = ""
+        self.active_tool_status = ""
+
     def render_lines(self) -> list[str]:
         lines: list[str] = [self.lifecycle_line]
         if self.runtime_status_line:
@@ -137,6 +150,14 @@ class CodexRuntimeState:
             payload["runtime_pending_title"] = ""
             payload["runtime_pending_desc"] = ""
             payload["runtime_pending_action_hint"] = ""
+        if self.active_tool_kind:
+            payload["runtime_active_tool_kind"] = self.active_tool_kind
+            payload["runtime_active_tool_title"] = self.active_tool_title
+            payload["runtime_active_tool_status"] = self.active_tool_status
+        else:
+            payload["runtime_active_tool_kind"] = ""
+            payload["runtime_active_tool_title"] = ""
+            payload["runtime_active_tool_status"] = ""
         return payload
 
     def current_stage_line(self) -> str:
