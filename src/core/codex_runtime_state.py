@@ -142,8 +142,13 @@ class CodexRuntimeState:
     def current_stage_line(self) -> str:
         if self.pending and self.pending.title:
             return self.pending.title.strip()
-        if self.detail_lines:
-            return str(self.detail_lines[-1] or "").strip()
+        for detail_line in reversed(self.detail_lines):
+            normalized_detail = str(detail_line or "").strip()
+            if not normalized_detail:
+                continue
+            if normalized_detail == "✨ 回复完成":
+                continue
+            return normalized_detail
         notice_values = [str(item or "").strip() for item in self.notice_lines.values() if str(item or "").strip()]
         if notice_values:
             return notice_values[-1]

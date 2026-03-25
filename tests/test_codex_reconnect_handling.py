@@ -154,6 +154,10 @@ def test_codex_runtime_state_exports_current_stage_line():
     )
     assert state.current_stage_line() == "❓ Codex 需要你补充信息"
 
+    state.clear_pending()
+    state.append_detail_line("✨ 回复完成")
+    assert state.current_stage_line() == "🔧 `rg --files`"
+
 
 def test_message_dispatcher_runtime_preview_prefers_structured_snapshot_fields():
     from src.transport.message_dispatcher import MessageDispatcher
@@ -1711,6 +1715,111 @@ def test_handoff_running_reply_closes_old_bubble_and_switches_to_new_one():
         assert new_payload["body"]["stream"]["id"] == current_stream_id
         assert new_payload["body"]["stream"]["finish"] is False
         assert new_payload["body"]["stream"]["content"] == "⏳ 已收到，继续处理。"
+        registry.forget(task_key)
+
+
+def test_stream_delta_callback_handles_long_task_handoff_then_pending_then_completion():
+    from src.core.task_registry import get_task_registry
+    from src.transport.message_dispatcher import MessageDispatcher
+
+    class DummyWs:
+        def __init__(self):
+            self.payloads = []
+
+        async def send_reply(self, payload: dict):
+            self.payloads.append(payload)
+
+    async def run_flow(dispatcher: MessageDispatcher, task_key: str, ws: DummyWs):
+        registry = get_task_registry()
+        completion_event = asyncio.Event()
+
+        async def runner():
+            await completion_event.wait()
+
+        task = asyncio.create_task(runner())
+        reply_state = {
+            "req_id": "req_old",
+            "stream_id": "stream_old",
+            "prefix": "",
+            "response_url": "",
+        }
+        registry.register(
+            task_key,
+            task,
+            "stream_old",
+            req_id="req_old",
+            reply_state=reply_state,
+        )
+
+        callback = dispatcher._make_stream_delta_callback(reply_state, task_key=task_key)
+        await asyncio.sleep(0.02)
+        await callback("先检查项目结构。", False)
+
+        _task, current_stream_id, extra = registry.get(task_key)
+        registry.annotate(
+            task_key,
+            runtime_pending_kind="command_approval",
+            runtime_pending_title="⚠️ Codex 请求执行命令",
+            runtime_pending_desc="命令：rg --files",
+            runtime_pending_action_hint="请直接回复：批准 / 会话允许 / 拒绝 / 取消",
+            runtime_stage_line="⚠️ Codex 请求执行命令",
+        )
+        running_reply = dispatcher._running_task_status_reply("session-handoff-pending-complete")
+
+        await callback("最终结果：已完成修复。", True)
+        completion_event.set()
+        await task
+        await asyncio.sleep(0)
+
+        recent_reply = dispatcher._running_task_status_reply("session-handoff-pending-complete")
+        return current_stream_id, extra, running_reply, recent_reply, list(ws.payloads)
+
+    with TemporaryDirectory() as tmpdir:
+        working_dir = Path(tmpdir) / "project"
+        working_dir.mkdir()
+        orchestrator = CodexCliOrchestrator(
+            bot_key="cx_bot",
+            working_dir=str(working_dir),
+        )
+        orchestrator.long_task_keepalive_after_seconds = 0.01
+        ws = DummyWs()
+        dispatcher = MessageDispatcher(
+            ws,
+            BotConfig(
+                bot_key="cx_bot",
+                bot_id="test_bot_id",
+                secret="test_secret",
+                bot_type="codex_cli",
+            ),
+            orchestrator=orchestrator,
+        )
+        task_key = dispatcher._task_registry_key("session-handoff-pending-complete")
+        registry = get_task_registry()
+        registry.forget(task_key)
+
+        current_stream_id, extra, running_reply, recent_reply, payloads = asyncio.run(
+            run_flow(dispatcher, task_key, ws)
+        )
+
+        assert extra["reply_state"]["stream_id"] == current_stream_id
+        assert extra["status_live_mode"] is True
+        assert "状态：⚠️ Codex 请求执行命令" in running_reply
+        assert "详情：命令：rg --files" in running_reply
+        assert "当前阶段：⚠️ Codex 请求执行命令" in running_reply
+        assert "最近输出：" not in running_reply
+        assert "当前没有正在运行的任务。" in recent_reply
+        assert "最终结果：已完成修复。" in recent_reply
+        assert len(payloads) >= 4
+        assert payloads[0]["body"]["stream"]["id"] == "stream_old"
+        assert payloads[0]["body"]["stream"]["finish"] is True
+        assert payloads[1]["body"]["stream"]["id"] == current_stream_id
+        assert payloads[1]["body"]["stream"]["finish"] is False
+        final_payloads = [item for item in payloads if item["body"]["stream"]["id"] == current_stream_id]
+        assert any(
+            item["body"]["stream"]["finish"] is True
+            and "最终结果：已完成修复。" in item["body"]["stream"]["content"]
+            for item in final_payloads
+        )
         registry.forget(task_key)
 
 
