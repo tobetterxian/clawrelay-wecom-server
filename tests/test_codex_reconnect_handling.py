@@ -136,6 +136,25 @@ def test_codex_runtime_state_prefers_response_then_commentary_and_exports_pendin
     assert payload["runtime_pending_title"] == "⚠️ Codex 请求执行命令"
 
 
+def test_codex_runtime_state_exports_current_stage_line():
+    state = CodexRuntimeState()
+    state.append_commentary_text("先检查项目结构并读取关键文件。")
+    assert state.current_stage_line() == "先检查项目结构并读取关键文件。"
+
+    state.append_detail_line("🔧 `rg --files`")
+    assert state.current_stage_line() == "🔧 `rg --files`"
+
+    state.set_pending(
+        CodexRuntimePendingState(
+            kind="tool_user_input",
+            title="❓ Codex 需要你补充信息",
+            description="请提供部署目标环境",
+            action_hint="请直接发送你的回答",
+        )
+    )
+    assert state.current_stage_line() == "❓ Codex 需要你补充信息"
+
+
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():
     assert CodexCliOrchestrator._looks_like_context_window_exhausted(
         {

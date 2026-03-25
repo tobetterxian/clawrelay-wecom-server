@@ -1238,8 +1238,22 @@ class MessageDispatcher:
             return f"【引用消息】\n{normalized_quote}"
         return f"【引用消息】\n{normalized_quote}\n\n【当前消息】\n{normalized_content}"
 
-    @staticmethod
-    def _pending_interaction_notice() -> str:
+    def _pending_interaction_notice(self, runtime_session_key: str = "") -> str:
+        payload: dict = {}
+        if runtime_session_key:
+            from src.core.task_registry import get_task_registry
+
+            task_key = self._task_registry_key(runtime_session_key)
+            _task, _stream_id, extra = get_task_registry().get(task_key)
+            payload = dict(extra or {})
+            if not payload:
+                payload = dict(get_task_registry().get_recent(task_key) or {})
+
+        pending_lines = self._runtime_pending_status_lines(payload)
+        if pending_lines:
+            return "\n".join(
+                ["当前 Codex 正等待你的确认或补充信息。", *pending_lines]
+            )
         return "当前 Codex 正等待你的确认或补充信息，请直接发送文字回复。"
 
     @staticmethod
@@ -1303,6 +1317,21 @@ class MessageDispatcher:
         if action_hint:
             lines.append(f"下一步：{action_hint}")
         return lines
+
+    @classmethod
+    def _runtime_stage_line(cls, payload: dict) -> str:
+        data = dict(payload or {})
+        candidates = [
+            data.get("runtime_stage_line"),
+            data.get("runtime_pending_title"),
+            data.get("runtime_last_detail_line"),
+            data.get("runtime_visible_text"),
+        ]
+        for candidate in candidates:
+            value = cls._summarize_stream_preview(str(candidate or ""), limit=180)
+            if value:
+                return value
+        return ""
 
     @staticmethod
     def _looks_like_running_status_preview(content: str) -> bool:
@@ -1442,6 +1471,9 @@ class MessageDispatcher:
             runtime_strip = self._task_runtime_status_strip(recent)
             if runtime_strip:
                 lines.append(runtime_strip)
+            stage_line = self._runtime_stage_line(recent)
+            if stage_line:
+                lines.append(f"当前阶段：{stage_line}")
             lines.extend(self._context_window_status_lines(recent))
             if recent.get("proactive_reply_sent"):
                 lines.append("提示：原回复通道异常，系统已通过主动回复补发结果。")
@@ -1516,8 +1548,11 @@ class MessageDispatcher:
         runtime_strip = self._task_runtime_status_strip(extra)
         if runtime_strip:
             lines.append(runtime_strip)
+        stage_line = self._runtime_stage_line(extra)
+        if stage_line:
+            lines.append(f"当前阶段：{stage_line}")
         freshness_seconds = min(silent_seconds, render_silent_seconds)
-        if self.orchestrator.has_pending_interaction(runtime_session_key):
+        if self.orchestrator.has_pending_interaction(runtime_session_key) or bool((extra or {}).get("runtime_pending_kind")):
             pending_lines = self._runtime_pending_status_lines(extra)
             if pending_lines:
                 lines.extend(pending_lines)
@@ -2598,7 +2633,7 @@ class MessageDispatcher:
                 if ack:
                     await self._reply_text(req_id, ack, finish=True)
                     return
-            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            await self._reply_text(req_id, self._pending_interaction_notice(runtime_session_key), finish=True)
             return
 
         pending_delegate_interaction = self._resolve_pending_brochure_delegate_interaction(
@@ -2784,7 +2819,7 @@ class MessageDispatcher:
         if await self._maybe_store_brochure_image_material(req_id, body, user_id, session_key, log_context):
             return
         if self.orchestrator.has_pending_interaction(runtime_session_key):
-            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            await self._reply_text(req_id, self._pending_interaction_notice(runtime_session_key), finish=True)
             return
         if await self._maybe_handoff_running_task(runtime_session_key, req_id):
             return
@@ -2860,7 +2895,7 @@ class MessageDispatcher:
         if await self._maybe_store_brochure_file_material(req_id, body, user_id, session_key, log_context):
             return
         if self.orchestrator.has_pending_interaction(runtime_session_key):
-            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            await self._reply_text(req_id, self._pending_interaction_notice(runtime_session_key), finish=True)
             return
         if await self._maybe_handoff_running_task(runtime_session_key, req_id):
             return
@@ -2921,7 +2956,7 @@ class MessageDispatcher:
         )
         runtime_session_key = self._resolve_runtime_session_key(user_id, session_key, log_context)
         if self.orchestrator.has_pending_interaction(runtime_session_key):
-            await self._reply_text(req_id, self._pending_interaction_notice(), finish=True)
+            await self._reply_text(req_id, self._pending_interaction_notice(runtime_session_key), finish=True)
             return
         if await self._maybe_handoff_running_task(runtime_session_key, req_id):
             return

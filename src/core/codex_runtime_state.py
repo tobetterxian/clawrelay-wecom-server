@@ -114,6 +114,9 @@ class CodexRuntimeState:
         visible_text = self.visible_text().strip()
         if visible_text:
             payload["runtime_visible_text"] = visible_text
+        stage_line = self.current_stage_line()
+        if stage_line:
+            payload["runtime_stage_line"] = stage_line
         if self.response_text.strip():
             payload["runtime_response_text"] = self.response_text.strip()
         if self.commentary_text.strip():
@@ -136,6 +139,19 @@ class CodexRuntimeState:
             payload["runtime_pending_action_hint"] = ""
         return payload
 
+    def current_stage_line(self) -> str:
+        if self.pending and self.pending.title:
+            return self.pending.title.strip()
+        if self.detail_lines:
+            return str(self.detail_lines[-1] or "").strip()
+        notice_values = [str(item or "").strip() for item in self.notice_lines.values() if str(item or "").strip()]
+        if notice_values:
+            return notice_values[-1]
+        visible = self.visible_text().strip()
+        if visible:
+            return self._compact_single_line(visible, limit=160)
+        return ""
+
     @staticmethod
     def _split_repeat_suffix(line: str) -> tuple[str, int]:
         value = str(line or "").strip()
@@ -148,3 +164,10 @@ class CodexRuntimeState:
         except ValueError:
             return value, 1
         return base.strip(), count
+
+    @staticmethod
+    def _compact_single_line(content: str, limit: int = 160) -> str:
+        normalized = " ".join(str(content or "").split()).strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(limit - 1, 0)].rstrip() + "…"
