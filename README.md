@@ -384,6 +384,25 @@ bots:
 - 审批、文件改动确认、补充提问会通过企业微信文字回复回传，体验更接近原生交互式 Codex
 - 这个类型更适合本地读写代码、执行命令、排障，以及多人协作场景下的目录隔离
 
+**Codex 升级建议：**
+- 服务启动时会记录实际 `codex --version`，用于排查“当前到底跑的是哪个 Codex 版本”
+- 建议在升级 Codex CLI 前先运行一次兼容检查脚本：
+
+```bash
+python3 scripts/check_codex_app_server_compat.py --codex codex
+```
+
+- 如需和某个已保存的 schema 基线做差异比对，可附带：
+
+```bash
+python3 scripts/check_codex_app_server_compat.py \
+  --codex codex \
+  --baseline-dir /path/to/previous-schema \
+  --fail-on-diff
+```
+
+- 该脚本会生成当前版本的 app-server schema，检查本项目依赖的关键协议契约（如 `thread/tokenUsage/updated`、`contextCompaction`、`config/read` 等），并可选输出与基线 schema 的差异文件列表
+
 ### 产品画册机器人联动
 
 如果你希望群里只出现一个前台 `@产品画册` 机器人，但真正的代码落地、导出、发布由 `codex_cli` 机器人在后台执行，可以这样配置：

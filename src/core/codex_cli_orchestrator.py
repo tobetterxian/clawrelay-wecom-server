@@ -106,6 +106,8 @@ CODEX_CONTEXT_WINDOW_AUTO_RESUME_LIMIT = 3
 CODEX_LONG_TASK_KEEPALIVE_AFTER_SECONDS = 300
 CODEX_LONG_TASK_KEEPALIVE_INTERVAL_SECONDS = 300
 CODEX_RUNTIME_STATUS_TICK_SECONDS = 1
+CODEX_PAGES_PUBLISH_WAIT_TIMEOUT_SECONDS = 120
+CODEX_PAGES_PUBLISH_POLL_INTERVAL_SECONDS = 3
 CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_CONTEXT_WINDOW_BASELINE_TOKENS = 12_000
 DEFAULT_PROJECT_REQUEST_RE = re.compile(
@@ -734,7 +736,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     log_context=log_context,
                 )
             if action == "publish_pages":
-                return self._handle_publish_pages_command(
+                return await self._handle_publish_pages_command(
                     user_id=user_id,
                     repository_name=deployment_request["repository_name"],
                     pages_project_name=deployment_request["pages_project_name"],
@@ -743,7 +745,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     log_context=log_context,
                 )
             if action == "publish_brochure":
-                return self._handle_publish_brochure_command(
+                return await self._handle_publish_brochure_command(
                     user_id=user_id,
                     repository_name=deployment_request.get("repository_name", ""),
                     pages_project_name=deployment_request.get("pages_project_name", ""),
@@ -1295,19 +1297,22 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_progressed = True
                         short_command = self._short_command(event.command)
                         commands_seen.append(short_command)
-                        thinking_lines.append(f"🔧 `{short_command}`")
+                        self._append_runtime_detail_line(thinking_lines, f"🔧 `{short_command}`")
                         await _emit_stream_update()
                     elif isinstance(event, CodexCommandExecutionComplete):
                         turn_progressed = True
                         failure_line = self._format_command_result(event)
                         if failure_line:
-                            thinking_lines.append(failure_line)
+                            self._append_runtime_detail_line(thinking_lines, failure_line)
                             await _emit_stream_update()
                     elif isinstance(event, CodexFileChangeStart):
                         turn_progressed = True
                         file_count = len(event.changes or [])
                         if file_count:
-                            thinking_lines.append(f"📝 提议修改 {file_count} 个文件")
+                            self._append_runtime_detail_line(
+                                thinking_lines,
+                                f"📝 提议修改 {file_count} 个文件",
+                            )
                             await _emit_stream_update()
                     elif isinstance(event, CodexTokenUsageUpdate):
                         turn_progressed = True
@@ -1343,6 +1348,9 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     elif isinstance(event, CodexAgentMessage):
                         turn_progressed = True
                         if event.text:
+                            if self._is_commentary_agent_message_phase(event.phase):
+                                await _emit_stream_update()
+                                continue
                             if event.is_new_message and response_text.strip():
                                 response_text += "\n\n"
                             response_text += event.text
@@ -1587,6 +1595,15 @@ class CodexCliOrchestrator(BaseOrchestrator):
             or "contextwindowexceeded" in lowered
             or "context window exceeded" in lowered
         )
+
+    @staticmethod
+    def _is_commentary_agent_message_phase(phase: str) -> bool:
+        return str(phase or "").strip().lower() == "commentary"
+
+    @staticmethod
+    def _is_final_agent_message_phase(phase: str) -> bool:
+        normalized = str(phase or "").strip().lower()
+        return normalized in {"", "final_answer"}
 
     @staticmethod
     def _looks_like_context_window_exhausted(payload: Optional[dict]) -> bool:
@@ -3175,7 +3192,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         lines.append("提示：Cloudflare Pages 项目需提前在控制台或 wrangler 中创建")
         return "\n".join(lines)
 
-    def _handle_publish_pages_command(
+    async def _handle_publish_pages_command(
         self,
         user_id: str,
         repository_name: str,
@@ -3324,14 +3341,37 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"{item.relative_path}（{self._file_action_label(item.action)}）"
             for item in result.files
         )
-        workflow_lines = self._build_latest_workflow_run_summary_lines(
+        workflow_id = Path(result.workflow_path).name
+        run, timed_out = await self._wait_for_workflow_run_completion(
             owner=owner,
             repo_name=repo_name,
-            workflow_id=Path(result.workflow_path).name,
+            workflow_id=workflow_id,
             expected_head_sha=push_result.head_sha,
         )
+        workflow_lines = self._build_latest_workflow_run_summary_lines_from_run(
+            owner=owner,
+            repo_name=repo_name,
+            run=run,
+            timed_out=timed_out,
+            expected_head_sha=push_result.head_sha,
+        )
+        latest_deployment = None
+        if run and str(run.status or "").strip().lower() == "completed" and str(run.conclusion or "").strip().lower() == "success":
+            latest_deployment = await asyncio.to_thread(
+                self.cloudflare_pages_manager.get_latest_deployment,
+                pages_project.name,
+            )
+
+        headline = "已完成一键发布 Cloudflare Pages"
+        if run and str(run.status or "").strip().lower() == "completed":
+            conclusion = str(run.conclusion or "").strip().lower()
+            if conclusion and conclusion != "success":
+                headline = "一键发布 Cloudflare Pages 已触发，但流水线结果未成功"
+        elif timed_out:
+            headline = "已触发一键发布 Cloudflare Pages，仍在等待流水线最终结果"
+
         lines = [
-            "已完成一键发布 Cloudflare Pages",
+            headline,
             f"项目：{(project or {}).get('name', '-')}",
             f"工作区：{self._display_path(workspace_path)}",
             f"GitHub 仓库：{owner}/{repo_name}",
@@ -3348,11 +3388,14 @@ class CodexCliOrchestrator(BaseOrchestrator):
             f"最终推送：origin/{push_result.branch_name}",
         ]
         lines.extend(workflow_lines)
+        if latest_deployment:
+            lines.extend(self._format_cloudflare_pages_deployment_lines(latest_deployment))
         lines.extend(f"提示：{warning}" for warning in result.warnings)
-        lines.append("说明：GitHub Actions 触发后会继续执行 Cloudflare Pages 部署")
+        if timed_out:
+            lines.append("说明：GitHub Actions 仍在执行，稍后可再次发送“发布流水线状态”查看最终结果")
         return "\n".join(lines)
 
-    def _handle_publish_brochure_command(
+    async def _handle_publish_brochure_command(
         self,
         user_id: str,
         repository_name: str,
@@ -3362,7 +3405,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         log_context: dict = None,
     ) -> str:
         normalized_build_dir = str(build_dir or "brochure").strip() or "brochure"
-        reply = self._handle_publish_pages_command(
+        reply = await self._handle_publish_pages_command(
             user_id=user_id,
             repository_name=repository_name,
             pages_project_name=pages_project_name,
@@ -4665,6 +4708,72 @@ class CodexCliOrchestrator(BaseOrchestrator):
 
         return self._format_workflow_run_lines(run)
 
+    async def _wait_for_workflow_run_completion(
+        self,
+        *,
+        owner: str,
+        repo_name: str,
+        workflow_id: str,
+        expected_head_sha: str = "",
+        timeout_seconds: int = CODEX_PAGES_PUBLISH_WAIT_TIMEOUT_SECONDS,
+        poll_interval_seconds: int = CODEX_PAGES_PUBLISH_POLL_INTERVAL_SECONDS,
+    ) -> tuple[Optional[GitHubWorkflowRunInfo], bool]:
+        deadline = time.monotonic() + max(int(timeout_seconds or 0), 0)
+        normalized_expected_sha = str(expected_head_sha or "").strip()
+        last_seen_run: Optional[GitHubWorkflowRunInfo] = None
+        last_matching_run: Optional[GitHubWorkflowRunInfo] = None
+
+        while True:
+            run = await asyncio.to_thread(
+                self.github_repository_manager.get_latest_workflow_run,
+                owner,
+                repo_name,
+                workflow_id,
+            )
+            if run:
+                last_seen_run = run
+                run_head_sha = str(run.head_sha or "").strip()
+                if not normalized_expected_sha or (
+                    run_head_sha and run_head_sha == normalized_expected_sha
+                ):
+                    last_matching_run = run
+                    if str(run.status or "").strip().lower() == "completed":
+                        return run, False
+            if time.monotonic() >= deadline:
+                return last_matching_run or last_seen_run, True
+            await asyncio.sleep(max(int(poll_interval_seconds or 0), 1))
+
+    def _build_latest_workflow_run_summary_lines_from_run(
+        self,
+        *,
+        owner: str,
+        repo_name: str,
+        run: Optional[GitHubWorkflowRunInfo],
+        timed_out: bool,
+        expected_head_sha: str = "",
+    ) -> List[str]:
+        normalized_owner = str(owner or "").strip()
+        normalized_repo_name = str(repo_name or "").strip()
+        normalized_expected_sha = str(expected_head_sha or "").strip()
+
+        if not run:
+            return [
+                "最近流水线：尚未找到记录，可稍后打开 GitHub Actions 页面查看",
+            ]
+
+        run_head_sha = str(run.head_sha or "").strip()
+        if normalized_expected_sha and run_head_sha and run_head_sha != normalized_expected_sha:
+            return [
+                f"最近流水线：已找到 #{run.run_number or run.id}，但对应提交为 {run_head_sha[:7]}，当前推送提交为 {normalized_expected_sha[:7]}",
+                "说明：GitHub Actions 可能仍在排队创建这次推送对应的运行记录",
+                f"流水线详情：{run.html_url or self._github_actions_url(normalized_owner, normalized_repo_name)}",
+            ]
+
+        lines = self._format_workflow_run_lines(run)
+        if timed_out and str(run.status or "").strip().lower() != "completed":
+            lines.append("说明：已等待一段时间，但流水线仍在执行中")
+        return lines
+
     @staticmethod
     def _cloudflare_pages_public_url(project: CloudflarePagesProjectInfo) -> str:
         subdomain = str((project or CloudflarePagesProjectInfo(name="")).subdomain or "").strip()
@@ -5664,6 +5773,38 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 thinking_lines[index] = content
                 return
         thinking_lines.append(content)
+
+    @classmethod
+    def _append_runtime_detail_line(cls, thinking_lines: List[str], content: str) -> None:
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            return
+        if thinking_lines:
+            last_line = str(thinking_lines[-1] or "").strip()
+            base_last, count_last = cls._split_runtime_detail_repeat(last_line)
+            base_new, _count_new = cls._split_runtime_detail_repeat(normalized_content)
+            if base_last == base_new:
+                repeated_count = count_last + 1
+                thinking_lines[-1] = (
+                    f"{base_new} ×{repeated_count}"
+                    if repeated_count > 1
+                    else base_new
+                )
+                return
+        thinking_lines.append(normalized_content)
+
+    @staticmethod
+    def _split_runtime_detail_repeat(line: str) -> tuple[str, int]:
+        value = str(line or "").strip()
+        matched = re.match(r"^(.*?)(?:\s+×(\d+))?$", value)
+        if not matched:
+            return value, 1
+        base = str(matched.group(1) or "").strip()
+        try:
+            count = max(int(matched.group(2) or "1"), 1)
+        except ValueError:
+            count = 1
+        return base, count
 
     def _annotate_task_context_window(self, runtime_session_key: str, **extra) -> None:
         from src.core.task_registry import get_task_registry

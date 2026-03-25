@@ -3143,10 +3143,7 @@ class MessageDispatcher:
             if not response_url:
                 return False
 
-            confirmation_text = (
-                "任务已完成；如果上一个进度气泡没有及时刷新，请以本条为准。\n\n"
-                f"{content}"
-            )
+            confirmation_text = f"✅ 任务已完成，请以本条结果为准。\n\n{content}"
             sent = False
             try:
                 sent = await ProactiveReplyClient.send_markdown(response_url, confirmation_text)
@@ -3303,7 +3300,10 @@ class MessageDispatcher:
                         long_task_threshold > 0
                         and (time.monotonic() - float(state.get('started_at') or 0.0)) >= long_task_threshold
                     )
-                    if is_long_task or self._looks_like_running_status_preview(state['last_pushed_content']):
+                    if (
+                        not state['auto_handoff_done']
+                        and (is_long_task or self._looks_like_running_status_preview(state['last_pushed_content']))
+                    ):
                         await _maybe_send_completion_confirmation(final_content)
                 state['last_pushed_text'] = accumulated_text
                 state['last_pushed_content'] = final_content

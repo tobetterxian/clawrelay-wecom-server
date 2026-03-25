@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -20,6 +21,7 @@ from typing import Dict, Iterable, List, Optional
 from config.bot_config import BotConfig, BotConfigManager
 from src.core.base_orchestrator import BaseOrchestrator
 from src.core.codex_cli_orchestrator import CodexCliOrchestrator
+from src.utils.codex_app_server_compat import check_schema_contract
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,8 @@ class CodexCliRuntimeCheckResult:
     codex_home: str = ""
     codex_version: str = ""
     git_version: str = ""
+    compat_status: str = ""
+    compat_failures: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     orchestrator: Optional[BaseOrchestrator] = None
@@ -72,6 +76,12 @@ def run_codex_cli_startup_check(bot_config: BotConfig) -> CodexCliRuntimeCheckRe
         result.codex_version = codex_output
     else:
         result.errors.append(f"codex 自检失败：{codex_output}")
+
+    compat_ok, compat_failures = _run_schema_contract_check(resolved_executable)
+    result.compat_status = "ok" if compat_ok else "failed"
+    result.compat_failures.extend(compat_failures)
+    if not compat_ok:
+        result.errors.extend([f"app-server 协议兼容检查失败：{item}" for item in compat_failures])
 
     git_executable = shutil.which("git") or ""
     if git_executable:
@@ -143,9 +153,10 @@ def format_codex_cli_check_result(
     result: CodexCliRuntimeCheckResult,
     stage: str = "healthcheck",
 ) -> List[str]:
+    prefix = f"[CodexCLI] [{stage}]"
     lines = [
         (
-            f"[CodexCLI:{stage}] bot={result.bot_key} "
+            f"{prefix} bot={result.bot_key} "
             f"executable={result.executable or '-'} "
             f"working_dir={result.working_dir or '-'} "
             f"workspace_root={result.workspace_root or '-'} "
@@ -153,17 +164,24 @@ def format_codex_cli_check_result(
         )
     ]
     if result.resolved_executable:
-        lines.append(f"[CodexCLI:{stage}] resolved_executable={result.resolved_executable}")
+        lines.append(f"{prefix} resolved_executable={result.resolved_executable}")
     if result.codex_version:
-        lines.append(f"[CodexCLI:{stage}] codex_version={result.codex_version}")
+        lines.append(f"{prefix} codex_version={result.codex_version}")
+    if result.compat_status:
+        lines.append(
+            f"{prefix} compat_summary=status={result.compat_status}"
+            f"{'' if not result.compat_failures else f' failures={len(result.compat_failures)}'}"
+        )
     if result.git_version:
-        lines.append(f"[CodexCLI:{stage}] git_version={result.git_version}")
+        lines.append(f"{prefix} git_version={result.git_version}")
+    for item in result.compat_failures:
+        lines.append(f"{prefix} compat_failure: {item}")
     for warning in result.warnings:
-        lines.append(f"[CodexCLI:{stage}] warning: {warning}")
+        lines.append(f"{prefix} warning: {warning}")
     for error in result.errors:
-        lines.append(f"[CodexCLI:{stage}] error: {error}")
+        lines.append(f"{prefix} error: {error}")
     if not result.warnings and not result.errors:
-        lines.append(f"[CodexCLI:{stage}] status=ok")
+        lines.append(f"{prefix} status=ok")
     return lines
 
 
@@ -184,7 +202,7 @@ def run_codex_cli_healthcheck() -> int:
     config_manager = BotConfigManager()
     all_configs = config_manager.get_all_bots()
     if not all_configs:
-        print("[CodexCLI:healthcheck] error: 没有找到有效的机器人配置")
+        print("[CodexCLI] [healthcheck] error: 没有找到有效的机器人配置")
         return 1
 
     codex_bots = [
@@ -193,7 +211,7 @@ def run_codex_cli_healthcheck() -> int:
         if (bot_config.bot_type or "").strip() == "codex_cli"
     ]
     if not codex_bots:
-        print("[CodexCLI:healthcheck] status=ok no codex_cli bot configured")
+        print("[CodexCLI] [healthcheck] status=ok no codex_cli bot configured")
         return 0
 
     has_error = False
@@ -241,6 +259,49 @@ def _run_version_command(command: Iterable[str], timeout_seconds: int = 15) -> t
     if completed.returncode != 0:
         return False, first_line or f"exit_code={completed.returncode}"
     return True, first_line or "ok"
+
+
+def _run_schema_contract_check(
+    resolved_executable: str,
+    timeout_seconds: int = 30,
+) -> tuple[bool, List[str]]:
+    with tempfile.TemporaryDirectory(prefix="codex-app-schema-") as tmpdir:
+        schema_dir = Path(tmpdir).resolve()
+        command = [
+            resolved_executable,
+            "app-server",
+            "generate-json-schema",
+            "--out",
+            str(schema_dir),
+            "--experimental",
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        if completed.returncode != 0:
+            fallback_command = [
+                resolved_executable,
+                "app-server",
+                "generate-json-schema",
+                "--out",
+                str(schema_dir),
+            ]
+            completed = subprocess.run(
+                fallback_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        if completed.returncode != 0:
+            output = (completed.stdout or completed.stderr or "").strip()
+            return False, [output or "generate-json-schema 失败"]
+        failures = check_schema_contract(schema_dir)
+        return not failures, failures
 
 
 def _check_directory(

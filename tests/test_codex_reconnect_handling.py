@@ -33,13 +33,21 @@ from src.utils.path_utils import (
     resolve_local_path,
     resolve_workspace_root_with_legacy_fallback,
 )
+from src.utils.codex_app_server_compat import (
+    check_schema_contract,
+    diff_schema_dirs,
+)
 from src.core.workspace_init_modes import (
     WORKSPACE_INIT_EMPTY,
     WORKSPACE_INIT_GIT_REMOTE,
     WORKSPACE_INIT_LEGACY_COPY,
 )
 from src.core.workspace_manager import WorkspaceManager
-from src.utils.codex_cli_runtime_checks import run_codex_cli_startup_check
+from src.utils.codex_cli_runtime_checks import (
+    CodexCliRuntimeCheckResult,
+    format_codex_cli_check_result,
+    run_codex_cli_startup_check,
+)
 from src.utils.brochure_generation import rewrite_brochure_generation_request
 from src.utils.brochure_delegate import parse_brochure_delegate_request
 from src.utils.brochure_source_materials import load_brochure_source_materials
@@ -64,6 +72,14 @@ def test_detects_context_window_message():
     )
     assert CodexCliOrchestrator._is_context_window_message("ContextWindowExceeded")
     assert not CodexCliOrchestrator._is_context_window_message("Process exited")
+
+
+def test_agent_message_phase_classification():
+    assert CodexCliOrchestrator._is_commentary_agent_message_phase("commentary")
+    assert not CodexCliOrchestrator._is_commentary_agent_message_phase("final_answer")
+    assert CodexCliOrchestrator._is_final_agent_message_phase("")
+    assert CodexCliOrchestrator._is_final_agent_message_phase("final_answer")
+    assert not CodexCliOrchestrator._is_final_agent_message_phase("commentary")
 
 
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():
@@ -119,6 +135,48 @@ def test_resolve_workspace_root_with_legacy_fallback_prefers_legacy_state():
 
         assert resolved_root == legacy_root.resolve()
         assert source == "legacy_fallback"
+
+
+def test_check_schema_contract_reports_missing_required_patterns():
+    with TemporaryDirectory() as tmpdir:
+        schema_root = Path(tmpdir)
+        (schema_root / "v2").mkdir(parents=True)
+        (schema_root / "v2" / "ThreadStartResponse.json").write_text("{}", encoding="utf-8")
+        (schema_root / "ServerNotification.json").write_text("{}", encoding="utf-8")
+        failures = check_schema_contract(schema_root)
+        assert failures
+        assert any("thread/start 返回有效 model 字段" in item for item in failures)
+
+
+def test_diff_schema_dirs_reports_changed_files():
+    with TemporaryDirectory() as tmpdir:
+        baseline = Path(tmpdir) / "baseline"
+        candidate = Path(tmpdir) / "candidate"
+        baseline.mkdir()
+        candidate.mkdir()
+        (baseline / "a.json").write_text('{"a":1}', encoding="utf-8")
+        (candidate / "a.json").write_text('{"a":2}', encoding="utf-8")
+        changed = diff_schema_dirs(baseline, candidate)
+        assert changed == ["a.json"]
+
+
+def test_format_codex_cli_check_result_includes_version_and_compat_summary():
+    result = CodexCliRuntimeCheckResult(
+        bot_key="cx_bot",
+        executable="codex",
+        resolved_executable="/usr/bin/codex",
+        working_dir="/tmp/workspace",
+        workspace_root="/tmp/workspaces",
+        codex_home="/tmp/codex-home",
+        codex_version="codex-cli 0.116.0",
+        git_version="git version 2.45.0",
+        compat_status="ok",
+    )
+
+    lines = format_codex_cli_check_result(result, stage="startup")
+
+    assert any("codex_version=codex-cli 0.116.0" in line for line in lines)
+    assert any("compat_summary=status=ok" in line for line in lines)
 
 
 def test_normalizes_transient_reconnect_error_message():
