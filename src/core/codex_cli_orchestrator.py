@@ -1147,6 +1147,7 @@ class CodexCliOrchestrator(BaseOrchestrator):
         reconnect_retry_count = 0
         context_auto_resume_count = 0
         response_text = str(runtime_context.get("first_reply_guidance") or "").strip()
+        commentary_text = ""
         commands_seen: List[str] = []
         base_turn_inputs = list(inputs or [])
         turn_inputs = list(base_turn_inputs)
@@ -1174,7 +1175,11 @@ class CodexCliOrchestrator(BaseOrchestrator):
                 finished: bool = False,
                 allow_keepalive: bool = True,
             ) -> str:
-                display_text = response_text if override_text is None else override_text
+                display_text = self._select_runtime_display_text(
+                    response_text=response_text,
+                    commentary_text=commentary_text,
+                    override_text=override_text,
+                )
                 elapsed_seconds = self._runtime_elapsed_seconds(task_started_at)
                 live_status_mode = self._task_status_live_mode(effective_key)
                 rendered_thinking_lines = self._render_runtime_thinking_lines(
@@ -1362,8 +1367,12 @@ class CodexCliOrchestrator(BaseOrchestrator):
                         turn_progressed = True
                         if event.text:
                             if self._is_commentary_agent_message_phase(event.phase):
+                                if event.is_new_message and commentary_text.strip():
+                                    commentary_text += "\n\n"
+                                commentary_text += event.text
                                 await _emit_stream_update()
                                 continue
+                            commentary_text = ""
                             if event.is_new_message and response_text.strip():
                                 response_text += "\n\n"
                             response_text += event.text
@@ -1371,7 +1380,10 @@ class CodexCliOrchestrator(BaseOrchestrator):
                     elif isinstance(event, CodexInteractionRequest):
                         turn_progressed = True
                         visible_prompt = self._build_interaction_text_prompt(event)
-                        pending_text = response_text
+                        pending_text = self._select_runtime_display_text(
+                            response_text=response_text,
+                            commentary_text=commentary_text,
+                        )
                         if visible_prompt:
                             pending_text = pending_text.strip()
                             if pending_text:
@@ -1612,6 +1624,18 @@ class CodexCliOrchestrator(BaseOrchestrator):
     @staticmethod
     def _is_commentary_agent_message_phase(phase: str) -> bool:
         return str(phase or "").strip().lower() == "commentary"
+
+    @staticmethod
+    def _select_runtime_display_text(
+        response_text: str,
+        commentary_text: str = "",
+        override_text: Optional[str] = None,
+    ) -> str:
+        if override_text is not None:
+            return str(override_text or "")
+        if str(response_text or "").strip():
+            return str(response_text or "")
+        return str(commentary_text or "")
 
     @staticmethod
     def _is_final_agent_message_phase(phase: str) -> bool:

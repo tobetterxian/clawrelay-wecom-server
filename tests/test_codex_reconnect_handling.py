@@ -82,6 +82,31 @@ def test_agent_message_phase_classification():
     assert not CodexCliOrchestrator._is_final_agent_message_phase("commentary")
 
 
+def test_select_runtime_display_text_prefers_commentary_before_final_answer():
+    assert (
+        CodexCliOrchestrator._select_runtime_display_text(
+            response_text="",
+            commentary_text="先检查项目结构并读取关键文件。",
+        )
+        == "先检查项目结构并读取关键文件。"
+    )
+    assert (
+        CodexCliOrchestrator._select_runtime_display_text(
+            response_text="最终回复",
+            commentary_text="先检查项目结构并读取关键文件。",
+        )
+        == "最终回复"
+    )
+    assert (
+        CodexCliOrchestrator._select_runtime_display_text(
+            response_text="最终回复",
+            commentary_text="说明文本",
+            override_text="等待你的确认",
+        )
+        == "等待你的确认"
+    )
+
+
 def test_detects_inferred_context_window_exhaustion_from_usage_payload():
     assert CodexCliOrchestrator._looks_like_context_window_exhausted(
         {
